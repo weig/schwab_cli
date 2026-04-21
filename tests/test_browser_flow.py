@@ -427,7 +427,7 @@ def test_run_full_auth_holds_open_before_close_when_debug_set(monkeypatch):
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     run_full_auth(_cfg())
-    assert sleeps == [10]          # _DEBUG_HOLD_OPEN_SECONDS
+    assert sleeps == [60]          # _DEBUG_HOLD_OPEN_SECONDS
     assert browser.closed is True  # still closed after the hold
 
 
@@ -463,7 +463,7 @@ def test_run_full_auth_holds_open_on_failure_then_closes(monkeypatch):
 
     with pytest.raises(AuthError):
         run_full_auth(_cfg())
-    assert sleeps == [10]
+    assert sleeps == [60]
     assert browser.closed is True
 
 

@@ -47,7 +47,7 @@ By default, the OAuth browser runs **headless**. Set `DEBUG=1` (or `true` / `yes
 - Show the Chromium window
 - Slow down each Playwright action by 1 second so the flow is watchable
 - Emit `[debug] <step>` progress logs to stderr at each phase (navigating, waiting for login, filling credentials, consent, account selection, redirect capture)
-- Hold the browser open for 10 seconds after the flow ends (success or failure) so you can inspect the final page — press Ctrl+C during the hold to close immediately
+- Hold the browser open for 60 seconds after the flow ends (success or failure) so you can inspect the final page — press Ctrl+C during the hold to close immediately
 
 ```bash
 DEBUG=1 schwab_cli auth --force

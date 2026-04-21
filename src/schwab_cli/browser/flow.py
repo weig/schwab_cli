@@ -26,7 +26,7 @@ from schwab_cli.oauth import build_auth_url
 from schwab_cli.secrets import resolve_secret
 
 _DEBUG_SLOW_MO_MS = 1000
-_DEBUG_HOLD_OPEN_SECONDS = 10
+_DEBUG_HOLD_OPEN_SECONDS = 60
 
 
 class AuthError(Exception):
