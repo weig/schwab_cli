@@ -81,6 +81,33 @@ DEBUG=1 schwab_cli auth --force
 
 Debug logs never contain credentials, resolved secrets, tokens, or the auth code — only phase names. If Schwab changes their UI, update `src/schwab_cli/browser/selectors.py`.
 
+## Data commands
+
+Once authenticated, read-only data commands are available:
+
+```bash
+schwab_cli accounts                  # all accounts: number, type, liquidation value, cash, position count
+schwab_cli account 1234              # one account (suffix or full number)
+schwab_cli positions                 # positions across all accounts
+schwab_cli positions 5678            # positions for one account
+schwab_cli quote AAPL                # one quote
+schwab_cli quote AAPL MSFT NVDA      # multi-symbol quote
+```
+
+Output formats:
+
+```bash
+schwab_cli accounts --json           # JSON for scripting (| jq)
+schwab_cli accounts --md             # GitHub-flavored markdown for LLM context
+schwab_cli accounts                  # human-readable rich table (default)
+```
+
+`--json` and `--md` are mutually exclusive.
+
+The first HTTP 401 from Schwab's API triggers an automatic token refresh and a
+single retry — no user action needed as long as the 7-day refresh token is
+still valid. After it expires, re-run `schwab_cli auth --force`.
+
 ## Run tests
 
 ```bash
