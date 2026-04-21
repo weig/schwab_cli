@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the first milestone of the Schwab CLI — a `schwab_cli setup` interactive command that captures Schwab API credentials and optional auto-login credentials, persisting them to `~/.config/schwab_cli/config.json` with strict permissions.
+**Goal:** Build the first milestone of the Schwab CLI — a `schwab_cli setup` interactive command that captures Schwab API credentials (`client_id`, `client_secret`, `redirect_uri`) and optional auto-login credentials, persisting them to `~/.config/schwab_cli/config.json` with strict permissions.
 
 **Architecture:** Python 3.11+ package using `typer` for the CLI and frozen dataclasses for config. CLI layer (`cli.py`, `commands/setup.py`) is kept thin; all I/O and data logic lives in `config.py` so it can be unit-tested without the CLI runner. Packaged with `uv` and `pyproject.toml`; installs as a console script `schwab_cli` and is also invocable via `python -m schwab_cli`.
 
@@ -1299,3 +1299,111 @@ git status
 git add -A
 git commit -m "chore: polish after verification"
 ```
+
+---
+
+## Task 13: Add required `redirect_uri` field (addendum)
+
+Added after initial implementation was complete. Schwab OAuth requires a registered redirect URI; the CLI needs to capture and persist it alongside `client_id` and `client_secret`.
+
+**Files:**
+- Modify: `src/schwab_cli/config.py`
+- Modify: `src/schwab_cli/commands/setup.py`
+- Modify: `tests/test_config.py`
+- Modify: `tests/test_setup.py`
+
+**Design changes:**
+- `Config` gains a required `redirect_uri: str` field (non-sensitive, stored plain, placed after `client_secret`).
+- `_REQUIRED_FIELDS` in `config.py` gains `"redirect_uri"`.
+- `save()` always serializes `redirect_uri`; `load()` raises `ConfigError` when missing.
+- `setup` prompts for `redirect_uri` after `client_secret`, before the auto-login confirm. Existing value shown as default; empty response re-prompts when no existing value.
+
+- [ ] **Step 13.1: Update `Config` in `src/schwab_cli/config.py`**
+
+Add `redirect_uri: str` as the third required positional field:
+
+```python
+@dataclass(frozen=True)
+class Config:
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+    username: str | None = None
+    password: str | None = None
+    version: int = 1
+
+    @property
+    def auto_login_enabled(self) -> bool:
+        return self.username is not None and self.password is not None
+```
+
+- [ ] **Step 13.2: Update `_REQUIRED_FIELDS` and `load()` in `src/schwab_cli/config.py`**
+
+```python
+_REQUIRED_FIELDS = ("client_id", "client_secret", "redirect_uri")
+```
+
+Inside `load()`, pass `redirect_uri=raw["redirect_uri"]` when constructing the `Config`.
+
+- [ ] **Step 13.3: Update `save()` in `src/schwab_cli/config.py`**
+
+Include `redirect_uri` in the payload dict (always, not conditional):
+
+```python
+payload: dict = {
+    "version": cfg.version,
+    "client_id": cfg.client_id,
+    "client_secret": cfg.client_secret,
+    "redirect_uri": cfg.redirect_uri,
+}
+```
+
+- [ ] **Step 13.4: Update every `Config(...)` construction in `tests/test_config.py`**
+
+All existing tests that instantiate `Config(client_id=..., client_secret=...)` need `redirect_uri="https://127.0.0.1:8443"` (or any valid URL string). Every test that writes a JSON config fixture needs `"redirect_uri": "https://127.0.0.1:8443"` added. Add a new test:
+
+```python
+def test_load_raises_on_missing_redirect_uri(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write_config(tmp_path, {
+        "version": 1,
+        "client_id": "cid",
+        "client_secret": "csec",
+    })
+    with pytest.raises(ConfigError, match="redirect_uri"):
+        load()
+```
+
+- [ ] **Step 13.5: Update `setup` command in `src/schwab_cli/commands/setup.py`**
+
+After the `client_secret` prompt and before the auto-login confirm, add:
+
+```python
+redirect_uri = _prompt_value(
+    "Redirect URI",
+    existing.redirect_uri if existing else None,
+    sensitive=False,
+)
+```
+
+Pass `redirect_uri=redirect_uri` to the `Config(...)` constructor.
+
+- [ ] **Step 13.6: Update tests in `tests/test_setup.py`**
+
+All `runner.invoke` inputs gain a redirect_uri line between the client_secret and the auto-login y/n. All `Config(...)` literals in assertions gain `redirect_uri="https://127.0.0.1:8443"`. All `save_cfg(Config(...))` seeds gain the same.
+
+- [ ] **Step 13.7: Run full suite**
+
+```bash
+cd /Users/weig/Projects/finance/schwab_cli && uv run pytest -v
+```
+
+All tests should pass. Coverage should remain ≥80% on both `config.py` and `setup.py`.
+
+- [ ] **Step 13.8: Commit**
+
+```bash
+cd /Users/weig/Projects/finance/schwab_cli && git add -A && git commit -m "feat(config): add required redirect_uri field"
+```
+

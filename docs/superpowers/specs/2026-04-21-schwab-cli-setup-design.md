@@ -6,7 +6,7 @@
 
 ## Goal
 
-Provide a `schwab_cli setup` interactive command that captures the user's Schwab API credentials (`client_id`, `client_secret`) and optional auto-login credentials (`username`, `password`), and persists them to `~/.config/schwab_cli/config.json` with strict file permissions.
+Provide a `schwab_cli setup` interactive command that captures the user's Schwab API credentials (`client_id`, `client_secret`, `redirect_uri`) and optional auto-login credentials (`username`, `password`), and persists them to `~/.config/schwab_cli/config.json` with strict file permissions.
 
 The command is idempotent: re-running it shows current values as defaults so the user can press Enter to keep them or type new values.
 
@@ -77,6 +77,7 @@ File: `~/.config/schwab_cli/config.json`
   "version": 1,
   "client_id": "ABCD1234...",
   "client_secret": "xyz...",
+  "redirect_uri": "https://127.0.0.1:8443",
   "username": "user@example.com",
   "password": "op://Personal/Schwab/password"
 }
@@ -87,6 +88,7 @@ Field rules:
 - `version` (int, required) — schema version. Always `1` for this milestone. A future version mismatch causes setup to refuse to overwrite without an explicit upgrade path.
 - `client_id` (string, required) — Schwab API client ID.
 - `client_secret` (string, required) — Schwab API client secret.
+- `redirect_uri` (string, required) — OAuth redirect URI registered in the Schwab developer portal. Stored plain (not sensitive).
 - `username` (string, optional) — Schwab login username (or `op://...` reference).
 - `password` (string, optional) — Schwab login password (or `op://...` reference).
 - Both `username` and `password` present → auto-login enabled.
@@ -108,6 +110,7 @@ from dataclasses import dataclass
 class Config:
     client_id: str
     client_secret: str
+    redirect_uri: str
     username: str | None = None
     password: str | None = None
     version: int = 1
@@ -126,18 +129,19 @@ class Config:
 2. Print header: "Schwab CLI Setup" + the config path being written.
 3. Prompt: client_id      [default: existing or empty]
 4. Prompt: client_secret  [default: masked existing (e.g. "****3xyz") or empty]
-5. Confirm: "Enable automatic login? [Y/n]"
+5. Prompt: redirect_uri   [default: existing or empty]
+6. Confirm: "Enable automatic login? [Y/n]"
        default = True if existing config has BOTH username and password set, else False
-6. If yes:
+7. If yes:
        Prompt: username  [default: existing or empty]
        Prompt: password  [default: masked existing or empty]
                          hint: "supports op:// 1Password references"
    If no:
        username = None, password = None
-7. Build new Config(...).
-8. Write atomically: write to <path>.tmp, chmod 0600, rename to <path>.
+8. Build new Config(...).
+9. Write atomically: write to <path>.tmp, chmod 0600, rename to <path>.
        (mkdir -p the parent with 0700 if missing.)
-9. Print summary: "Saved to <path>. Auto-login: enabled/disabled."
+10. Print summary: "Saved to <path>. Auto-login: enabled/disabled."
 ```
 
 UX details:
