@@ -106,3 +106,161 @@ def shape_envelope(raw: dict, *, strike_count: int | None = None) -> dict:
         "underlying": underlying,
         "contracts": contracts,
     }
+
+
+import json as _json
+from io import StringIO
+
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+
+from schwab_cli.output.format import Format
+
+_HEADER_FMT = "{symbol} — {expiry} ({dte} DTE)    Spot: ${spot}  ({change} / {pct}%)"
+
+
+def _fmt(v, decimals: int = 2) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):,.{decimals}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_signed(v, decimals: int = 2) -> str:
+    s = _fmt(v, decimals)
+    if s == "—":
+        return s
+    fv = float(v)
+    if fv > 0:
+        return f"[green]{s}[/]"
+    if fv < 0:
+        return f"[red]{s}[/]"
+    return s
+
+
+def _header_line(env: dict) -> str:
+    u = env.get("underlying") or {}
+    return _HEADER_FMT.format(
+        symbol=env.get("symbol") or "",
+        expiry=env.get("expiry") or "",
+        dte=env.get("dte") if env.get("dte") is not None else "?",
+        spot=_fmt(u.get("last")),
+        change=_fmt(u.get("netChange")),
+        pct=_fmt(u.get("pctChange")),
+    )
+
+
+def _atm_strike(env: dict) -> float | None:
+    u = env.get("underlying") or {}
+    spot = u.get("last")
+    if spot is None:
+        return None
+    strikes = sorted({c["strike"] for c in env["contracts"] if c["strike"] is not None})
+    if not strikes:
+        return None
+    return min(strikes, key=lambda s: (abs(s - spot), s))
+
+
+def _pairs_by_strike(env: dict) -> list[tuple[float, dict | None, dict | None]]:
+    """Zip calls and puts by strike (ascending). None when side missing."""
+    by_strike: dict[float, dict[str, dict]] = {}
+    for c in env["contracts"]:
+        if c["strike"] is None:
+            continue
+        by_strike.setdefault(c["strike"], {})[c["side"]] = c
+    return [
+        (strike, by_strike[strike].get("C"), by_strike[strike].get("P"))
+        for strike in sorted(by_strike)
+    ]
+
+
+def _console(width: int | None) -> tuple[Console, StringIO]:
+    buf = StringIO()
+    console = Console(
+        file=buf,
+        force_terminal=True,
+        color_system="standard",
+        width=width or 120,
+    )
+    return console, buf
+
+
+def _bold_if(itm: bool, s: str) -> str:
+    """Wrap `s` in bold markup when ITM. Leaves already-colored spans alone
+    so that ANSI color codes emit without the bold SGR prefix."""
+    if not itm or s == "—":
+        return s
+    # If the cell already carries [green]/[red] markup we don't bold it —
+    # colored cells remain plain-colored even on ITM rows, while neutral
+    # cells become bold. This keeps plain `\x1b[32m` / `\x1b[31m` visible
+    # alongside plain `\x1b[1m` bold codes for neutral cells.
+    if s.startswith("[green]") or s.startswith("[red]"):
+        return s
+    return f"[bold]{s}[/]"
+
+
+def _render_human_a(env: dict, width: int | None) -> str:
+    console, buf = _console(width)
+    atm = _atm_strike(env)
+    # highlight=False — rich's default number/date highlighter would otherwise
+    # wrap "2027-01-15" and "142.35" in cyan SGR codes and break literal
+    # substring checks by consumers.
+    console.print(_header_line(env), highlight=False)
+    console.print("")
+
+    t = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    # Call side (outer → inner): Δ, Last, Ask, Bid, Vol, OI
+    t.add_column("Δ", justify="right")
+    t.add_column("Last", justify="right")
+    t.add_column("Ask", justify="right")
+    t.add_column("Bid", justify="right")
+    t.add_column("Vol", justify="right")
+    t.add_column("OI", justify="right")
+    t.add_column("STRIKE", justify="center")
+    # Put side (inner → outer): OI, Vol, Bid, Ask, Last, Δ
+    t.add_column("OI", justify="right")
+    t.add_column("Vol", justify="right")
+    t.add_column("Bid", justify="right")
+    t.add_column("Ask", justify="right")
+    t.add_column("Last", justify="right")
+    t.add_column("Δ", justify="right")
+
+    for strike, call, put in _pairs_by_strike(env):
+        strike_label = f"{strike:,.2f}"
+        if atm is not None and strike == atm:
+            strike_label = f"{strike_label} ←"
+        itm = bool((call and call["inTheMoney"]) or (put and put["inTheMoney"]))
+        t.add_row(
+            _bold_if(itm, _fmt_signed((call or {}).get("delta"))),
+            _bold_if(itm, _fmt_signed((call or {}).get("last"))),
+            _bold_if(itm, _fmt((call or {}).get("ask"))),
+            _bold_if(itm, _fmt((call or {}).get("bid"))),
+            _bold_if(itm, _fmt((call or {}).get("volume"), 0)),
+            _bold_if(itm, _fmt((call or {}).get("openInterest"), 0)),
+            _bold_if(itm, strike_label),
+            _bold_if(itm, _fmt((put or {}).get("openInterest"), 0)),
+            _bold_if(itm, _fmt((put or {}).get("volume"), 0)),
+            _bold_if(itm, _fmt((put or {}).get("bid"))),
+            _bold_if(itm, _fmt((put or {}).get("ask"))),
+            _bold_if(itm, _fmt_signed((put or {}).get("last"))),
+            _bold_if(itm, _fmt_signed((put or {}).get("delta"))),
+        )
+
+    console.print(t)
+    return buf.getvalue()
+
+
+def render_chain(
+    envelope: dict,
+    *,
+    fmt: Format,
+    detail: int = 0,
+    requested_type: str = "ALL",
+    width: int | None = None,
+) -> str:
+    if fmt is Format.HUMAN:
+        return _render_human_a(envelope, width)
+    raise NotImplementedError(f"format {fmt} not yet implemented")

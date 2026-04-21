@@ -161,3 +161,53 @@ def test_shape_envelope_trim_with_count_exceeding_available_keeps_all():
     env = shape_envelope(_RAW_MULTI_STRIKE, strike_count=99)
     # Only 3 strikes exist in fixture — keep all 3 (6 contracts: 3 calls + 3 puts).
     assert len(env["contracts"]) == 6
+
+
+from schwab_cli.output.chains import render_chain
+from schwab_cli.output.format import Format
+
+
+def _envelope():
+    return shape_envelope(_RAW_MULTI_STRIKE)
+
+
+def test_render_chain_human_a_has_header():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=0,
+                       requested_type="ALL", width=160)
+    assert "NVDA" in out
+    assert "2027-01-15" in out
+    assert "632" in out  # DTE
+    assert "142.35" in out  # spot
+
+
+def test_render_chain_human_a_has_strike_column_centered():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=0,
+                       requested_type="ALL", width=160)
+    assert "STRIKE" in out
+    # Strikes present
+    assert "135.00" in out
+    assert "140.00" in out
+    assert "145.00" in out
+
+
+def test_render_chain_human_a_marks_atm_row():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=0,
+                       requested_type="ALL", width=160)
+    # Spot is 142.35; closest strike is 140.00 (140 vs 145: |142.35-140|=2.35 < |142.35-145|=2.65)
+    # The ATM marker `←` appears in the output.
+    assert "←" in out
+
+
+def test_render_chain_human_a_emits_ansi_color():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=0,
+                       requested_type="ALL", width=160)
+    # Positive delta (call) shows green; negative (put) shows red.
+    assert "\x1b[32m" in out  # green
+    assert "\x1b[31m" in out  # red
+
+
+def test_render_chain_human_a_bolds_itm_rows():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=0,
+                       requested_type="ALL", width=160)
+    # At least one ITM row exists → bold ANSI present.
+    assert "\x1b[1m" in out
