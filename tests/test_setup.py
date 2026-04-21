@@ -84,3 +84,14 @@ def test_rerun_disabling_auto_login_removes_credentials(monkeypatch, tmp_path):
     assert cfg.username is None
     assert cfg.password is None
     assert cfg.auto_login_enabled is False
+
+
+def test_fresh_setup_reprompts_on_empty_client_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    # First: empty client_id (should re-prompt), then valid one, client_secret, decline auto.
+    result = runner.invoke(app, ["setup"], input="\ncid_value\ncsec_value\nn\n")
+    assert result.exit_code == 0, result.output
+    assert "Client ID is required" in result.output
+    cfg = load()
+    assert cfg.client_id == "cid_value"
