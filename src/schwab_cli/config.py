@@ -70,6 +70,45 @@ def load() -> Config | None:
     )
 
 
+def save(cfg: Config) -> None:
+    """Persist a Config to disk atomically with strict permissions.
+
+    Writes to a temp file in the same directory, chmods it 0600, then
+    atomically renames it over the target. If the rename fails, cleans up
+    the temp file and leaves any prior config untouched.
+    """
+    path = config_path()
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    # Only set 0700 when we just created it; don't re-tighten an existing dir.
+    try:
+        parent.chmod(0o700)
+    except OSError:
+        pass  # best effort; don't block save if chmod is not permitted
+    payload: dict = {
+        "version": cfg.version,
+        "client_id": cfg.client_id,
+        "client_secret": cfg.client_secret,
+    }
+    if cfg.username is not None:
+        payload["username"] = cfg.username
+    if cfg.password is not None:
+        payload["password"] = cfg.password
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    try:
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+    except OSError:
+        # Clean up temp file so we don't leave stragglers.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def mask_secret(value: str) -> str:
     """Mask all but the last 4 characters.
 

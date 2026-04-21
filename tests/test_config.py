@@ -165,3 +165,86 @@ def test_load_raises_when_root_is_not_a_dict(monkeypatch, tmp_path):
     (cfg_dir / "config.json").write_text("[1, 2, 3]")
     with pytest.raises(ConfigError, match="expected object at top level"):
         load()
+
+
+import os
+import stat
+
+from schwab_cli.config import save
+
+
+def _mode(path):
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_save_writes_file_with_mode_0600(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cfg = Config(client_id="cid", client_secret="csec")
+    save(cfg)
+    file = tmp_path / ".config" / "schwab_cli" / "config.json"
+    assert file.exists()
+    assert _mode(file) == 0o600
+
+
+def test_save_creates_parent_dir_with_mode_0700(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    save(Config(client_id="cid", client_secret="csec"))
+    parent = tmp_path / ".config" / "schwab_cli"
+    assert _mode(parent) == 0o700
+
+
+def test_save_round_trips_through_load(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    original = Config(
+        client_id="cid",
+        client_secret="csec",
+        username="u",
+        password="op://Personal/Schwab/password",
+    )
+    save(original)
+    assert load() == original
+
+
+def test_save_omits_none_username_and_password(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    save(Config(client_id="cid", client_secret="csec"))
+    raw = json.loads((tmp_path / ".config" / "schwab_cli" / "config.json").read_text())
+    assert "username" not in raw
+    assert "password" not in raw
+
+
+def test_save_disabling_auto_login_removes_prior_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    save(Config(client_id="cid", client_secret="csec", username="u", password="p"))
+    save(Config(client_id="cid", client_secret="csec"))  # disables auto-login
+    raw = json.loads((tmp_path / ".config" / "schwab_cli" / "config.json").read_text())
+    assert "username" not in raw
+    assert "password" not in raw
+
+
+def test_save_is_atomic_on_rename_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    # First write establishes a known-good file.
+    original = Config(client_id="orig_id", client_secret="orig_secret")
+    save(original)
+    original_bytes = (tmp_path / ".config" / "schwab_cli" / "config.json").read_bytes()
+
+    # Break os.replace to simulate a crash between temp-write and rename.
+    def boom(*args, **kwargs):
+        raise OSError("simulated failure")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        save(Config(client_id="new_id", client_secret="new_secret"))
+
+    # Original file untouched.
+    assert (tmp_path / ".config" / "schwab_cli" / "config.json").read_bytes() == original_bytes
+    # No stray .tmp left behind.
+    strays = list((tmp_path / ".config" / "schwab_cli").glob("*.tmp"))
+    assert strays == []
