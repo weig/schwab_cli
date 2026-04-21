@@ -204,20 +204,42 @@ def _dump_page(
     _debug_log(f"dumped page source → {path}")
 
 
+def _user_data_dir() -> Path:
+    """Persistent Chromium profile dir.
+
+    Survives across runs so Schwab's Trust Device cookie persists, removing
+    the need for MFA approval on every auth invocation.
+    """
+    return config_path().parent / "chromium"
+
+
 def _launch_browser(headless: bool, slow_mo_ms: int = 0):  # pragma: no cover
-    """Real Playwright launch. Pulled out so tests can monkeypatch this single seam."""
+    """Launch Chromium with a persistent context.
+
+    Returns a `BrowserContext` (not a `Browser`); call sites use `.new_page()`
+    / `.add_init_script()` / `.close()` exactly the same way. Persistent state
+    is saved at `~/.config/schwab_cli/chromium/` so cookies, local storage and
+    the Trust Device cookie survive across runs.
+    """
     from playwright.sync_api import sync_playwright
 
+    user_data_dir = _user_data_dir()
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        user_data_dir.chmod(0o700)
+    except OSError:
+        pass
+
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(
+    context = pw.chromium.launch_persistent_context(
+        user_data_dir=str(user_data_dir),
         headless=headless,
         slow_mo=slow_mo_ms,
         args=list(_STEALTH_LAUNCH_ARGS),
+        user_agent=_STEALTH_USER_AGENT,
     )
-    # Stash the playwright handle on the browser so we can stop it on close.
-    browser._pw = pw  # type: ignore[attr-defined]
 
-    original_close = browser.close
+    original_close = context.close
 
     def close_with_pw():
         try:
@@ -225,8 +247,8 @@ def _launch_browser(headless: bool, slow_mo_ms: int = 0):  # pragma: no cover
         finally:
             pw.stop()
 
-    browser.close = close_with_pw  # type: ignore[method-assign]
-    return browser
+    context.close = close_with_pw  # type: ignore[method-assign]
+    return context
 
 
 def run_full_auth(cfg: Config) -> str:
@@ -244,10 +266,11 @@ def run_full_auth(cfg: Config) -> str:
     slow_mo_ms = _DEBUG_SLOW_MO_MS if debug else 0
 
     _debug_log(
-        f"launching chromium (headless={headless}, slow_mo={slow_mo_ms}ms)"
+        f"launching chromium (headless={headless}, slow_mo={slow_mo_ms}ms, "
+        f"profile={_user_data_dir()})"
     )
     try:
-        browser = _launch_browser(headless, slow_mo_ms=slow_mo_ms)
+        context = _launch_browser(headless, slow_mo_ms=slow_mo_ms)
     except Exception as e:
         msg = str(e)
         if "Executable doesn't exist" in msg or "playwright install" in msg.lower():
@@ -272,8 +295,8 @@ def run_full_auth(cfg: Config) -> str:
         )
 
     try:
-        page = browser.new_page(user_agent=_STEALTH_USER_AGENT)
-        page.add_init_script(_STEALTH_INIT_SCRIPT)
+        context.add_init_script(_STEALTH_INIT_SCRIPT)
+        page = context.new_page()
         auth_url = build_auth_url(cfg)
         _debug_log(f"navigating to auth URL: {auth_url}")
         page.goto(auth_url)
@@ -407,6 +430,6 @@ def run_full_auth(cfg: Config) -> str:
             except KeyboardInterrupt:
                 _debug_log("hold interrupted; closing browser")
         try:
-            browser.close()
+            context.close()
         except Exception:  # pragma: no cover
             pass

@@ -51,6 +51,12 @@ The flow also handles Schwab's MFA when it shows. After login, if Schwab present
 
 If the device is already trusted, the MFA and/or trust steps are skipped automatically.
 
+**Persistent browser profile.** Auth uses a persistent Chromium profile at `~/.config/schwab_cli/chromium/` (mode `0700`) so cookies — including Schwab's Trust Device cookie — survive across runs. The first successful auth that goes through MFA + "trust this device" should be the only one that needs the phone-tap; subsequent runs reuse the trust cookie and skip MFA entirely. To force a fresh device (e.g., after revoking trust on Schwab's side), delete the directory:
+
+```bash
+rm -rf ~/.config/schwab_cli/chromium
+```
+
 By default, the OAuth browser runs **headless**. Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to:
 
 - Show the Chromium window

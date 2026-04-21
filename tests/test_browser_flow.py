@@ -195,14 +195,25 @@ class _FakeFoundLocator:
 
 
 class FakeBrowser:
+    """Stand-in for a Playwright BrowserContext (now persistent).
+
+    `add_init_script` is on the context (applies to all pages); `new_page`
+    takes no kwargs in the real Playwright persistent-context API since
+    user_agent / viewport are set at context construction time.
+    """
+
     def __init__(self, page):
         self._page = page
         self.closed = False
         self.new_page_kwargs: list[dict] = []
+        self.init_scripts: list[str] = []
 
     def new_page(self, **kwargs):
         self.new_page_kwargs.append(kwargs)
         return self._page
+
+    def add_init_script(self, script: str) -> None:
+        self.init_scripts.append(script)
 
     def close(self):
         self.closed = True
@@ -510,23 +521,33 @@ def test_run_full_auth_holds_open_on_failure_then_closes(monkeypatch):
     assert browser.closed is True
 
 
+def test_user_data_dir_is_under_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    from schwab_cli.browser.flow import _user_data_dir
+
+    expected = tmp_path / ".config" / "schwab_cli" / "chromium"
+    assert _user_data_dir() == expected
+
+
 def test_run_full_auth_applies_stealth_measures(monkeypatch):
-    """Browser is launched with realistic UA, and navigator.webdriver init script
-    is injected before navigation — hides the three most obvious Playwright tells."""
+    """navigator.webdriver init script injected on the persistent context before
+    any page opens. (UA + launch args live inside the real _launch_browser,
+    which is mocked here — verified separately via the module-level constants.)"""
+    from schwab_cli.browser.flow import _STEALTH_USER_AGENT
+
     monkeypatch.delenv("DEBUG", raising=False)
-    page, browser = _happy_page_and_browser()
+    _, browser = _happy_page_and_browser()
     monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     run_full_auth(_cfg())
 
-    # new_page called with a non-headless UA string (no "HeadlessChrome")
-    assert len(browser.new_page_kwargs) == 1
-    ua = browser.new_page_kwargs[0].get("user_agent", "")
-    assert "Chrome/" in ua
-    assert "HeadlessChrome" not in ua
-    # Init script injected that removes navigator.webdriver
-    assert page.init_scripts and any("webdriver" in s for s in page.init_scripts)
+    # Stealth UA string has no "HeadlessChrome" and looks like real Chrome.
+    assert "Chrome/" in _STEALTH_USER_AGENT
+    assert "HeadlessChrome" not in _STEALTH_USER_AGENT
+    # Init script injected on the context removes navigator.webdriver.
+    assert browser.init_scripts and any("webdriver" in s for s in browser.init_scripts)
 
 
 def test_run_full_auth_hold_open_interrupted_by_ctrl_c(monkeypatch):
