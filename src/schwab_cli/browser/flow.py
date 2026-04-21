@@ -39,11 +39,10 @@ from schwab_cli.secrets import resolve_secret
 _DEBUG_SLOW_MO_MS = 1000
 _DEBUG_HOLD_OPEN_SECONDS = 60
 
-# Stealth: bypass Schwab's anti-bot detection. Manual stealth (just removing
-# navigator.webdriver) wasn't enough — Schwab's server accepted the credentials
-# but silently no-op'd the browser-side response. playwright-stealth patches
-# ~20 fingerprint surfaces (navigator.plugins, webgl, sec-ch-ua, chrome.runtime,
-# etc.) and that's what gets the form submit through cleanly.
+# Empirically tested: GPU/window/ANGLE launch args do NOT bypass Akamai's
+# edge block in headless mode (it's a TLS/HTTP-2 fingerprint check that
+# returns "Access Denied" before any page renders). Keeping just the minimal
+# arg that helps in NON-headless mode where stealth scripts can run.
 _STEALTH_LAUNCH_ARGS = ("--disable-blink-features=AutomationControlled",)
 
 
