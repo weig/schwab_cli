@@ -117,7 +117,7 @@ def shape_envelope(raw: dict, *, strike_count: int | None = None) -> dict:
 _HEADER_FMT = "{symbol} — {expiry} ({dte} DTE)    Spot: ${spot}  ({change} / {pct}%)"
 
 
-def _fmt(v, decimals: int = 2) -> str:
+def _fmt(v: Any, decimals: int = 2) -> str:
     if v is None:
         return "—"
     try:
@@ -126,11 +126,14 @@ def _fmt(v, decimals: int = 2) -> str:
         return "—"
 
 
-def _fmt_signed(v, decimals: int = 2) -> str:
-    s = _fmt(v, decimals)
-    if s == "—":
-        return s
-    fv = float(v)
+def _fmt_signed(v: Any, decimals: int = 2) -> str:
+    if v is None:
+        return "—"
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    s = f"{fv:,.{decimals}f}"
     if fv > 0:
         return f"[green]{s}[/]"
     if fv < 0:
@@ -162,7 +165,13 @@ def _atm_strike(env: dict) -> float | None:
 
 
 def _pairs_by_strike(env: dict) -> list[tuple[float, dict | None, dict | None]]:
-    """Zip calls and puts by strike (ascending). None when side missing."""
+    """Zip calls and puts by strike (ascending). `None` when one side missing.
+
+    Precondition: the envelope has at most one contract per (strike, side)
+    pair — Schwab's /chains response guarantees this when `strategy=SINGLE`
+    and a single expiry window is passed. A later-arriving duplicate silently
+    overwrites the earlier one.
+    """
     by_strike: dict[float, dict[str, dict]] = {}
     for c in env["contracts"]:
         if c["strike"] is None:
@@ -186,15 +195,11 @@ def _console(width: int | None) -> tuple[Console, StringIO]:
 
 
 def _bold_if(itm: bool, s: str) -> str:
-    """Wrap `s` in bold markup when ITM. Leaves already-colored spans alone
-    so that ANSI color codes emit without the bold SGR prefix."""
+    """Bold the cell only when the strike row is ITM and the cell has no
+    existing Rich markup. Leaves `"—"` unchanged (bold em-dash looks odd)."""
     if not itm or s == "—":
         return s
-    # If the cell already carries [green]/[red] markup we don't bold it —
-    # colored cells remain plain-colored even on ITM rows, while neutral
-    # cells become bold. This keeps plain `\x1b[32m` / `\x1b[31m` visible
-    # alongside plain `\x1b[1m` bold codes for neutral cells.
-    if s.startswith("[green]") or s.startswith("[red]"):
+    if s.startswith("[") and not s.startswith("[bold]"):
         return s
     return f"[bold]{s}[/]"
 

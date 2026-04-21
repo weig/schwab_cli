@@ -1,4 +1,5 @@
-from schwab_cli.output.chains import shape_envelope
+from schwab_cli.output.chains import render_chain, shape_envelope
+from schwab_cli.output.format import Format
 
 
 _RAW_MULTI_STRIKE = {
@@ -163,10 +164,6 @@ def test_shape_envelope_trim_with_count_exceeding_available_keeps_all():
     assert len(env["contracts"]) == 6
 
 
-from schwab_cli.output.chains import render_chain
-from schwab_cli.output.format import Format
-
-
 def _envelope():
     return shape_envelope(_RAW_MULTI_STRIKE)
 
@@ -211,3 +208,49 @@ def test_render_chain_human_a_bolds_itm_rows():
                        requested_type="ALL", width=160)
     # At least one ITM row exists → bold ANSI present.
     assert "\x1b[1m" in out
+
+
+def test_render_chain_human_a_non_itm_strike_row_not_bold():
+    # Fixture contains strikes where BOTH sides are OTM (ITM is union false).
+    raw = {
+        "symbol": "NVDA",
+        "underlying": {"last": 100.0, "change": 0, "percentChange": 0},
+        "callExpDateMap": {
+            "2027-01-15:100": {
+                "120.0": [{
+                    "putCall": "CALL", "symbol": "C120",
+                    "strikePrice": 120.0, "inTheMoney": False,
+                    "bid": 1.0, "ask": 1.1, "last": 1.05,
+                    "delta": 0.2, "expirationDate": "2027-01-15",
+                    "daysToExpiration": 100,
+                }],
+            },
+        },
+        "putExpDateMap": {
+            "2027-01-15:100": {
+                "120.0": [{
+                    "putCall": "PUT", "symbol": "P120",
+                    "strikePrice": 120.0, "inTheMoney": True,  # put is ITM at 120 when spot=100
+                    "bid": 20.0, "ask": 20.2, "last": 20.1,
+                    "delta": -0.8, "expirationDate": "2027-01-15",
+                    "daysToExpiration": 100,
+                }],
+                "80.0": [{
+                    "putCall": "PUT", "symbol": "P80",
+                    "strikePrice": 80.0, "inTheMoney": False,  # both sides OTM at 80 when spot=100
+                    "bid": 0.1, "ask": 0.15, "last": 0.12,
+                    "delta": -0.05, "expirationDate": "2027-01-15",
+                    "daysToExpiration": 100,
+                }],
+            },
+        },
+    }
+    env = shape_envelope(raw)
+    out = render_chain(env, fmt=Format.HUMAN, detail=0,
+                       requested_type="ALL", width=160)
+    # The 80.0 strike row has call=None (no call at 80) and put=OTM — no ITM.
+    # Its strike label should not have the bold ANSI adjacent to it.
+    # Easiest check: the row for strike 80.00 exists and does NOT have
+    # the bold-strike-label `[bold]80.00[/]` → no `\x1b[1m80.00` substring.
+    assert "80.00" in out
+    assert "\x1b[1m80.00" not in out
