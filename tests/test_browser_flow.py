@@ -296,3 +296,37 @@ def test_run_full_auth_chromium_missing_message(monkeypatch):
 
     with pytest.raises(AuthError, match="playwright install chromium"):
         run_full_auth(_cfg())
+
+
+def test_run_full_auth_redirect_timeout(monkeypatch):
+    """wait_for_url raises TimeoutError → AuthError('Redirect didn't happen')."""
+    page = FullFakePage(
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": True,
+            "text=Select accounts": True,
+            "text=You will now be redirected": True,
+        },
+        final_redirect_url=None,  # wait_for_url will raise TimeoutError
+        checkboxes=[FakeCheckbox()],
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="Redirect didn't happen"):
+        run_full_auth(_cfg())
+    assert browser.closed is True
+
+
+def test_run_full_auth_generic_launch_failure(monkeypatch):
+    """_launch_browser raises with a non-Chromium-specific message → generic AuthError."""
+
+    def boom(headless):
+        raise RuntimeError("some unexpected failure")
+
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", boom)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="Failed to launch browser"):
+        run_full_auth(_cfg())

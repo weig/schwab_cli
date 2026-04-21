@@ -80,7 +80,7 @@ def wait_any(
             raise AuthError(_UI_CHANGED_MESSAGE)
 
 
-def _launch_browser(headless: bool):
+def _launch_browser(headless: bool):  # pragma: no cover
     """Real Playwright launch. Pulled out so tests can monkeypatch this single seam."""
     from playwright.sync_api import sync_playwright
 
@@ -192,5 +192,5 @@ def run_full_auth(cfg: Config) -> str:
     finally:
         try:
             browser.close()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass
