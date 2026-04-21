@@ -699,6 +699,38 @@ def test_run_full_auth_dumps_page_source_when_debug_set(monkeypatch, tmp_path):
     assert any("confirm" in n for n in names)
 
 
+def test_run_full_auth_dumps_failure_page_when_wait_raises(monkeypatch, tmp_path):
+    """A failure inside any wait_* must still produce a dump so the user can
+    inspect what Schwab was showing. Previously we only dumped AFTER each
+    successful transition, so failed waits left nothing to debug from."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda _s: None)
+
+    # Force an error at the post-login wait: consent + mfa both absent and
+    # the INVALID_CREDENTIALS marker visible in page content.
+    page = FullFakePage(
+        content_sequence=["", "Invalid login ID or password."],
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": False,
+            "text=Verify your identity": False,
+        },
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError):
+        run_full_auth(_cfg())
+
+    dump_files = list((tmp_path / ".config" / "schwab_cli" / "auth-debug").glob("**/*.html"))
+    assert dump_files, "no dumps written — failure path should still dump"
+    names = [p.name for p in dump_files]
+    assert any("failure" in n for n in names), f"expected a 'failure' dump, got {names}"
+
+
 def test_run_full_auth_no_dumps_when_debug_unset(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)

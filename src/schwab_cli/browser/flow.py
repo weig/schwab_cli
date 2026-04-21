@@ -294,6 +294,7 @@ def run_full_auth(cfg: Config) -> str:
             secrets=secrets_to_redact,
         )
 
+    page = None
     try:
         context.add_init_script(_STEALTH_INIT_SCRIPT)
         page = context.new_page()
@@ -419,6 +420,12 @@ def run_full_auth(cfg: Config) -> str:
             raise AuthError("Redirect reached but no `code` param present.")
         _debug_log("authorization code captured")
         return code
+    except Exception:
+        # Always capture the current page so the user can see exactly what
+        # Schwab was showing when we failed — selectors can be tuned from it.
+        if page is not None:
+            dump("failure")
+        raise
     finally:
         if debug:
             _debug_log(
