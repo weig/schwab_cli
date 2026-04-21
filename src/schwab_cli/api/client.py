@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -20,6 +21,14 @@ class SessionExpired(ApiError):
     """
 
 
+@dataclass(frozen=True)
+class AccountIds:
+    """User-facing account_number <-> Schwab hashValue."""
+
+    account_number: str
+    hash_value: str
+
+
 class SchwabClient:
     """Minimal auth-aware HTTP client for Schwab REST APIs.
 
@@ -27,9 +36,12 @@ class SchwabClient:
     mapping of HTTP / network errors to `ApiError` / `SessionExpired`.
     """
 
+    TRADER_BASE = "https://api.schwabapi.com/trader/v1"
+
     def __init__(self, cfg: Config, session: Session) -> None:
         self._cfg = cfg
         self._session = session
+        self._account_ids_cache: list[AccountIds] | None = None
 
     @property
     def session(self) -> Session:
@@ -77,3 +89,31 @@ class SchwabClient:
             ) from e
         self._session = Session.from_token_response(tr, now=int(time.time()))
         save_session(self._session)
+
+    def _load_account_ids(self) -> list[AccountIds]:
+        if self._account_ids_cache is None:
+            raw = self.get(f"{self.TRADER_BASE}/accounts/accountNumbers")
+            self._account_ids_cache = [
+                AccountIds(account_number=item["accountNumber"], hash_value=item["hashValue"])
+                for item in raw
+            ]
+        return self._account_ids_cache
+
+    def resolve_account(self, user_input: str) -> AccountIds:
+        """Match user input against account_number (exact or suffix).
+
+        Raises ApiError on 0 matches ("not found") or 2+ matches ("Multiple accounts match").
+        """
+        ids = self._load_account_ids()
+        matches = [i for i in ids if i.account_number == user_input or i.account_number.endswith(user_input)]
+        if not matches:
+            available = ", ".join(f"...{i.account_number[-4:]}" for i in ids)
+            raise ApiError(
+                f"Account {user_input!r} not found. Available: {available}."
+            )
+        if len(matches) > 1:
+            listing = ", ".join(m.account_number for m in matches)
+            raise ApiError(
+                f"Multiple accounts match {user_input!r}: {listing}. Specify more digits."
+            )
+        return matches[0]

@@ -133,3 +133,68 @@ def test_401_twice_after_refresh_raises_session_expired(tmp_path, monkeypatch):
     client = SchwabClient(_cfg(), _session())
     with pytest.raises(SessionExpired):
         client.get("https://api.schwabapi.com/trader/v1/accounts")
+
+
+@respx.mock
+def test_resolve_account_exact_match():
+    respx.get("https://api.schwabapi.com/trader/v1/accounts/accountNumbers").mock(
+        return_value=httpx.Response(200, json=[
+            {"accountNumber": "12345678", "hashValue": "HASH_A"},
+            {"accountNumber": "87654321", "hashValue": "HASH_B"},
+        ]),
+    )
+    client = SchwabClient(_cfg(), _session())
+    ids = client.resolve_account("12345678")
+    assert ids.account_number == "12345678"
+    assert ids.hash_value == "HASH_A"
+
+
+@respx.mock
+def test_resolve_account_by_suffix():
+    respx.get("https://api.schwabapi.com/trader/v1/accounts/accountNumbers").mock(
+        return_value=httpx.Response(200, json=[
+            {"accountNumber": "12345678", "hashValue": "HASH_A"},
+            {"accountNumber": "87654321", "hashValue": "HASH_B"},
+        ]),
+    )
+    client = SchwabClient(_cfg(), _session())
+    ids = client.resolve_account("5678")
+    assert ids.account_number == "12345678"
+
+
+@respx.mock
+def test_resolve_account_ambiguous_raises():
+    respx.get("https://api.schwabapi.com/trader/v1/accounts/accountNumbers").mock(
+        return_value=httpx.Response(200, json=[
+            {"accountNumber": "11115678", "hashValue": "HASH_A"},
+            {"accountNumber": "22225678", "hashValue": "HASH_B"},
+        ]),
+    )
+    client = SchwabClient(_cfg(), _session())
+    with pytest.raises(ApiError, match="Multiple accounts match"):
+        client.resolve_account("5678")
+
+
+@respx.mock
+def test_resolve_account_unknown_raises():
+    respx.get("https://api.schwabapi.com/trader/v1/accounts/accountNumbers").mock(
+        return_value=httpx.Response(200, json=[
+            {"accountNumber": "12345678", "hashValue": "HASH_A"},
+        ]),
+    )
+    client = SchwabClient(_cfg(), _session())
+    with pytest.raises(ApiError, match="not found"):
+        client.resolve_account("99999999")
+
+
+@respx.mock
+def test_resolve_account_caches_result():
+    route = respx.get("https://api.schwabapi.com/trader/v1/accounts/accountNumbers").mock(
+        return_value=httpx.Response(200, json=[
+            {"accountNumber": "12345678", "hashValue": "HASH_A"},
+        ]),
+    )
+    client = SchwabClient(_cfg(), _session())
+    client.resolve_account("12345678")
+    client.resolve_account("5678")
+    assert route.call_count == 1  # second call used the cache
