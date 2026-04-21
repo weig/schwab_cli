@@ -542,6 +542,100 @@ def _render_human_b_inline(env: dict, width: int | None) -> str:
     return buf.getvalue()
 
 
+_MD_COLS_DETAIL_0 = [
+    ("Symbol", "optionSymbol"),
+    ("Side", "side"),
+    ("Strike", "strike"),
+    ("Bid", "bid"),
+    ("Ask", "ask"),
+    ("Last", "last"),
+    ("Δ", "delta"),
+]
+_MD_COLS_DETAIL_1 = _MD_COLS_DETAIL_0 + [
+    ("IV", "iv"),
+    ("Γ", "gamma"),
+    ("Θ", "theta"),
+    ("𝒱", "vega"),
+    ("Vol", "volume"),
+    ("OI", "openInterest"),
+]
+_MD_DETAIL_SUB_COLS = [
+    ("Mark", "mark"),
+    ("L.Sz", "lastSize"),
+    ("B.Sz", "bidSize"),
+    ("A.Sz", "askSize"),
+    ("Open", "open"),
+    ("High", "high"),
+    ("Low", "low"),
+    ("Close", "close"),
+    ("ρ", "rho"),
+    ("TimeVal", "timeValue"),
+    ("Intrinsic", "intrinsic"),
+]
+
+
+def _md_cell(value: Any, key: str) -> str:
+    if key in ("volume", "openInterest", "lastSize", "bidSize", "askSize", "multiplier"):
+        return _fmt(value, 0)
+    if key in ("iv", "delta", "gamma", "theta", "vega", "rho"):
+        return _fmt(value, 3)
+    if key in ("side", "optionSymbol", "settlementType"):
+        return str(value) if value is not None else "—"
+    return _fmt(value)
+
+
+def _md_table(
+    columns: list[tuple[str, str]],
+    rows: list[dict],
+    *,
+    bold_keys_when_itm: set[str] | None = None,
+) -> str:
+    bold_keys_when_itm = bold_keys_when_itm or set()
+    header = "| " + " | ".join(h for h, _ in columns) + " |"
+    sep = "|" + "|".join(["---"] * len(columns)) + "|"
+    out_lines = [header, sep]
+    for r in rows:
+        cells: list[str] = []
+        itm = bool(r.get("inTheMoney"))
+        for _, key in columns:
+            raw = _md_cell(r.get(key), key)
+            if itm and key in bold_keys_when_itm:
+                raw = f"**{raw}**"
+            cells.append(raw)
+        out_lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out_lines)
+
+
+def _md_header(env: dict) -> str:
+    u = env.get("underlying") or {}
+    return (
+        f"# {env.get('symbol') or ''} — {env.get('expiry') or ''} "
+        f"({env.get('dte') if env.get('dte') is not None else '?'} DTE)\n\n"
+        f"**Spot:** ${_fmt(u.get('last'))} "
+        f"({_fmt(u.get('netChange'))} / {_fmt(u.get('pctChange'))}%)\n\n"
+    )
+
+
+def _render_md(env: dict, detail: int) -> str:
+    cols = _MD_COLS_DETAIL_1 if detail >= 1 else _MD_COLS_DETAIL_0
+    out = _md_header(env)
+    out += _md_table(
+        cols, env["contracts"],
+        bold_keys_when_itm={"optionSymbol", "strike"},
+    )
+    out += "\n"
+    if detail >= 2:
+        for c in env["contracts"]:
+            settle = _settlement_label(c.get("settlementType"))
+            header = f"> **Details — {c['optionSymbol']}**"
+            if settle:
+                header += f" (Settle: {settle})"
+            out += "\n" + header + "\n>\n"
+            sub = _md_table(_MD_DETAIL_SUB_COLS, [c])
+            out += "\n".join(f"> {line}" for line in sub.splitlines()) + "\n"
+    return out
+
+
 def render_chain(
     envelope: dict,
     *,
@@ -552,6 +646,8 @@ def render_chain(
 ) -> str:
     if fmt is Format.JSON:
         return _render_json(envelope, detail)
+    if fmt is Format.MD:
+        return _render_md(envelope, detail)
     if fmt is Format.HUMAN:
         if detail >= 2:
             return _render_human_b_inline(envelope, width)

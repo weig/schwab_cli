@@ -445,3 +445,47 @@ def test_render_chain_json_nan_iv_serialized_as_null():
     call_145 = next(r for r in data["contracts"]
                     if r["side"] == "C" and r["strike"] == 145.0)
     assert call_145["iv"] is None
+
+
+def test_render_chain_md_detail0_has_header_and_table():
+    out = render_chain(_envelope(), fmt=Format.MD, detail=0,
+                       requested_type="ALL")
+    lines = out.splitlines()
+    assert lines[0].startswith("# NVDA")
+    assert "2027-01-15" in lines[0]
+    assert "**Spot:**" in out
+    # Table header row
+    assert "| Symbol | Side | Strike |" in out
+
+
+def test_render_chain_md_detail0_itm_symbol_and_strike_bolded():
+    out = render_chain(_envelope(), fmt=Format.MD, detail=0,
+                       requested_type="ALL")
+    # ITM call at strike 135 → both cells bolded
+    assert "**NVDA  270115C00135000**" in out
+    assert "| **135.00** |" in out
+
+
+def test_render_chain_md_detail2_includes_details_subtable():
+    out = render_chain(_envelope(), fmt=Format.MD, detail=2,
+                       requested_type="ALL")
+    # Blockquoted details heading with Settle suffix
+    assert "> **Details — NVDA  270115C00135000** (Settle: PM)" in out
+    # Sub-table header
+    assert "| Mark | L.Sz | B.Sz | A.Sz |" in out
+
+
+def test_render_chain_md_detail1_adds_greeks_columns():
+    out = render_chain(_envelope(), fmt=Format.MD, detail=1,
+                       requested_type="ALL")
+    header_line = next(ln for ln in out.splitlines() if ln.startswith("| Symbol"))
+    assert "IV" in header_line
+    assert "Δ" in header_line
+    assert "Γ" in header_line
+
+
+def test_render_chain_md_no_ansi_codes():
+    for d in (0, 1, 2):
+        out = render_chain(_envelope(), fmt=Format.MD, detail=d,
+                           requested_type="ALL")
+        assert "\x1b[" not in out
