@@ -386,3 +386,62 @@ def test_render_chain_wide_width_keeps_all_columns(capsys):
                  requested_type="ALL", width=200)
     err = capsys.readouterr().err
     assert "too narrow" not in err
+
+
+import json as _json_test
+
+
+def test_render_chain_json_detail0_fields():
+    out = render_chain(_envelope(), fmt=Format.JSON, detail=0,
+                       requested_type="ALL")
+    data = _json_test.loads(out)
+    assert data["symbol"] == "NVDA"
+    assert data["expiry"] == "2027-01-15"
+    row = data["contracts"][0]
+    assert set(["optionSymbol", "side", "strike", "bid", "ask", "last", "delta"]).issubset(row)
+    # detail=0 excludes greeks beyond delta and vol/OI/etc.
+    assert "iv" not in row
+    assert "gamma" not in row
+    assert "volume" not in row
+
+
+def test_render_chain_json_detail1_adds_greeks_and_vol():
+    out = render_chain(_envelope(), fmt=Format.JSON, detail=1,
+                       requested_type="ALL")
+    data = _json_test.loads(out)
+    row = data["contracts"][0]
+    for key in ["iv", "gamma", "theta", "vega", "volume", "openInterest"]:
+        assert key in row
+    # detail=2-only fields absent
+    assert "mark" not in row
+    assert "rho" not in row
+
+
+def test_render_chain_json_detail2_has_all_fields():
+    out = render_chain(_envelope(), fmt=Format.JSON, detail=2,
+                       requested_type="ALL")
+    data = _json_test.loads(out)
+    row = data["contracts"][0]
+    for key in [
+        "mark", "bidSize", "askSize", "lastSize",
+        "open", "high", "low", "close",
+        "rho", "timeValue", "intrinsic",
+        "inTheMoney", "multiplier", "settlementType",
+    ]:
+        assert key in row
+
+
+def test_render_chain_json_no_ansi_codes():
+    for d in (0, 1, 2):
+        out = render_chain(_envelope(), fmt=Format.JSON, detail=d,
+                           requested_type="ALL")
+        assert "\x1b[" not in out
+
+
+def test_render_chain_json_nan_iv_serialized_as_null():
+    out = render_chain(_envelope(), fmt=Format.JSON, detail=1,
+                       requested_type="ALL")
+    data = _json_test.loads(out)
+    call_145 = next(r for r in data["contracts"]
+                    if r["side"] == "C" and r["strike"] == 145.0)
+    assert call_145["iv"] is None

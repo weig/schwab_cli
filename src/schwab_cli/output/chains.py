@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 import math
 from io import StringIO
 from typing import Any, Literal
@@ -250,6 +251,42 @@ def _layout_a_kept(width: int) -> tuple[set[str], list[str]]:
 # Layout B: one row per contract. Required: Symbol/Side/Strike/Bid/Ask/Last.
 # Optional columns drop from the right (OI first, then Vol, 𝒱, Θ, Γ, IV, Δ).
 _B_OPTIONAL_COLS_RIGHT_TO_LEFT = ["OI", "Vol", "𝒱", "Θ", "Γ", "IV", "Δ"]
+
+
+# JSON field matrix — field set expands with --detail level.
+_FIELDS_DETAIL_0 = ["optionSymbol", "side", "strike", "bid", "ask", "last", "delta"]
+_FIELDS_DETAIL_1_EXTRA = ["iv", "gamma", "theta", "vega", "volume", "openInterest"]
+_FIELDS_DETAIL_2_EXTRA = [
+    "mark", "bidSize", "askSize", "lastSize",
+    "open", "high", "low", "close",
+    "rho", "timeValue", "intrinsic",
+    "inTheMoney", "multiplier", "settlementType",
+]
+
+
+def _fields_for_detail(detail: int) -> list[str]:
+    fields = list(_FIELDS_DETAIL_0)
+    if detail >= 1:
+        fields += _FIELDS_DETAIL_1_EXTRA
+    if detail >= 2:
+        fields += _FIELDS_DETAIL_2_EXTRA
+    return fields
+
+
+def _render_json(env: dict, detail: int) -> str:
+    fields = _fields_for_detail(detail)
+    contracts = [
+        {k: c.get(k) for k in fields}
+        for c in env["contracts"]
+    ]
+    out = {
+        "symbol": env.get("symbol"),
+        "expiry": env.get("expiry"),
+        "dte": env.get("dte"),
+        "underlying": env.get("underlying"),
+        "contracts": contracts,
+    }
+    return _json.dumps(out, indent=2)
 
 
 def _layout_b_kept(width: int) -> tuple[set[str], list[str]]:
@@ -513,6 +550,8 @@ def render_chain(
     requested_type: str = "ALL",
     width: int | None = None,
 ) -> str:
+    if fmt is Format.JSON:
+        return _render_json(envelope, detail)
     if fmt is Format.HUMAN:
         if detail >= 2:
             return _render_human_b_inline(envelope, width)
