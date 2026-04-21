@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
+import httpx
+
 from schwab_cli.config import Config
 
 AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize"
@@ -37,3 +39,32 @@ def build_auth_url(cfg: Config) -> str:
         "client_id": cfg.client_id,
         "redirect_uri": cfg.redirect_uri,
     })
+
+
+def exchange_code(cfg: Config, code: str) -> TokenResponse:
+    resp = httpx.post(
+        TOKEN_URL,
+        auth=(cfg.client_id, cfg.client_secret),
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": cfg.redirect_uri,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return TokenResponse.parse(resp.json())
+
+
+def refresh(cfg: Config, refresh_token: str) -> TokenResponse:
+    resp = httpx.post(
+        TOKEN_URL,
+        auth=(cfg.client_id, cfg.client_secret),
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return TokenResponse.parse(resp.json())
