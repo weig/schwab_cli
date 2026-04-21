@@ -17,18 +17,18 @@ def _run(inputs, monkeypatch, tmp_path):
 
 
 def test_fresh_setup_without_auto_login(monkeypatch, tmp_path):
-    # client_id, client_secret, decline auto-login
-    result = _run("cid_value\ncsec_value\nn\n", monkeypatch, tmp_path)
+    # client_id, client_secret, redirect_uri, decline auto-login
+    result = _run("cid_value\ncsec_value\nhttps://127.0.0.1:8443\nn\n", monkeypatch, tmp_path)
     assert result.exit_code == 0, result.output
     cfg = load()
-    assert cfg == Config(client_id="cid_value", client_secret="csec_value")
+    assert cfg == Config(client_id="cid_value", client_secret="csec_value", redirect_uri="https://127.0.0.1:8443")
     assert not cfg.auto_login_enabled
 
 
 def test_fresh_setup_with_auto_login(monkeypatch, tmp_path):
-    # client_id, client_secret, accept auto-login, username, password
+    # client_id, client_secret, redirect_uri, accept auto-login, username, password
     result = _run(
-        "cid_value\ncsec_value\ny\nuser@example.com\nop://Personal/Schwab/password\n",
+        "cid_value\ncsec_value\nhttps://127.0.0.1:8443\ny\nuser@example.com\nop://Personal/Schwab/password\n",
         monkeypatch,
         tmp_path,
     )
@@ -37,6 +37,7 @@ def test_fresh_setup_with_auto_login(monkeypatch, tmp_path):
     assert cfg == Config(
         client_id="cid_value",
         client_secret="csec_value",
+        redirect_uri="https://127.0.0.1:8443",
         username="user@example.com",
         password="op://Personal/Schwab/password",
     )
@@ -50,17 +51,19 @@ def test_rerun_accepting_defaults_preserves_all_values(monkeypatch, tmp_path):
         Config(
             client_id="existing_id",
             client_secret="existing_secret_xyz",
+            redirect_uri="https://127.0.0.1:8443",
             username="existing_user",
             password="op://Personal/Schwab/password",
         )
     )
-    # Press Enter through every prompt: client_id, client_secret, auto-login confirm, username, password
-    result = runner.invoke(app, ["setup"], input="\n\n\n\n\n")
+    # Press Enter through every prompt: client_id, client_secret, redirect_uri, auto-login confirm, username, password
+    result = runner.invoke(app, ["setup"], input="\n\n\n\n\n\n")
     assert result.exit_code == 0, result.output
     cfg = load()
     assert cfg == Config(
         client_id="existing_id",
         client_secret="existing_secret_xyz",
+        redirect_uri="https://127.0.0.1:8443",
         username="existing_user",
         password="op://Personal/Schwab/password",
     )
@@ -73,12 +76,13 @@ def test_rerun_disabling_auto_login_removes_credentials(monkeypatch, tmp_path):
         Config(
             client_id="existing_id",
             client_secret="existing_secret",
+            redirect_uri="https://127.0.0.1:8443",
             username="existing_user",
             password="existing_pass",
         )
     )
-    # Enter for client_id, Enter for client_secret, 'n' to disable auto-login.
-    result = runner.invoke(app, ["setup"], input="\n\nn\n")
+    # Enter for client_id, Enter for client_secret, Enter for redirect_uri, 'n' to disable auto-login.
+    result = runner.invoke(app, ["setup"], input="\n\n\nn\n")
     assert result.exit_code == 0, result.output
     cfg = load()
     assert cfg.username is None
@@ -89,12 +93,13 @@ def test_rerun_disabling_auto_login_removes_credentials(monkeypatch, tmp_path):
 def test_fresh_setup_reprompts_on_empty_client_id(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    # First: empty client_id (should re-prompt), then valid one, client_secret, decline auto.
-    result = runner.invoke(app, ["setup"], input="\ncid_value\ncsec_value\nn\n")
+    # First: empty client_id (should re-prompt), then valid one, client_secret, redirect_uri, decline auto.
+    result = runner.invoke(app, ["setup"], input="\ncid_value\ncsec_value\nhttps://127.0.0.1:8443\nn\n")
     assert result.exit_code == 0, result.output
     assert "Client ID is required" in result.output
     cfg = load()
     assert cfg.client_id == "cid_value"
+    assert cfg.redirect_uri == "https://127.0.0.1:8443"
 
 
 def test_malformed_existing_config_decline_overwrite_leaves_file(monkeypatch, tmp_path):
@@ -118,8 +123,8 @@ def test_malformed_existing_config_accept_overwrite_writes_new(monkeypatch, tmp_
     cfg_dir.mkdir(parents=True)
     (cfg_dir / "config.json").write_text("{not valid")
 
-    # y = overwrite, then client_id, client_secret, decline auto-login
-    result = runner.invoke(app, ["setup"], input="y\ncid\ncsec\nn\n")
+    # y = overwrite, then client_id, client_secret, redirect_uri, decline auto-login
+    result = runner.invoke(app, ["setup"], input="y\ncid\ncsec\nhttps://127.0.0.1:8443\nn\n")
     assert result.exit_code == 0, result.output
     cfg = load()
-    assert cfg == Config(client_id="cid", client_secret="csec")
+    assert cfg == Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443")

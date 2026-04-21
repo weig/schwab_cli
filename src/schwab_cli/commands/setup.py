@@ -69,6 +69,11 @@ def _run() -> None:
         existing.client_secret if existing else None,
         sensitive=True,
     )
+    redirect_uri = _prompt_value(
+        "Redirect URI",
+        existing.redirect_uri if existing else None,
+        sensitive=False,
+    )
 
     auto_default = bool(existing and existing.auto_login_enabled)
     enable_auto = typer.confirm("Enable automatic login?", default=auto_default)
@@ -93,6 +98,7 @@ def _run() -> None:
     cfg = Config(
         client_id=client_id,
         client_secret=client_secret,
+        redirect_uri=redirect_uri,
         username=username,
         password=password,
     )

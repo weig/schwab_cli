@@ -20,6 +20,7 @@ def config_path() -> Path:
 class Config:
     client_id: str
     client_secret: str
+    redirect_uri: str
     username: str | None = None
     password: str | None = None
     version: int = 1
@@ -30,7 +31,7 @@ class Config:
 
 
 SUPPORTED_VERSION = 1
-_REQUIRED_FIELDS = ("client_id", "client_secret")
+_REQUIRED_FIELDS = ("client_id", "client_secret", "redirect_uri")
 
 
 class ConfigError(Exception):
@@ -64,6 +65,7 @@ def load() -> Config | None:
     return Config(
         client_id=raw["client_id"],
         client_secret=raw["client_secret"],
+        redirect_uri=raw["redirect_uri"],
         username=raw.get("username"),
         password=raw.get("password"),
         version=version,
@@ -88,6 +90,7 @@ def save(cfg: Config) -> None:
         "version": cfg.version,
         "client_id": cfg.client_id,
         "client_secret": cfg.client_secret,
+        "redirect_uri": cfg.redirect_uri,
     }
     if cfg.username is not None:
         payload["username"] = cfg.username

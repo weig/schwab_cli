@@ -6,23 +6,23 @@ from schwab_cli.config import Config
 
 
 def test_config_defaults_username_password_to_none():
-    cfg = Config(client_id="cid", client_secret="csec")
+    cfg = Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443")
     assert cfg.username is None
     assert cfg.password is None
     assert cfg.version == 1
 
 
 def test_config_is_frozen():
-    cfg = Config(client_id="cid", client_secret="csec")
+    cfg = Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443")
     with pytest.raises(Exception):
         cfg.client_id = "other"  # type: ignore[misc]
 
 
 def test_auto_login_enabled_requires_both_fields():
-    both = Config(client_id="cid", client_secret="csec", username="u", password="p")
-    only_user = Config(client_id="cid", client_secret="csec", username="u")
-    only_pass = Config(client_id="cid", client_secret="csec", password="p")
-    neither = Config(client_id="cid", client_secret="csec")
+    both = Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443", username="u", password="p")
+    only_user = Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443", username="u")
+    only_pass = Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443", password="p")
+    neither = Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443")
 
     assert both.auto_login_enabled is True
     assert only_user.auto_login_enabled is False
@@ -87,6 +87,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "client_secret": "csec",
+        "redirect_uri": "https://127.0.0.1:8443",
         "username": "u",
         "password": "op://Personal/Schwab/password",
     })
@@ -94,6 +95,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
     assert cfg == Config(
         client_id="cid",
         client_secret="csec",
+        redirect_uri="https://127.0.0.1:8443",
         username="u",
         password="op://Personal/Schwab/password",
     )
@@ -107,6 +109,7 @@ def test_load_parses_minimal_config_without_auto_login(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "client_secret": "csec",
+        "redirect_uri": "https://127.0.0.1:8443",
     })
     cfg = load()
     assert cfg.username is None
@@ -121,6 +124,7 @@ def test_load_ignores_unknown_fields(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "client_secret": "csec",
+        "redirect_uri": "https://127.0.0.1:8443",
         "future_field": "ignore me",
     })
     cfg = load()
@@ -144,6 +148,7 @@ def test_load_raises_on_unsupported_future_version(monkeypatch, tmp_path):
         "version": 999,
         "client_id": "cid",
         "client_secret": "csec",
+        "redirect_uri": "https://127.0.0.1:8443",
     })
     with pytest.raises(ConfigError, match="version"):
         load()
@@ -152,8 +157,24 @@ def test_load_raises_on_unsupported_future_version(monkeypatch, tmp_path):
 def test_load_raises_on_missing_required_field(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    _write_config(tmp_path, {"version": 1, "client_id": "cid"})  # no client_secret
+    _write_config(tmp_path, {
+        "version": 1,
+        "client_id": "cid",
+        "redirect_uri": "https://127.0.0.1:8443",
+    })  # no client_secret
     with pytest.raises(ConfigError, match="client_secret"):
+        load()
+
+
+def test_load_raises_on_missing_redirect_uri(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write_config(tmp_path, {
+        "version": 1,
+        "client_id": "cid",
+        "client_secret": "csec",
+    })
+    with pytest.raises(ConfigError, match="redirect_uri"):
         load()
 
 
@@ -180,7 +201,7 @@ def _mode(path):
 def test_save_writes_file_with_mode_0600(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    cfg = Config(client_id="cid", client_secret="csec")
+    cfg = Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443")
     save(cfg)
     file = tmp_path / ".config" / "schwab_cli" / "config.json"
     assert file.exists()
@@ -190,7 +211,7 @@ def test_save_writes_file_with_mode_0600(monkeypatch, tmp_path):
 def test_save_creates_parent_dir_with_mode_0700(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    save(Config(client_id="cid", client_secret="csec"))
+    save(Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443"))
     parent = tmp_path / ".config" / "schwab_cli"
     assert _mode(parent) == 0o700
 
@@ -201,6 +222,7 @@ def test_save_round_trips_through_load(monkeypatch, tmp_path):
     original = Config(
         client_id="cid",
         client_secret="csec",
+        redirect_uri="https://127.0.0.1:8443",
         username="u",
         password="op://Personal/Schwab/password",
     )
@@ -211,7 +233,7 @@ def test_save_round_trips_through_load(monkeypatch, tmp_path):
 def test_save_omits_none_username_and_password(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    save(Config(client_id="cid", client_secret="csec"))
+    save(Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443"))
     raw = json.loads((tmp_path / ".config" / "schwab_cli" / "config.json").read_text())
     assert "username" not in raw
     assert "password" not in raw
@@ -220,8 +242,8 @@ def test_save_omits_none_username_and_password(monkeypatch, tmp_path):
 def test_save_disabling_auto_login_removes_prior_credentials(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    save(Config(client_id="cid", client_secret="csec", username="u", password="p"))
-    save(Config(client_id="cid", client_secret="csec"))  # disables auto-login
+    save(Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443", username="u", password="p"))
+    save(Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443"))  # disables auto-login
     raw = json.loads((tmp_path / ".config" / "schwab_cli" / "config.json").read_text())
     assert "username" not in raw
     assert "password" not in raw
@@ -231,7 +253,7 @@ def test_save_is_atomic_on_rename_failure(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     # First write establishes a known-good file.
-    original = Config(client_id="orig_id", client_secret="orig_secret")
+    original = Config(client_id="orig_id", client_secret="orig_secret", redirect_uri="https://127.0.0.1:8443")
     save(original)
     original_bytes = (tmp_path / ".config" / "schwab_cli" / "config.json").read_bytes()
 
@@ -241,7 +263,7 @@ def test_save_is_atomic_on_rename_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(os, "replace", boom)
     with pytest.raises(OSError):
-        save(Config(client_id="new_id", client_secret="new_secret"))
+        save(Config(client_id="new_id", client_secret="new_secret", redirect_uri="https://127.0.0.1:8443"))
 
     # Original file untouched.
     assert (tmp_path / ".config" / "schwab_cli" / "config.json").read_bytes() == original_bytes
