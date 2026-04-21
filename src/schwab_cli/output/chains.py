@@ -195,11 +195,12 @@ def _console(width: int | None) -> tuple[Console, StringIO]:
 
 
 def _bold_if(itm: bool, s: str) -> str:
-    """Bold the cell only when the strike row is ITM and the cell has no
-    existing Rich markup. Leaves `"—"` unchanged (bold em-dash looks odd)."""
+    """Bold the cell when the strike row is ITM. Leaves `"—"` unchanged
+    (bold em-dash is visually noisy). Existing Rich markup is preserved by
+    nesting — `[bold][green]x[/][/]` renders as bold+green."""
     if not itm or s == "—":
         return s
-    if s.startswith("[") and not s.startswith("[bold]"):
+    if s.startswith("[bold]") or s.startswith("[bold "):
         return s
     return f"[bold]{s}[/]"
 
