@@ -85,3 +85,214 @@ def test_wait_any_known_marker_takes_precedence_over_selector():
             known_errors={"Invalid login ID or password.": "Login failed — incorrect username/password."},
             timeout_ms=200,
         )
+
+
+from urllib.parse import urlparse, parse_qs
+
+from schwab_cli.config import Config
+from schwab_cli.browser.flow import run_full_auth
+
+
+def _cfg():
+    return Config(
+        client_id="cid",
+        client_secret="csec",
+        redirect_uri="https://127.0.0.1:8443",
+        username="user@example.com",
+        password="op://X/Y/Z",
+    )
+
+
+class FakeCheckbox:
+    def __init__(self, checked: bool = False):
+        self._checked = checked
+
+    def is_checked(self) -> bool:
+        return self._checked
+
+    def check(self) -> None:
+        self._checked = True
+
+
+class FullFakePage(FakePage):
+    """FakePage extended for run_full_auth: scripts goto, fill, click, navigation, checkboxes."""
+
+    def __init__(self, **kwargs):
+        final_redirect_url = kwargs.pop("final_redirect_url", None)
+        checkboxes = kwargs.pop("checkboxes", [FakeCheckbox()])
+        super().__init__(**kwargs)
+        self.fills: list[tuple[str, str]] = []
+        self.clicks: list[str] = []
+        self.gotos: list[str] = []
+        self._final_redirect_url = final_redirect_url
+        self._checkboxes = checkboxes
+        self._closed = False
+
+    def goto(self, url: str) -> None:
+        self.gotos.append(url)
+
+    def fill(self, selector: str, value: str) -> None:
+        self.fills.append((selector, value))
+
+    def click(self, selector: str) -> None:
+        self.clicks.append(selector)
+
+    def query_selector_all(self, selector: str):
+        return list(self._checkboxes)
+
+    def evaluate(self, script: str) -> None:
+        # Used to scroll to bottom on consent page; no-op for tests.
+        pass
+
+    def wait_for_url(self, predicate, *, timeout: int) -> None:
+        if self._final_redirect_url and predicate(self._final_redirect_url):
+            self.url = self._final_redirect_url
+            return
+        raise TimeoutError("redirect did not happen")
+
+
+class FakeBrowser:
+    def __init__(self, page):
+        self._page = page
+        self.closed = False
+
+    def new_page(self):
+        return self._page
+
+    def close(self):
+        self.closed = True
+
+
+def _happy_browser(page):
+    return FakeBrowser(page)
+
+
+def test_run_full_auth_happy_path(monkeypatch):
+    page = FullFakePage(
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": True,
+            "text=Select accounts": True,
+            "text=You will now be redirected": True,
+        },
+        final_redirect_url="https://127.0.0.1:8443/?code=AUTH_CODE_123&session=abc",
+        checkboxes=[FakeCheckbox(False), FakeCheckbox(True)],
+    )
+    browser = _happy_browser(page)
+
+    monkeypatch.setattr(
+        "schwab_cli.browser.flow._launch_browser",
+        lambda headless: browser,
+    )
+    monkeypatch.setattr(
+        "schwab_cli.browser.flow.resolve_secret",
+        lambda v: f"resolved({v})",
+    )
+
+    code = run_full_auth(_cfg())
+
+    assert code == "AUTH_CODE_123"
+    assert browser.closed is True
+    assert page.gotos[0].startswith("https://api.schwabapi.com/v1/oauth/authorize?")
+    # Both username and password fields filled, with resolved (op://) values.
+    assert ("input#loginIdInput", "resolved(user@example.com)") in page.fills
+    assert ("input#passwordInput", "resolved(op://X/Y/Z)") in page.fills
+    # Both checkboxes ended up checked (one was already, one we toggled).
+    assert all(cb.is_checked() for cb in page._checkboxes)
+
+
+def test_run_full_auth_invalid_client_marker(monkeypatch):
+    page = FullFakePage(
+        content_sequence=['{"error": "invalid_client"}'],
+        selectors_present={"input#loginIdInput": False},
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="rejected client_id/secret"):
+        run_full_auth(_cfg())
+    assert browser.closed is True
+
+
+def test_run_full_auth_bad_credentials(monkeypatch):
+    page = FullFakePage(
+        # First content() check (after goto) returns empty, allowing login page.
+        # Second content() check (after click login) finds the credentials error.
+        content_sequence=["", "Invalid login ID or password."],
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": False,
+        },
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="incorrect username/password"):
+        run_full_auth(_cfg())
+    assert browser.closed is True
+
+
+def test_run_full_auth_redirect_uri_mismatch(monkeypatch):
+    page = FullFakePage(
+        content_sequence=["", "We are unable to complete your request."],
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": False,
+        },
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="Redirect URI mismatch"):
+        run_full_auth(_cfg())
+
+
+def test_run_full_auth_no_accounts(monkeypatch):
+    page = FullFakePage(
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": True,
+            "text=Select accounts": True,
+        },
+        checkboxes=[],  # no accounts shown
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="No accounts available"):
+        run_full_auth(_cfg())
+    assert browser.closed is True
+
+
+def test_run_full_auth_redirect_without_code(monkeypatch):
+    page = FullFakePage(
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": True,
+            "text=Select accounts": True,
+            "text=You will now be redirected": True,
+        },
+        final_redirect_url="https://127.0.0.1:8443/?session=abc",  # no code
+        checkboxes=[FakeCheckbox()],
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="no `code` param"):
+        run_full_auth(_cfg())
+
+
+def test_run_full_auth_chromium_missing_message(monkeypatch):
+    def boom(headless):
+        raise RuntimeError("Executable doesn't exist at .../chromium")
+
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", boom)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="playwright install chromium"):
+        run_full_auth(_cfg())
