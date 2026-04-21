@@ -36,6 +36,21 @@ def _fmt_money(v) -> str:
         return "—"
 
 
+def _pnl_cell(v) -> str:
+    if v is None:
+        return "—"
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    formatted = f"{fv:,.2f}"
+    if fv > 0:
+        return f"[green]{formatted}[/]"
+    if fv < 0:
+        return f"[red]{formatted}[/]"
+    return formatted
+
+
 def render_accounts(raw_list: list[dict], fmt: Format) -> str:
     rows = [_shape_account(a) for a in raw_list]
     if fmt is Format.JSON:
@@ -150,9 +165,11 @@ def render_positions(rows: list[dict], fmt: Format) -> str:
                 f"{_fmt_money(r['dayPnL'])} | {_fmt_money(r['totalPnL'])} |"
             )
         return "\n".join(lines) + "\n"
-    # HUMAN
+    # HUMAN — color P&L cells (green positive, red negative)
     buf = StringIO()
-    console = Console(file=buf, force_terminal=False, no_color=True, width=120)
+    console = Console(
+        file=buf, force_terminal=True, color_system="standard", width=120
+    )
     t = Table(title="Positions")
     t.add_column("Account")
     t.add_column("Symbol", style="bold")
@@ -168,8 +185,8 @@ def render_positions(rows: list[dict], fmt: Format) -> str:
             f"{r['qty']}",
             _fmt_money(r["avgPrice"]),
             _fmt_money(r["marketValue"]),
-            _fmt_money(r["dayPnL"]),
-            _fmt_money(r["totalPnL"]),
+            _pnl_cell(r["dayPnL"]),
+            _pnl_cell(r["totalPnL"]),
         )
     console.print(t)
     return buf.getvalue()

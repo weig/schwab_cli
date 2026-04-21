@@ -148,3 +148,21 @@ def test_render_positions_human_has_rows():
     assert "AAPL" in out
     assert "MSFT" in out
     assert "200.00" in out  # avg price formatting
+
+
+def test_render_positions_human_colors_pnl_by_sign():
+    # AAPL: day P&L +4.20, total +321.40 → green
+    # MSFT: day P&L -10.00, total +50.00 → red + green
+    out = render_positions(_POSITION_ROWS, Format.HUMAN)
+    assert "\x1b[32m" in out  # standard ANSI green for positive P&L
+    assert "\x1b[31m" in out  # standard ANSI red for negative P&L
+
+
+def test_render_positions_md_has_no_ansi_codes():
+    out = render_positions(_POSITION_ROWS, Format.MD)
+    assert "\x1b[" not in out  # MD stays plain for piping
+
+
+def test_render_positions_json_has_no_ansi_codes():
+    out = render_positions(_POSITION_ROWS, Format.JSON)
+    assert "\x1b[" not in out
