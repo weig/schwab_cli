@@ -19,9 +19,9 @@ from schwab_cli.browser.selectors import (
     LOGIN_SUBMIT_SELECTOR,
     LOGIN_USERNAME_SELECTOR,
     REDIRECT_URI_MISMATCH_TEXT,
-    _is_debug_truthy,
 )
 from schwab_cli.config import Config
+from schwab_cli.utils import _is_debug_truthy
 from schwab_cli.oauth import build_auth_url
 from schwab_cli.secrets import resolve_secret
 

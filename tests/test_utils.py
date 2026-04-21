@@ -1,6 +1,6 @@
 import pytest
 
-from schwab_cli.browser.selectors import _is_debug_truthy, _summarize_error
+from schwab_cli.utils import _is_debug_truthy, _summarize_error
 
 
 @pytest.mark.parametrize("value", ["true", "True", "TRUE", "yes", "Yes", "1"])

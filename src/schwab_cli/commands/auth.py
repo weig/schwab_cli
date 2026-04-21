@@ -9,7 +9,7 @@ import typer
 from schwab_cli import config as config_module
 from schwab_cli import oauth
 from schwab_cli.browser.flow import AuthError, run_full_auth
-from schwab_cli.browser.selectors import _summarize_error
+from schwab_cli.utils import _summarize_error
 from schwab_cli.secrets import SecretError
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
