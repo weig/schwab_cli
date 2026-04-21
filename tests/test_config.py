@@ -26,3 +26,19 @@ def test_auto_login_enabled_requires_both_fields():
     assert only_user.auto_login_enabled is False
     assert only_pass.auto_login_enabled is False
     assert neither.auto_login_enabled is False
+
+
+from schwab_cli.config import mask_secret
+
+
+def test_mask_secret_long_string_shows_last_four():
+    assert mask_secret("abc123xyz") == "*****3xyz"
+
+
+def test_mask_secret_exactly_four_chars_fully_masked():
+    assert mask_secret("abcd") == "****"
+
+
+def test_mask_secret_shorter_than_four_fully_masked():
+    assert mask_secret("ab") == "**"
+    assert mask_secret("") == ""
