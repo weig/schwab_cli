@@ -23,15 +23,17 @@ def get_chain(
     `strikeCount` param is per-side, so we pass `ceil(strike_count / 2)`.
     The output layer trims further as needed.
     """
-    params: dict[str, str | float] = {
+    if strike_count < 1:
+        raise ValueError(f"strike_count must be >= 1, got {strike_count}")
+    params: dict[str, str | int] = {
         "symbol": symbol,
         "contractType": contract_type,
         "strategy": "SINGLE",
         "includeUnderlyingQuote": "true",
-        "strikeCount": max(1, math.ceil(strike_count / 2)),
+        "strikeCount": math.ceil(strike_count / 2),
     }
     if strike is not None:
-        params["strike"] = strike
+        params["strike"] = str(strike)
     if from_date is not None:
         params["fromDate"] = from_date.isoformat()
     if to_date is not None:

@@ -1,6 +1,7 @@
 from datetime import date
 
 import httpx
+import pytest
 import respx
 
 from schwab_cli.api.chains import get_chain
@@ -65,6 +66,13 @@ def test_get_chain_with_explicit_strike():
     )
     get_chain(_client(), "NVDA", strike=250.0)
     assert route.calls.last.request.url.params["strike"] == "250.0"
+
+
+def test_get_chain_rejects_zero_or_negative_strike_count():
+    with pytest.raises(ValueError):
+        get_chain(_client(), "NVDA", strike_count=0)
+    with pytest.raises(ValueError):
+        get_chain(_client(), "NVDA", strike_count=-5)
 
 
 @respx.mock
