@@ -2,6 +2,7 @@ import typer
 
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
+from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
 
@@ -67,3 +68,34 @@ def quote(
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
 ) -> None:
     quote_cmd.run(symbols, as_json=as_json, as_md=as_md)
+
+
+@app.command(
+    "option",
+    help=(
+        "Look up an option chain. SPEC: YYMMDD[P|C]*[strike] — "
+        "quote the spec in shells that glob `*`."
+    ),
+)
+def option(
+    symbol: str = typer.Argument(..., help="Underlying ticker (e.g. NVDA)."),
+    spec: str = typer.Argument(..., help="Option spec, e.g. '270115*250' or '270115P*'."),
+    strikes: int = typer.Option(
+        10, "--strikes", help="Total strikes around ATM when no explicit strike."
+    ),
+    detail: int = typer.Option(
+        0,
+        "--detail",
+        help="Detail level: 0=classic, 1=stacked+greeks, 2=stacked+sub-table.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+) -> None:
+    option_cmd.run(
+        symbol,
+        spec,
+        strikes=strikes,
+        detail=detail,
+        as_json=as_json,
+        as_md=as_md,
+    )
