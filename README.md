@@ -42,13 +42,17 @@ schwab_cli auth --force  # skip refresh; always run the full OAuth flow
 
 Tokens are saved to `~/.config/schwab_cli/session.json` (mode `0600`).
 
-By default, the OAuth browser runs **headless**. Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to see the browser:
+By default, the OAuth browser runs **headless**. Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to:
+
+- Show the Chromium window
+- Slow down each Playwright action by 1 second so the flow is watchable
+- Emit `[debug] <step>` progress logs to stderr at each phase (navigating, waiting for login, filling credentials, consent, account selection, redirect capture)
 
 ```bash
 DEBUG=1 schwab_cli auth --force
 ```
 
-When DEBUG is enabled, a screenshot is also written to `~/.config/schwab_cli/auth-error-<timestamp>.png` if any step fails — useful when Schwab changes their UI and selectors need updating (`src/schwab_cli/browser/selectors.py`).
+Debug logs never contain credentials, resolved secrets, tokens, or the auth code — only phase names. If Schwab changes their UI, update `src/schwab_cli/browser/selectors.py`.
 
 ## Run tests
 
