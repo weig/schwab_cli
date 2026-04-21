@@ -216,7 +216,7 @@ def _announce_dropped(dropped: list[str]) -> None:
     if not dropped:
         return
     _note(
-        f"[note] terminal too narrow — dropped columns: {', '.join(dropped)}. "
+        f"note: terminal too narrow — dropped columns: {', '.join(dropped)}. "
         "Use --detail=1 or widen terminal for full view."
     )
 
@@ -361,15 +361,16 @@ def _settlement_label(settle_type: str | None) -> str:
 
 
 def _layout_b_table() -> Table:
-    """Fresh Layout B table with the 13-column header.
+    """Fresh full-width Layout B table (13 columns).
 
-    Shared by `_render_human_b` (detail=1, one table for all contracts) and
-    `_render_human_b_inline` (detail=2, one table per contract so the
-    continuation lines can sit between rows). A consequence of the per-
-    contract approach at detail=2 is that column widths are sized
-    independently per contract, so cells don't always align vertically
-    across contracts — an accepted cosmetic trade-off for the interleaved
-    layout.
+    Used by `_render_human_b_inline` (detail=2) which keeps the full
+    column set at any width — width adaptation applies only to
+    `_render_human_b` (detail=1) and `_render_human_a` (detail=0).
+
+    A consequence of the per-contract approach at detail=2 is that
+    column widths are sized independently per contract, so cells don't
+    always align vertically across contracts — an accepted cosmetic
+    trade-off for the interleaved layout.
     """
     t = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     t.add_column("Symbol")
@@ -518,7 +519,7 @@ def render_chain(
         if detail == 1:
             return _render_human_b(envelope, width)
         if requested_type != "ALL":
-            _note("[note] one-sided chain — rendering as --detail=1.")
+            _note("note: one-sided chain — rendering as --detail=1.")
             return _render_human_b(envelope, width)
         return _render_human_a(envelope, width)
     raise NotImplementedError(f"format {fmt} not yet implemented")
