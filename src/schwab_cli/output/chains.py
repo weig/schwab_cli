@@ -264,6 +264,16 @@ def _render_human_a(env: dict, width: int | None) -> str:
     return buf.getvalue()
 
 
+_SETTLE_LABELS = {"P": "PM", "A": "AM"}
+
+
+def _settlement_label(settle_type: str | None) -> str:
+    """Map Schwab's single-letter settlementType to "PM"/"AM" (unknown passthrough)."""
+    if not settle_type:
+        return ""
+    return _SETTLE_LABELS.get(settle_type, settle_type)
+
+
 def _render_human_b(env: dict, width: int | None) -> str:
     console, buf = _console(width)
     # highlight=False prevents Rich's ReprHighlighter from colorizing the
@@ -307,6 +317,72 @@ def _render_human_b(env: dict, width: int | None) -> str:
     return buf.getvalue()
 
 
+def _render_human_b_inline(env: dict, width: int | None) -> str:
+    console, buf = _console(width)
+    console.print(_header_line(env), highlight=False)
+    console.print("")
+
+    dte_label = env.get("dte") if env.get("dte") is not None else "—"
+
+    for c in env["contracts"]:
+        itm = bool(c.get("inTheMoney"))
+        settle = _settlement_label(c.get("settlementType"))
+        symbol_cell = c["optionSymbol"]
+        if settle:
+            symbol_cell = f"{symbol_cell} ({settle})"
+
+        t = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        t.add_column("Symbol")
+        t.add_column("Side")
+        t.add_column("Strike", justify="right")
+        t.add_column("Bid", justify="right")
+        t.add_column("Ask", justify="right")
+        t.add_column("Last", justify="right")
+        t.add_column("IV", justify="right")
+        t.add_column("Δ", justify="right")
+        t.add_column("Γ", justify="right")
+        t.add_column("Θ", justify="right")
+        t.add_column("𝒱", justify="right")
+        t.add_column("Vol", justify="right")
+        t.add_column("OI", justify="right")
+        t.add_row(
+            _bold_if(itm, symbol_cell),
+            _bold_if(itm, c["side"]),
+            _bold_if(itm, _fmt(c["strike"])),
+            _bold_if(itm, _fmt(c["bid"])),
+            _bold_if(itm, _fmt(c["ask"])),
+            _bold_if(itm, _fmt_signed(c["last"])),
+            _bold_if(itm, _fmt(c["iv"], 3)),
+            _bold_if(itm, _fmt_signed(c["delta"], 3)),
+            _bold_if(itm, _fmt(c["gamma"], 3)),
+            _bold_if(itm, _fmt(c["theta"], 3)),
+            _bold_if(itm, _fmt(c["vega"], 3)),
+            _bold_if(itm, _fmt(c["volume"], 0)),
+            _bold_if(itm, _fmt(c["openInterest"], 0)),
+        )
+        console.print(t, highlight=False)
+        console.print(
+            f"  ├─ Mark: {_fmt(c['mark'])}   "
+            f"L.Sz: {_fmt(c['lastSize'], 0)}    "
+            f"B.Sz: {_fmt(c['bidSize'], 0)}    "
+            f"A.Sz: {_fmt(c['askSize'], 0)}    "
+            f"Open: {_fmt(c['open'])}    "
+            f"High: {_fmt(c['high'])}    "
+            f"Low: {_fmt(c['low'])}    "
+            f"Close: {_fmt(c['close'])}",
+            highlight=False,
+        )
+        console.print(
+            f"  └─ DTE: {dte_label}     "
+            f"ρ: {_fmt(c['rho'], 3)}   "
+            f"Time Val: {_fmt(c['timeValue'])}   "
+            f"Intrinsic: {_fmt(c['intrinsic'])}",
+            highlight=False,
+        )
+
+    return buf.getvalue()
+
+
 def render_chain(
     envelope: dict,
     *,
@@ -316,7 +392,9 @@ def render_chain(
     width: int | None = None,
 ) -> str:
     if fmt is Format.HUMAN:
-        if detail >= 1:
+        if detail >= 2:
+            return _render_human_b_inline(envelope, width)
+        if detail == 1:
             return _render_human_b(envelope, width)
         if requested_type != "ALL":
             _note("[note] one-sided chain — rendering as --detail=1.")

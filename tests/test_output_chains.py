@@ -328,3 +328,32 @@ def test_render_chain_human_a_no_fallback_when_both_sides(capsys):
                  requested_type="ALL", width=160)
     err = capsys.readouterr().err
     assert "one-sided" not in err
+
+
+def test_render_chain_human_detail2_has_main_row_plus_continuation():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=2,
+                       requested_type="ALL", width=180)
+    # Main row present
+    assert "270115C00135000" in out
+    # Continuation lines with Mark / DTE / B.Sz etc.
+    assert "Mark:" in out
+    assert "B.Sz:" in out
+    assert "A.Sz:" in out
+    assert "L.Sz:" in out
+    assert "DTE:" in out
+    assert "Time Val:" in out
+    assert "Intrinsic:" in out
+
+
+def test_render_chain_human_detail2_settlement_suffix_in_symbol():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=2,
+                       requested_type="ALL", width=180)
+    # settlementType="P" maps to (PM)
+    assert "(PM)" in out
+
+
+def test_render_chain_human_detail2_no_multiplier_or_itm_columns():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=2,
+                       requested_type="ALL", width=180)
+    assert "Mult:" not in out
+    assert "ITM:" not in out
