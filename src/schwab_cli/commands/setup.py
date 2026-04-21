@@ -23,8 +23,11 @@ def _prompt_value(
     if existing:
         shown = mask_secret(existing) if sensitive else existing
         typer.echo(f"  Current {label}: {shown}  (press Enter to keep)")
+    # Hide echo only for fresh sensitive entry; when keeping an existing value,
+    # showing nothing would leave the user wondering if input was captured.
+    hide = sensitive and not existing
     while True:
-        entered = typer.prompt(label, default="", show_default=False)
+        entered = typer.prompt(label, default="", show_default=False, hide_input=hide)
         if entered:
             return entered
         if existing:
