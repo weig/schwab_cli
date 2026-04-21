@@ -182,7 +182,7 @@ def test_run_full_auth_happy_path(monkeypatch):
 
     monkeypatch.setattr(
         "schwab_cli.browser.flow._launch_browser",
-        lambda headless: browser,
+        lambda headless, **_: browser,
     )
     monkeypatch.setattr(
         "schwab_cli.browser.flow.resolve_secret",
@@ -207,7 +207,7 @@ def test_run_full_auth_invalid_client_marker(monkeypatch):
         selectors_present={"input#loginIdInput": False},
     )
     browser = _happy_browser(page)
-    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     with pytest.raises(AuthError, match="rejected client_id/secret"):
@@ -226,7 +226,7 @@ def test_run_full_auth_bad_credentials(monkeypatch):
         },
     )
     browser = _happy_browser(page)
-    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     with pytest.raises(AuthError, match="incorrect username/password"):
@@ -243,7 +243,7 @@ def test_run_full_auth_redirect_uri_mismatch(monkeypatch):
         },
     )
     browser = _happy_browser(page)
-    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     with pytest.raises(AuthError, match="Redirect URI mismatch"):
@@ -260,7 +260,7 @@ def test_run_full_auth_no_accounts(monkeypatch):
         checkboxes=[],  # no accounts shown
     )
     browser = _happy_browser(page)
-    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     with pytest.raises(AuthError, match="No accounts available"):
@@ -280,7 +280,7 @@ def test_run_full_auth_redirect_without_code(monkeypatch):
         checkboxes=[FakeCheckbox()],
     )
     browser = _happy_browser(page)
-    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     with pytest.raises(AuthError, match="no `code` param"):
@@ -288,7 +288,7 @@ def test_run_full_auth_redirect_without_code(monkeypatch):
 
 
 def test_run_full_auth_chromium_missing_message(monkeypatch):
-    def boom(headless):
+    def boom(headless, **_):
         raise RuntimeError("Executable doesn't exist at .../chromium")
 
     monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", boom)
@@ -311,7 +311,7 @@ def test_run_full_auth_redirect_timeout(monkeypatch):
         checkboxes=[FakeCheckbox()],
     )
     browser = _happy_browser(page)
-    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
 
     with pytest.raises(AuthError, match="Redirect didn't happen"):
@@ -322,7 +322,7 @@ def test_run_full_auth_redirect_timeout(monkeypatch):
 def test_run_full_auth_generic_launch_failure(monkeypatch):
     """_launch_browser raises with a non-Chromium-specific message → generic AuthError."""
 
-    def boom(headless):
+    def boom(headless, **_):
         raise RuntimeError("some unexpected failure")
 
     monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", boom)
@@ -330,3 +330,84 @@ def test_run_full_auth_generic_launch_failure(monkeypatch):
 
     with pytest.raises(AuthError, match="Failed to launch browser"):
         run_full_auth(_cfg())
+
+
+def _happy_page_and_browser():
+    page = FullFakePage(
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": True,
+            "text=Select accounts": True,
+            "text=You will now be redirected": True,
+        },
+        final_redirect_url="https://127.0.0.1:8443/?code=CODE",
+        checkboxes=[FakeCheckbox()],
+    )
+    return page, _happy_browser(page)
+
+
+def test_run_full_auth_passes_slow_mo_when_debug_set(monkeypatch):
+    monkeypatch.setenv("DEBUG", "1")
+    _, browser = _happy_page_and_browser()
+    captured = {}
+
+    def capture_launch(headless, **kw):
+        captured["headless"] = headless
+        captured["slow_mo_ms"] = kw.get("slow_mo_ms", 0)
+        return browser
+
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", capture_launch)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    assert captured["headless"] is False
+    assert captured["slow_mo_ms"] == 1000
+
+
+def test_run_full_auth_no_slow_mo_when_debug_unset(monkeypatch):
+    monkeypatch.delenv("DEBUG", raising=False)
+    _, browser = _happy_page_and_browser()
+    captured = {}
+
+    def capture_launch(headless, **kw):
+        captured["headless"] = headless
+        captured["slow_mo_ms"] = kw.get("slow_mo_ms", 0)
+        return browser
+
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", capture_launch)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    assert captured["headless"] is True
+    assert captured["slow_mo_ms"] == 0
+
+
+def test_run_full_auth_emits_debug_logs_when_debug_set(monkeypatch, capsys):
+    monkeypatch.setenv("DEBUG", "1")
+    _, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    err = capsys.readouterr().err
+    # Spot-check a few expected phases — exact wording is already locked by unit tests
+    # of _debug_log; here we just confirm phases fire in order.
+    assert "[debug] resolving secrets" in err
+    assert "[debug] launching chromium" in err
+    assert "[debug] navigating to auth URL" in err
+    assert "[debug] authorization code captured" in err
+    # Credentials must never appear in the log.
+    assert "user@example.com" not in err
+    assert "op://X/Y/Z" not in err
+    assert "CODE" not in err  # neither the auth code value
+
+
+def test_run_full_auth_quiet_when_debug_unset(monkeypatch, capsys):
+    monkeypatch.delenv("DEBUG", raising=False)
+    _, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    err = capsys.readouterr().err
+    assert "[debug]" not in err

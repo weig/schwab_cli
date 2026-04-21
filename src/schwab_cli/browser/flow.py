@@ -21,9 +21,11 @@ from schwab_cli.browser.selectors import (
     REDIRECT_URI_MISMATCH_TEXT,
 )
 from schwab_cli.config import Config
-from schwab_cli.utils import _is_debug_truthy
+from schwab_cli.utils import _debug_log, _is_debug_truthy
 from schwab_cli.oauth import build_auth_url
 from schwab_cli.secrets import resolve_secret
+
+_DEBUG_SLOW_MO_MS = 1000
 
 
 class AuthError(Exception):
@@ -80,12 +82,12 @@ def wait_any(
             raise AuthError(_UI_CHANGED_MESSAGE)
 
 
-def _launch_browser(headless: bool):  # pragma: no cover
+def _launch_browser(headless: bool, slow_mo_ms: int = 0):  # pragma: no cover
     """Real Playwright launch. Pulled out so tests can monkeypatch this single seam."""
     from playwright.sync_api import sync_playwright
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=headless)
+    browser = pw.chromium.launch(headless=headless, slow_mo=slow_mo_ms)
     # Stash the playwright handle on the browser so we can stop it on close.
     browser._pw = pw  # type: ignore[attr-defined]
 
@@ -108,12 +110,18 @@ def run_full_auth(cfg: Config) -> str:
     Raises AuthError on any documented failure; the browser is always closed
     before raising.
     """
+    _debug_log("resolving secrets")
     username = resolve_secret(cfg.username or "")
     password = resolve_secret(cfg.password or "")
-    headless = not _is_debug_truthy(os.environ.get("DEBUG"))
+    debug = _is_debug_truthy(os.environ.get("DEBUG"))
+    headless = not debug
+    slow_mo_ms = _DEBUG_SLOW_MO_MS if debug else 0
 
+    _debug_log(
+        f"launching chromium (headless={headless}, slow_mo={slow_mo_ms}ms)"
+    )
     try:
-        browser = _launch_browser(headless)
+        browser = _launch_browser(headless, slow_mo_ms=slow_mo_ms)
     except Exception as e:
         msg = str(e)
         if "Executable doesn't exist" in msg or "playwright install" in msg.lower():
@@ -124,8 +132,11 @@ def run_full_auth(cfg: Config) -> str:
 
     try:
         page = browser.new_page()
-        page.goto(build_auth_url(cfg))
+        auth_url = build_auth_url(cfg)
+        _debug_log(f"navigating to auth URL: {auth_url}")
+        page.goto(auth_url)
 
+        _debug_log("waiting for login page")
         wait_any(
             page,
             expected=LOGIN_USERNAME_SELECTOR,
@@ -135,10 +146,12 @@ def run_full_auth(cfg: Config) -> str:
             },
         )
 
+        _debug_log("filling credentials and submitting login")
         page.fill(LOGIN_USERNAME_SELECTOR, username)
         page.fill(LOGIN_PASSWORD_SELECTOR, password)
         page.click(LOGIN_SUBMIT_SELECTOR)
 
+        _debug_log("waiting for consent page")
         wait_any(
             page,
             expected=CONSENT_PAGE_SELECTOR,
@@ -148,10 +161,11 @@ def run_full_auth(cfg: Config) -> str:
             },
         )
 
-        # Scroll to bottom so the Accept button is in view.
+        _debug_log("scrolling consent page and accepting")
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         page.click(ACCEPT_SELECTOR)
 
+        _debug_log("waiting for account selection")
         wait_any(
             page,
             expected=ACCOUNT_SELECTION_SELECTOR,
@@ -159,21 +173,26 @@ def run_full_auth(cfg: Config) -> str:
         )
 
         checkboxes = page.query_selector_all(ACCOUNT_CHECKBOX_SELECTOR)
+        _debug_log(f"found {len(checkboxes)} account checkbox(es)")
         if not checkboxes:
             raise AuthError("No accounts available on this login.")
         for cb in checkboxes:
             if not cb.is_checked():
                 cb.check()
+        _debug_log("all accounts selected; clicking continue")
         page.click(CONTINUE_SELECTOR)
 
+        _debug_log("waiting for confirmation page")
         wait_any(
             page,
             expected=CONFIRM_PAGE_SELECTOR,
             known_errors={},
         )
 
+        _debug_log("clicking done")
         page.click(DONE_SELECTOR)
 
+        _debug_log(f"waiting for redirect to {cfg.redirect_uri}")
         try:
             page.wait_for_url(
                 lambda u: u.startswith(cfg.redirect_uri),
@@ -188,6 +207,7 @@ def run_full_auth(cfg: Config) -> str:
         code = parse_qs(parsed.query).get("code", [None])[0]
         if not code:
             raise AuthError("Redirect reached but no `code` param present.")
+        _debug_log("authorization code captured")
         return code
     finally:
         try:
