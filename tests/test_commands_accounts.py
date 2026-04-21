@@ -110,3 +110,81 @@ def test_accounts_api_error_surfaces(monkeypatch, tmp_path):
         result = runner.invoke(app, ["accounts"])
     assert result.exit_code == 1
     assert "500" in result.output
+
+
+_SINGLE_ACCOUNT = {"securitiesAccount": {
+    "accountNumber": "12345678", "type": "MARGIN",
+    "currentBalances": {"liquidationValue": 2000.0, "cashBalance": 800.0, "buyingPower": 4000.0},
+    "initialBalances": {"cashBalance": 800.0},
+    "positions": [],
+}}
+
+
+def test_account_show_happy_path(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    with patch("schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT):
+        result = runner.invoke(app, ["account", "12345678"])
+    assert result.exit_code == 0, result.output
+    assert "MARGIN" in result.output
+
+
+def test_account_show_json(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    with patch("schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT):
+        result = runner.invoke(app, ["account", "5678", "--json"])
+    assert result.exit_code == 0
+    import json
+    data = json.loads(result.stdout)
+    assert data["accountNumber"] == "12345678"
+
+
+def test_account_show_api_error(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    with patch(
+        "schwab_cli.commands.accounts.get_account",
+        side_effect=ApiError("Account '99' not found. Available: ...5678."),
+    ):
+        result = runner.invoke(app, ["account", "99"])
+    assert result.exit_code == 1
+    assert "not found" in result.output
+
+
+_POSITION_ROWS = [
+    {
+        "_account": "12345678",
+        "instrument": {"symbol": "AAPL"},
+        "longQuantity": 10.0,
+        "averagePrice": 200.0,
+        "marketValue": 2321.40,
+    },
+]
+
+
+def test_positions_all_accounts_human(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    with patch("schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS):
+        result = runner.invoke(app, ["positions"])
+    assert result.exit_code == 0, result.output
+    assert "AAPL" in result.output
+
+
+def test_positions_filtered_account(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    captured_arg: list[str | None] = []
+
+    def fake_get_positions(client, account):
+        captured_arg.append(account)
+        return _POSITION_ROWS
+
+    with patch("schwab_cli.commands.accounts.get_positions", side_effect=fake_get_positions):
+        result = runner.invoke(app, ["positions", "5678"])
+    assert result.exit_code == 0
+    assert captured_arg == ["5678"]
+
+
+def test_positions_md_flag(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    with patch("schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS):
+        result = runner.invoke(app, ["positions", "--md"])
+    assert result.exit_code == 0
+    assert "| Account" in result.stdout
