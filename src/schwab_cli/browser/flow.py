@@ -317,8 +317,15 @@ def run_full_auth(cfg: Config) -> str:
         dump("login")
 
         _debug_log("filling credentials and submitting login")
-        page.fill(LOGIN_USERNAME_SELECTOR, username)
-        page.fill(LOGIN_PASSWORD_SELECTOR, password)
+        # press_sequentially fires real keystroke events (keydown/keypress/input
+        # /keyup); page.fill only sets value + dispatches a single 'input'
+        # event, which Angular's reactive forms sometimes don't pick up cleanly
+        # on Schwab's login. Real keystrokes ensure ng-dirty/ng-touched + the
+        # form's own listeners fire as the user would.
+        page.locator(LOGIN_USERNAME_SELECTOR).press_sequentially(username, delay=20)
+        page.locator(LOGIN_PASSWORD_SELECTOR).press_sequentially(password, delay=20)
+        # Tab off the password to fire blur (some forms only validate on blur).
+        page.keyboard.press("Tab")
         page.click(LOGIN_SUBMIT_SELECTOR)
 
         _debug_log("waiting for MFA / consent page (whichever appears first)")
