@@ -10,12 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from schwab_cli.browser.selectors import (
-    ACCEPT_SELECTOR,
     ACCOUNT_CHECKBOX_SELECTOR,
-    ACCOUNT_SELECTION_SELECTOR,
+    ACCOUNT_CONTINUE_SELECTOR,
     CONFIRM_PAGE_SELECTOR,
+    CONSENT_CHECKBOX_SELECTOR,
+    CONSENT_CONTINUE_SELECTOR,
+    CONSENT_MODAL_ACCEPT_SELECTOR,
     CONSENT_PAGE_SELECTOR,
-    CONTINUE_SELECTOR,
     DONE_SELECTOR,
     INVALID_CLIENT_MARKERS,
     INVALID_CREDENTIALS_TEXT,
@@ -25,9 +26,11 @@ from schwab_cli.browser.selectors import (
     MFA_PAGE_SELECTOR,
     REDIRECT_URI_MISMATCH_TEXT,
     SCHWAB_APP_OPTION_SELECTOR,
+    TRUST_CONTINUE_SELECTOR,
     TRUST_DEVICE_PAGE_SELECTOR,
-    TRUST_NEXT_SELECTOR,
     TRUST_YES_SELECTOR,
+    URL_FRAGMENT_ACCOUNTS,
+    URL_FRAGMENT_CONFIRMATION,
 )
 from schwab_cli.config import Config, config_path
 from schwab_cli.utils import _debug_log, _is_debug_truthy
@@ -358,10 +361,10 @@ def run_full_auth(cfg: Config) -> str:
             dump(f"post-mfa-{after_approval}")
 
             if after_approval == "trust":
-                _debug_log("trust-device page: selecting yes and clicking next")
+                _debug_log("trust-device page: selecting yes and clicking continue")
                 page.locator(TRUST_YES_SELECTOR).first.click()
-                page.click(TRUST_NEXT_SELECTOR)
-                dump("after-trust-next")
+                page.click(TRUST_CONTINUE_SELECTOR)
+                dump("after-trust-continue")
                 _debug_log("waiting for consent page after trust step")
                 wait_any(
                     page,
@@ -369,17 +372,28 @@ def run_full_auth(cfg: Config) -> str:
                     known_errors={},
                 )
 
-        _debug_log("scrolling consent page and accepting")
+        _debug_log("checking consent agreement and clicking continue")
         dump("consent")
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.click(ACCEPT_SELECTOR)
+        page.locator(CONSENT_CHECKBOX_SELECTOR).first.click()
+        page.click(CONSENT_CONTINUE_SELECTOR)
 
-        _debug_log("waiting for account selection")
+        _debug_log("waiting for Informed Consent modal Accept")
         wait_any(
             page,
-            expected=ACCOUNT_SELECTION_SELECTOR,
+            expected=CONSENT_MODAL_ACCEPT_SELECTOR,
             known_errors={},
         )
+        dump("consent-modal")
+        page.click(CONSENT_MODAL_ACCEPT_SELECTOR)
+
+        _debug_log("waiting for account selection page")
+        try:
+            page.wait_for_url(
+                lambda u: URL_FRAGMENT_ACCOUNTS in u,
+                timeout=15_000,
+            )
+        except Exception as e:
+            raise AuthError("Account selection page didn't load — auth incomplete.") from e
         dump("accounts")
 
         checkboxes = page.query_selector_all(ACCOUNT_CHECKBOX_SELECTOR)
@@ -390,31 +404,35 @@ def run_full_auth(cfg: Config) -> str:
             if not cb.is_checked():
                 cb.check()
         _debug_log("all accounts selected; clicking continue")
-        page.click(CONTINUE_SELECTOR)
+        page.click(ACCOUNT_CONTINUE_SELECTOR)
 
         _debug_log("waiting for confirmation page")
-        wait_any(
-            page,
-            expected=CONFIRM_PAGE_SELECTOR,
-            known_errors={},
-        )
-        dump("confirm")
-
-        _debug_log("clicking done")
-        page.click(DONE_SELECTOR)
-
-        _debug_log(f"waiting for redirect to {cfg.redirect_uri}")
         try:
             page.wait_for_url(
-                lambda u: u.startswith(cfg.redirect_uri),
+                lambda u: URL_FRAGMENT_CONFIRMATION in u,
                 timeout=15_000,
             )
         except Exception as e:
-            raise AuthError(
-                "Redirect didn't happen — auth incomplete."
-            ) from e
+            raise AuthError("Confirmation page didn't load — auth incomplete.") from e
+        dump("confirm")
 
-        parsed = urlparse(page.url)
+        # Capture the redirect URL via request interception. Chrome cannot
+        # actually load the redirect_uri (no server is listening) so by the
+        # time `page.url` updates it's already the chrome-error page —
+        # `wait_for_url` would never match. `expect_request` catches the URL
+        # at the moment Chrome issues the navigation request, before failure.
+        _debug_log(f"clicking Done and capturing redirect to {cfg.redirect_uri}")
+        try:
+            with page.expect_request(
+                lambda req: req.url.startswith(cfg.redirect_uri),
+                timeout=15_000,
+            ) as req_info:
+                page.click(DONE_SELECTOR)
+            redirect_url = req_info.value.url
+        except Exception as e:
+            raise AuthError("Redirect didn't happen — auth incomplete.") from e
+
+        parsed = urlparse(redirect_url)
         code = parse_qs(parsed.query).get("code", [None])[0]
         if not code:
             raise AuthError("Redirect reached but no `code` param present.")

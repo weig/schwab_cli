@@ -1,0 +1,32 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e4]:
+      - strong
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e106]:
+        - heading "Consent and Grant Form" [level=1] [ref=e107]:
+          - generic [ref=e110]:
+            - text: Trader API End User Terms and Conditions
+            - generic [ref=e111]: Instruction to Grant Access and Agreement to Allow Wei Monitoring to Access Your Account and Account Information
+        - generic [ref=e112]: Please read the following and provide your agreement to these Trader API End User Terms and Conditions (“Terms and Conditions”). By clicking “Continue,” you are instructing Schwab to grant access to your account and Account Information (as defined below) to a Third-Party Application (as defined below) utilizing Schwab’s Trader API Program (the “Program”). Schwab may, at any time without prior notice, amend these Terms and Conditions. The current Terms and Conditions are available for your reference on this login page. Your continued use of a Third-Party Application constitutes your acceptance of the changes.
+        - generic [ref=e113]:
+          - paragraph [ref=e114]: Your Instruction to Schwab. You are instructing Charles Schwab & Co., Inc. (“Schwab,” “we,” or “us”) to allow one or more third-party applications, the provider of those applications, and their personnel and agents (each a “Third-Party Application”) that you designate to access your Schwab account and your Account Information. By instructing us to do this, you agree to these Terms and Conditions, and agree to accept the responsibilities and risks summarized below. We may change, suspend, or cancel your instruction at any time and for any reason.
+          - paragraph [ref=e115]: Your Agreement to Grant Access. By instructing us to grant access to your Schwab account, you agree that the Third-Party Application will be able to access your account to place, edit, or cancel orders. You agree that you are solely responsible (financially and otherwise) for all orders and trades placed in your account through or using the Third-Party Application. You further understand and agree that all interactions from a Third-Party Application will be monitored and subject to restrictions based on the nature of the activity at our sole discretion. You understand and agree that Schwab has no responsibility for, and makes no representations regarding, the availability, performance, quality, reliability, or fitness of any Third-Party Application, and that Schwab’s ability to act on account instructions, including order placement, is dependent on the Third-Party Application’s availability and fitness for use with the Program. As such, Schwab will not be liable for the unavailability, delay, or failure of the Third-Party Application to process account instructions. Your use of the Third-Party Application relating to your Schwab account is subject to the Schwab Client Agreement, Privacy Notice, and other applicable agreements governing your Schwab account.
+          - paragraph [ref=e116]:
+            - text: The Third-Party Application is an Authorized Person. You understand and agree that by instructing us to grant access to your Schwab account to a Third-Party Application, you are authorizing any activity (including trading activity) that the Third-Party Application undertakes, even if you did not authorize or consent to that activity. You understand and agree that granting access to your Schwab account could potentially expose you to increased privacy and security risks, including fraud and unauthorized transactions, and that Schwab will not be responsible for such activity.
+            - text: The Account Information You Will Be Sharing. For each Schwab account that you instruct us to link to a Third-Party Application, you are granting the Third-Party Application access to your Account Information, which includes, but is not limited to, your holdings, balances, transaction history (such as buys, sells, journals, dividends, commissions and fees, payments, interest, ATM activity, adjustments, deposits, withdrawals, transfers, checks, taxes, and corporate actions), account descriptors, and other account details (collectively, the “Account Information”).
+            - text: You understand and agree that Schwab does not customize the Account Information that a Third-Party Application can access, which means the amount and type of Account Information may be more or less than is required for a particular Third-Party Application to provide the services you are expecting to receive from it.
+            - text: You Must Safeguard Your Login Credentials. You are responsible for maintaining the confidentiality and security of your Login Credentials and for immediately notifying Schwab if you believe the confidentiality or security of the Login Credentials has been compromised. You are responsible for all activities that occur using your Login Credentials, regardless of whether the activities are undertaken by you or someone else. You may not share your Login Credentials with anyone, including with any Third-Party Application.
+          - generic [ref=e118]: Read more
+        - generic [ref=e119]:
+          - generic [ref=e120]:
+            - checkbox "By checking this box, I instruct Schwab to grant access to my Schwab account and Account Information to a Third-Party Application. In providing this instruction, I also understand and acknowledge the risks and limitations described above, including but not limited to the limitations on Schwab’s liability for what happens to my Schwab account and Account Information after it has been accessed by a Third-Party Application." [ref=e121]
+            - text: By checking this box, I instruct Schwab to grant access to my Schwab account and Account Information to a Third-Party Application. In providing this instruction, I also understand and acknowledge the risks and limitations described above, including but not limited to the limitations on Schwab’s liability for what happens to my Schwab account and Account Information after it has been accessed by a Third-Party Application.
+          - generic [ref=e122]:
+            - button "Cancel" [ref=e123] [cursor=pointer]
+            - button "Continue" [ref=e124] [cursor=pointer]
+    - contentinfo [ref=e52]:
+      - generic [ref=e54]:
+        - generic:
+          - paragraph

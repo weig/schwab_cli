@@ -1,0 +1,27 @@
+- generic [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e4]:
+      - strong
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e78]:
+        - generic [ref=e80]:
+          - heading "Security Preference - Device" [level=1] [ref=e82]
+          - generic "Will you use this device for future logins?" [ref=e84]
+          - generic [ref=e85]:
+            - generic [ref=e91]:
+              - radio "Yes, Schwab can remember this device and skip confirm identity step in future log in" [checked] [active] [ref=e92]
+              - generic "Yes, Schwab can remember this device and skip confirm identity step in future log in" [ref=e93]
+            - generic [ref=e99]:
+              - radio "No, do not remember this device." [ref=e100]
+              - generic "No, do not remember this device." [ref=e101]
+        - button "Continue" [ref=e103] [cursor=pointer]
+    - contentinfo [ref=e52]:
+      - generic [ref=e55]:
+        - paragraph [ref=e56]: This site supports Microsoft Edge, Google Chrome, and Mozilla Firefox.
+        - paragraph [ref=e57]:
+          - text: For institutional use only.
+          - text: ©2026 Charles Schwab & Co., Inc. ("Schwab"). Member
+          - link "SIPC" [ref=e58] [cursor=pointer]:
+            - /url: https://www.sipc.org/
+          - text: . All rights reserved. (1214-6829)

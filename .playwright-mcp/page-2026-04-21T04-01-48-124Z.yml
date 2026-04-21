@@ -1,0 +1,29 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e4]:
+      - strong
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e61]:
+        - generic [ref=e63]:
+          - generic [ref=e64]: We sent notification to your mobile device
+          - generic [ref=e65]:
+            - generic [ref=e66]:
+              - text: To confirm it's you, tap yes on the notification sent to your mobile device or open the Schwab Mobile app. The request will expire in 5 minutes.
+              - link "Didn't receive a notification?" [ref=e67] [cursor=pointer]:
+                - /url: javascript:void(0)
+            - img "notification animation" [ref=e69]
+        - generic [ref=e72]:
+          - link "Cancel" [ref=e74] [cursor=pointer]:
+            - /url: javascript:void(0)
+          - link "Use a different method" [ref=e76] [cursor=pointer]:
+            - /url: javascript:void(0)
+    - contentinfo [ref=e52]:
+      - generic [ref=e55]:
+        - paragraph [ref=e56]: This site supports Microsoft Edge, Google Chrome, and Mozilla Firefox.
+        - paragraph [ref=e57]:
+          - text: For institutional use only.
+          - text: ©2026 Charles Schwab & Co., Inc. ("Schwab"). Member
+          - link "SIPC" [ref=e58] [cursor=pointer]:
+            - /url: https://www.sipc.org/
+          - text: . All rights reserved. (1214-6829)

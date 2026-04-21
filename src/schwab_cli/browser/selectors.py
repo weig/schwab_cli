@@ -1,39 +1,64 @@
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# Selectors. Best-guess starting set; tighten after first manual run.
+# Selectors discovered from a live Schwab OAuth walk-through on 2026-04-21.
+# If Schwab changes their UI, regenerate by running the auth flow with
+# DEBUG=1 and inspecting `~/.config/schwab_cli/auth-debug/<ts>/*.html`.
 # ---------------------------------------------------------------------------
 
-# Login page
+# --- Login page (URL fragment: /login-one-step) ----------------------------
 LOGIN_USERNAME_SELECTOR = "input#loginIdInput"
 LOGIN_PASSWORD_SELECTOR = "input#passwordInput"
 LOGIN_SUBMIT_SELECTOR = "button#btnLogin"
 
-# MFA / device-verification page (may be skipped on already-trusted devices)
-MFA_PAGE_SELECTOR = "text=Verify your identity"
-SCHWAB_APP_OPTION_SELECTOR = "text=Schwab App"
+# --- MFA "Confirm Your Identity" page (URL: /authenticators) ---------------
+# The Schwab App option is a <div role="button">, NOT a real <button>.
+# Use the stable id; the presence of this element is also our "we're on the
+# MFA page" marker (it exists only on this page).
+SCHWAB_APP_OPTION_SELECTOR = "#mobile_approve"
+MFA_PAGE_SELECTOR = SCHWAB_APP_OPTION_SELECTOR
 
-# Trust-device page (may be skipped if device is already trusted)
-TRUST_DEVICE_PAGE_SELECTOR = "text=Trust this device"
-TRUST_YES_SELECTOR = 'label:has-text("Yes, trust this device")'
-TRUST_NEXT_SELECTOR = 'button:has-text("Next")'
+# --- Trust-device "Security Preference - Device" (URL: /devicetag/remember) -
+# Default is "No, do not remember" — we must click Yes, then Continue.
+TRUST_YES_SELECTOR = "input#remember-device-yes"
+TRUST_CONTINUE_SELECTOR = "button#btnContinue"
+TRUST_DEVICE_PAGE_SELECTOR = TRUST_YES_SELECTOR
 
-# Consent / agree page
-CONSENT_PAGE_SELECTOR = "text=Terms of Use"
-ACCEPT_SELECTOR = 'button:has-text("Accept")'
+# --- Consent "Consent and Grant Form" (URL: /third-party-auth/cag) ---------
+# Two-step: check acceptTerms -> click Continue -> modal appears with Accept.
+CONSENT_PAGE_SELECTOR = "input#acceptTerms"
+CONSENT_CHECKBOX_SELECTOR = "input#acceptTerms"
+CONSENT_CONTINUE_SELECTOR = "button#submit-btn"
+# Trailing hyphen in the id is intentional — that's what Schwab emits.
+CONSENT_MODAL_ACCEPT_SELECTOR = "button#agree-modal-btn-"
 
-# Account selection
-ACCOUNT_SELECTION_SELECTOR = "text=Select accounts"
-ACCOUNT_CHECKBOX_SELECTOR = 'input[type="checkbox"][name^="account"]'
-CONTINUE_SELECTOR = 'button:has-text("Continue")'
+# --- Account selection (URL: /third-party-auth/account) --------------------
+# The checkbox(es) have no stable id; only the type="checkbox" attribute.
+# On the account page there's one checkbox per account and no other
+# checkboxes, so this selector is safe on that page.
+ACCOUNT_CHECKBOX_SELECTOR = 'input[type="checkbox"]'
+ACCOUNT_CONTINUE_SELECTOR = "button#submit-btn"
 
-# Confirmation page
-CONFIRM_PAGE_SELECTOR = "text=You will now be redirected"
-DONE_SELECTOR = 'button:has-text("Done")'
+# --- Confirmation (URL: /third-party-auth/confirmation) --------------------
+# Yes, the id is literally "cancel-btn" even though the visible text is "Done".
+DONE_SELECTOR = "button#cancel-btn"
+CONFIRM_PAGE_SELECTOR = DONE_SELECTOR
 
 # ---------------------------------------------------------------------------
-# Error markers (page-content substrings).
+# URL fragments for page transitions (Schwab's URLs change per step; elements
+# may appear briefly during in-flight navigation, so URL-based waits are
+# used where element-based waits would race).
+# ---------------------------------------------------------------------------
+URL_FRAGMENT_ACCOUNTS = "/third-party-auth/account"
+URL_FRAGMENT_CONFIRMATION = "/third-party-auth/confirmation"
+URL_FRAGMENT_CONSENT = "/third-party-auth/cag"
+
+# ---------------------------------------------------------------------------
+# Error text markers (page-content substrings).
+# INVALID_CREDENTIALS_TEXT / REDIRECT_URI_MISMATCH_TEXT are best-effort — we
+# didn't capture the exact error markup in the walk-through since login
+# succeeded. If these produce false positives, set them to "" to disable.
 # ---------------------------------------------------------------------------
 INVALID_CLIENT_MARKERS = ('"error": "invalid_client"',)
-INVALID_CREDENTIALS_TEXT = "Invalid login ID or password."
+INVALID_CREDENTIALS_TEXT = "Please try again"
 REDIRECT_URI_MISMATCH_TEXT = "We are unable to complete your request."

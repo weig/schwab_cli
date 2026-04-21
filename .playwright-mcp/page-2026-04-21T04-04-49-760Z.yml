@@ -1,0 +1,19 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e4]:
+      - strong
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e162]:
+        - heading "Consent and Grant Confirmation Page" [level=1] [ref=e163]:
+          - generic [ref=e164]: Review your selected accounts
+        - paragraph [ref=e165]: You've selected the following accounts to link to Wei Monitoring.
+        - list [ref=e166]:
+          - listitem [ref=e167]: Individual ...756
+        - paragraph [ref=e168]: To stop linking your Schwab accounts to this or any other third party, go to the Schwab Security Center page.
+        - paragraph [ref=e169]: To complete the account linking and go back to Wei Monitoring click done.
+        - button "Done" [ref=e171] [cursor=pointer]
+    - contentinfo [ref=e52]:
+      - generic [ref=e54]:
+        - generic:
+          - paragraph
