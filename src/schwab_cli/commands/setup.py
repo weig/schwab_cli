@@ -5,41 +5,43 @@ import typer
 from schwab_cli.config import Config, ConfigError, config_path, load, mask_secret, save
 
 
-def _prompt_required(label: str, existing: str | None, *, sensitive: bool) -> str:
-    """Prompt until the user provides a non-empty value (or keeps existing)."""
-    default_display = mask_secret(existing) if (existing and sensitive) else existing
-    while True:
-        entered = typer.prompt(label, default=default_display or "", show_default=bool(default_display))
-        # If the user accepted the masked default, restore the real value.
-        if sensitive and existing and entered == default_display:
-            return existing
-        if entered:
-            return entered
-        typer.secho(f"{label} is required.", fg=typer.colors.RED, err=True)
-
-
-def _prompt_optional_credential(
+def _prompt_value(
     label: str,
     existing: str | None,
     *,
     sensitive: bool,
+    error_suffix: str = "is required.",
     hint: str | None = None,
 ) -> str:
-    """Prompt for a value; empty is not allowed when auto-login is being set."""
+    """Prompt until the user provides a non-empty value (or keeps existing on Enter).
+
+    When `existing` is set, the current value (masked if sensitive) is shown as a hint
+    and an empty response keeps it. When `existing` is None, empty re-prompts.
+    """
     if hint:
         typer.echo(f"  ({hint})")
-    default_display = mask_secret(existing) if (existing and sensitive) else existing
+    if existing:
+        shown = mask_secret(existing) if sensitive else existing
+        typer.echo(f"  Current {label}: {shown}  (press Enter to keep)")
     while True:
-        entered = typer.prompt(label, default=default_display or "", show_default=bool(default_display))
-        if sensitive and existing and entered == default_display:
-            return existing
+        entered = typer.prompt(label, default="", show_default=False)
         if entered:
             return entered
-        typer.secho(f"{label} is required when auto-login is enabled.", fg=typer.colors.RED, err=True)
+        if existing:
+            return existing
+        typer.secho(f"{label} {error_suffix}", fg=typer.colors.RED, err=True)
 
 
 def run() -> None:
     """Interactive setup: capture credentials and persist to ~/.config/schwab_cli/config.json."""
+    try:
+        _run()
+    except (KeyboardInterrupt, typer.Abort):
+        typer.echo("\nSetup cancelled.", err=True)
+        raise typer.Exit(code=130)
+
+
+def _run() -> None:
     path = config_path()
     typer.echo("Schwab CLI Setup")
     typer.echo(f"Config: {path}")
@@ -54,12 +56,12 @@ def run() -> None:
             raise typer.Exit(code=0)
         existing = None
 
-    client_id = _prompt_required(
+    client_id = _prompt_value(
         "Client ID",
         existing.client_id if existing else None,
         sensitive=False,
     )
-    client_secret = _prompt_required(
+    client_secret = _prompt_value(
         "Client Secret",
         existing.client_secret if existing else None,
         sensitive=True,
@@ -71,15 +73,17 @@ def run() -> None:
     username: str | None = None
     password: str | None = None
     if enable_auto:
-        username = _prompt_optional_credential(
+        username = _prompt_value(
             "Username",
             existing.username if existing else None,
             sensitive=False,
+            error_suffix="is required when auto-login is enabled.",
         )
-        password = _prompt_optional_credential(
+        password = _prompt_value(
             "Password",
             existing.password if existing else None,
             sensitive=True,
+            error_suffix="is required when auto-login is enabled.",
             hint="supports op:// 1Password references",
         )
 
