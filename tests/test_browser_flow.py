@@ -171,6 +171,15 @@ class FullFakePage(FakePage):
         present = self._selectors.get(selector, False)
         return _FakeFoundLocator(self, selector, present)
 
+    @property
+    def keyboard(self):
+        return _FakeKeyboard()
+
+
+class _FakeKeyboard:
+    def press(self, key: str) -> None:  # pragma: no cover - tests don't assert on keyboard
+        pass
+
 
 class _FakeFoundLocator:
     """Minimal Playwright Locator stub supporting .first, .count(), .click()."""
@@ -192,6 +201,12 @@ class _FakeFoundLocator:
             raise RuntimeError(f"locator {self._selector!r} not present")
         # Route through page.click so click hooks and history are consistent.
         self._page.click(self._selector)
+
+    def press_sequentially(self, value: str, *, delay: int = 0) -> None:
+        # Real Playwright doesn't require the element to be in a "present"
+        # marker dict; it queries DOM at type time. Mirror that here so tests
+        # don't have to enumerate every form field they don't care about.
+        self._page.fill(self._selector, value)
 
 
 class FakeBrowser:
