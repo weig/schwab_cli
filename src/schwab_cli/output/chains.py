@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from io import StringIO
 from typing import Any, Literal
 
@@ -309,6 +310,12 @@ def render_chain(
 ) -> str:
     if fmt is Format.HUMAN:
         if detail >= 1:
+            return _render_human_b(envelope, width)
+        if requested_type != "ALL":
+            print(
+                "[note] one-sided chain — rendering as --detail=1.",
+                file=sys.stderr,
+            )
             return _render_human_b(envelope, width)
         return _render_human_a(envelope, width)
     raise NotImplementedError(f"format {fmt} not yet implemented")

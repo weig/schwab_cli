@@ -306,3 +306,29 @@ def test_render_chain_human_b_emits_color_on_delta():
                        requested_type="ALL", width=160)
     assert "32m" in out  # green (may merge with bold)
     assert "31m" in out  # red (may merge with bold)
+
+
+def test_render_chain_human_a_falls_back_to_b_when_puts_only(capsys):
+    # Envelope with only put contracts
+    puts_only_raw = dict(_RAW_MULTI_STRIKE)
+    puts_only_raw = {
+        **puts_only_raw,
+        "callExpDateMap": {},
+    }
+    env = shape_envelope(puts_only_raw)
+    out = render_chain(env, fmt=Format.HUMAN, detail=0,
+                       requested_type="PUT", width=160)
+    # Layout B markers (per-contract rows) rather than Layout A (STRIKE centered).
+    assert "Side" in out
+    assert "Symbol" in out
+    # Stderr note about fallback.
+    err = capsys.readouterr().err
+    assert "one-sided" in err
+    assert "--detail=1" in err
+
+
+def test_render_chain_human_a_no_fallback_when_both_sides(capsys):
+    render_chain(_envelope(), fmt=Format.HUMAN, detail=0,
+                 requested_type="ALL", width=160)
+    err = capsys.readouterr().err
+    assert "one-sided" not in err
