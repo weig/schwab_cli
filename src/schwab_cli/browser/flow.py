@@ -39,10 +39,15 @@ from schwab_cli.secrets import resolve_secret
 _DEBUG_SLOW_MO_MS = 1000
 _DEBUG_HOLD_OPEN_SECONDS = 60
 
-# Empirically tested: GPU/window/ANGLE launch args do NOT bypass Akamai's
-# edge block in headless mode (it's a TLS/HTTP-2 fingerprint check that
-# returns "Access Denied" before any page renders). Keeping just the minimal
-# arg that helps in NON-headless mode where stealth scripts can run.
+# Empirically tested attempts to bypass Akamai in headless mode (all failed
+# with the same 309-byte "Access Denied" page):
+#   1. GPU/window args (--use-gl, --use-angle, --window-size, etc.)
+#   2. playwright-stealth (~20 in-browser fingerprint patches)
+#   3. patchright (drop-in playwright fork with patched TLS fingerprints)
+#      + channel="chrome" (system Google Chrome, not bundled chromium)
+# Schwab's edge detection catches headless via signals we can't change from
+# Python user space. So full auth must be visible. The refresh path uses
+# httpx and is unaffected.
 _STEALTH_LAUNCH_ARGS = ("--disable-blink-features=AutomationControlled",)
 
 
