@@ -57,9 +57,16 @@ If the device is already trusted, the MFA and/or trust steps are skipped automat
 rm -rf ~/.config/schwab_cli/chromium
 ```
 
-**Headless note:** Schwab's OAuth UI sits behind Akamai Bot Manager, which blocks Playwright's headless Chromium at the TLS/HTTP fingerprint layer — no JS-side stealth bypasses it. So `auth` runs with a **visible browser by default**. The refresh path (used every run after the first, while the 7-day refresh token is valid) is pure HTTP via `httpx` and doesn't touch a browser at all — that path is fully headless / cron-friendly.
+**Headless mode:** Schwab's OAuth UI sits behind Akamai Bot Manager, which blocks vanilla Playwright headless at the TLS/HTTP fingerprint layer. Two backends live in the codebase:
 
-You can force `HEADLESS=1` for experimentation; expect it to hit "Access Denied" until/unless Playwright's TLS fingerprint matures.
+| Mode | Backend | When |
+|---|---|---|
+| Default (visible) | Playwright | Fast, quiet, same first-run trust-device cookie reuse across runs |
+| `HEADLESS=1` | SeleniumBase UC | Bypasses Akamai for true headless operation (CI / cron / servers) |
+
+Both perform the same flow (login → MFA → trust → consent → accept → accounts → confirm → done → code → exchange). The persistent profile lives at `~/.config/schwab_cli/chromium/` (Playwright) or `~/.config/schwab_cli/chromium-uc/` (SeleniumBase) — both keep the Trust Device cookie so subsequent runs skip MFA.
+
+The refresh path (used every run after the first, while the 7-day refresh token is valid) is pure HTTP via `httpx` and doesn't touch a browser at all — headless-safe regardless of which backend is wired for full auth.
 
 Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to:
 

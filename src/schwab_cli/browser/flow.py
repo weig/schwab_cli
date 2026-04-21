@@ -265,26 +265,31 @@ def run_full_auth(cfg: Config) -> str:
     Returns the authorization `code` extracted from the redirect URI.
     Raises AuthError on any documented failure; the browser is always closed
     before raising.
+
+    Routing:
+      HEADLESS env truthy  → SeleniumBase UC backend (bypasses Akamai)
+      otherwise            → Playwright backend (visible browser, this module)
     """
+    debug = _is_debug_truthy(os.environ.get("DEBUG"))
+    headless_env = os.environ.get("HEADLESS")
+    headless = _is_debug_truthy(headless_env) if headless_env is not None else False
+
+    if headless:
+        # SeleniumBase UC's uc_open_with_reconnect() defeats Schwab's Akamai
+        # WAF where Playwright headless gets a 309-byte "Access Denied" page.
+        # Imported lazily so the dependency is unused on the default path.
+        from schwab_cli.browser._seleniumbase_flow import (
+            AuthError as _SBAuthError,
+            run_full_auth_selenium,
+        )
+        try:
+            return run_full_auth_selenium(cfg)
+        except _SBAuthError as e:
+            raise AuthError(str(e)) from e
+
     _debug_log("resolving secrets")
     username = resolve_secret(cfg.username or "")
     password = resolve_secret(cfg.password or "")
-    debug = _is_debug_truthy(os.environ.get("DEBUG"))
-    # HEADLESS env var overrides the DEBUG-implied default — useful for
-    # diagnosing headless-only failures (DEBUG=1 HEADLESS=1) or for
-    # forcing a particular mode without DEBUG.
-    #
-    # NOTE: Schwab fronts its OAuth UI with Akamai Bot Manager, which blocks
-    # Playwright's headless Chromium at the TLS/HTTP fingerprint layer (before
-    # the page loads — no JS stealth fixes it). Default to NON-headless for
-    # the full auth flow regardless of DEBUG. The refresh path uses pure HTTP
-    # via httpx and is fully headless / non-interactive — that's how downstream
-    # commands stay automatable.
-    headless_env = os.environ.get("HEADLESS")
-    if headless_env is not None:
-        headless = _is_debug_truthy(headless_env)
-    else:
-        headless = False
     slow_mo_ms = _DEBUG_SLOW_MO_MS if debug else 0
 
     _debug_log(
