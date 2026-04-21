@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def config_path() -> Path:
+    """Return the absolute path to config.json.
+
+    Honors XDG_CONFIG_HOME; falls back to ~/.config.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "schwab_cli" / "config.json"
 
 
 @dataclass(frozen=True)
