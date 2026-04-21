@@ -266,7 +266,21 @@ def run_full_auth(cfg: Config) -> str:
     username = resolve_secret(cfg.username or "")
     password = resolve_secret(cfg.password or "")
     debug = _is_debug_truthy(os.environ.get("DEBUG"))
-    headless = not debug
+    # HEADLESS env var overrides the DEBUG-implied default — useful for
+    # diagnosing headless-only failures (DEBUG=1 HEADLESS=1) or for
+    # forcing a particular mode without DEBUG.
+    #
+    # NOTE: Schwab fronts its OAuth UI with Akamai Bot Manager, which blocks
+    # Playwright's headless Chromium at the TLS/HTTP fingerprint layer (before
+    # the page loads — no JS stealth fixes it). Default to NON-headless for
+    # the full auth flow regardless of DEBUG. The refresh path uses pure HTTP
+    # via httpx and is fully headless / non-interactive — that's how downstream
+    # commands stay automatable.
+    headless_env = os.environ.get("HEADLESS")
+    if headless_env is not None:
+        headless = _is_debug_truthy(headless_env)
+    else:
+        headless = False
     slow_mo_ms = _DEBUG_SLOW_MO_MS if debug else 0
 
     _debug_log(
@@ -309,12 +323,18 @@ def run_full_auth(cfg: Config) -> str:
         page.goto(auth_url)
 
         _debug_log("waiting for login page")
+        akamai_blocked_msg = (
+            "Blocked by Schwab's bot protection (Akamai Access Denied). This "
+            "happens in headless mode — re-run without HEADLESS=1, or just "
+            "set DEBUG=1 which defaults to visible browser."
+        )
         wait_any(
             page,
             expected=LOGIN_USERNAME_SELECTOR,
             known_errors={
-                marker: "Schwab rejected client_id/secret — verify setup."
-                for marker in INVALID_CLIENT_MARKERS
+                **{m: "Schwab rejected client_id/secret — verify setup."
+                   for m in INVALID_CLIENT_MARKERS},
+                "Access Denied": akamai_blocked_msg,
             },
         )
         dump("login")

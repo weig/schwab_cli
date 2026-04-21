@@ -57,9 +57,12 @@ If the device is already trusted, the MFA and/or trust steps are skipped automat
 rm -rf ~/.config/schwab_cli/chromium
 ```
 
-By default, the OAuth browser runs **headless**. Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to:
+**Headless note:** Schwab's OAuth UI sits behind Akamai Bot Manager, which blocks Playwright's headless Chromium at the TLS/HTTP fingerprint layer — no JS-side stealth bypasses it. So `auth` runs with a **visible browser by default**. The refresh path (used every run after the first, while the 7-day refresh token is valid) is pure HTTP via `httpx` and doesn't touch a browser at all — that path is fully headless / cron-friendly.
 
-- Show the Chromium window
+You can force `HEADLESS=1` for experimentation; expect it to hit "Access Denied" until/unless Playwright's TLS fingerprint matures.
+
+Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to:
+
 - Slow down each Playwright action by 1 second so the flow is watchable
 - Emit `[debug] <step>` progress logs to stderr at each phase (navigating, waiting for login, filling credentials, consent, account selection, redirect capture)
 - Dump the HTML source of each page checkpoint to `~/.config/schwab_cli/auth-debug/<timestamp>/<NN>-<label>.html` — useful when Schwab changes their UI and you need to find the right selectors. Resolved username/password are stripped before writing.
