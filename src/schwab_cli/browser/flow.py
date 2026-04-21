@@ -28,6 +28,18 @@ from schwab_cli.secrets import resolve_secret
 _DEBUG_SLOW_MO_MS = 1000
 _DEBUG_HOLD_OPEN_SECONDS = 60
 
+# Minimal stealth: hide the three most obvious Playwright fingerprints Schwab
+# (and most anti-bot stacks) check for.
+_STEALTH_LAUNCH_ARGS = ("--disable-blink-features=AutomationControlled",)
+_STEALTH_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+_STEALTH_INIT_SCRIPT = (
+    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+)
+
 
 class AuthError(Exception):
     """Raised on any failure during the browser-driven auth flow."""
@@ -89,7 +101,11 @@ def _launch_browser(headless: bool, slow_mo_ms: int = 0):  # pragma: no cover
     from playwright.sync_api import sync_playwright
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=headless, slow_mo=slow_mo_ms)
+    browser = pw.chromium.launch(
+        headless=headless,
+        slow_mo=slow_mo_ms,
+        args=list(_STEALTH_LAUNCH_ARGS),
+    )
     # Stash the playwright handle on the browser so we can stop it on close.
     browser._pw = pw  # type: ignore[attr-defined]
 
@@ -133,7 +149,8 @@ def run_full_auth(cfg: Config) -> str:
         raise AuthError(f"Failed to launch browser: {msg}") from e
 
     try:
-        page = browser.new_page()
+        page = browser.new_page(user_agent=_STEALTH_USER_AGENT)
+        page.add_init_script(_STEALTH_INIT_SCRIPT)
         auth_url = build_auth_url(cfg)
         _debug_log(f"navigating to auth URL: {auth_url}")
         page.goto(auth_url)

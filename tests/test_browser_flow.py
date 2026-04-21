@@ -152,13 +152,20 @@ class FullFakePage(FakePage):
             return
         raise TimeoutError("redirect did not happen")
 
+    def add_init_script(self, script: str) -> None:
+        # Capture for assertion in stealth tests.
+        self.init_scripts = getattr(self, "init_scripts", [])
+        self.init_scripts.append(script)
+
 
 class FakeBrowser:
     def __init__(self, page):
         self._page = page
         self.closed = False
+        self.new_page_kwargs: list[dict] = []
 
-    def new_page(self):
+    def new_page(self, **kwargs):
+        self.new_page_kwargs.append(kwargs)
         return self._page
 
     def close(self):
@@ -465,6 +472,25 @@ def test_run_full_auth_holds_open_on_failure_then_closes(monkeypatch):
         run_full_auth(_cfg())
     assert sleeps == [60]
     assert browser.closed is True
+
+
+def test_run_full_auth_applies_stealth_measures(monkeypatch):
+    """Browser is launched with realistic UA, and navigator.webdriver init script
+    is injected before navigation — hides the three most obvious Playwright tells."""
+    monkeypatch.delenv("DEBUG", raising=False)
+    page, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+
+    # new_page called with a non-headless UA string (no "HeadlessChrome")
+    assert len(browser.new_page_kwargs) == 1
+    ua = browser.new_page_kwargs[0].get("user_agent", "")
+    assert "Chrome/" in ua
+    assert "HeadlessChrome" not in ua
+    # Init script injected that removes navigator.webdriver
+    assert page.init_scripts and any("webdriver" in s for s in page.init_scripts)
 
 
 def test_run_full_auth_hold_open_interrupted_by_ctrl_c(monkeypatch):
