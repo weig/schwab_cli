@@ -94,6 +94,28 @@ schwab_cli quote AAPL                # one quote
 schwab_cli quote AAPL MSFT NVDA      # multi-symbol quote
 ```
 
+```bash
+schwab_cli option NVDA 270115                     # both calls & puts, 10 strikes around ATM
+schwab_cli option NVDA '270115*250'               # strike 250 exactly (quote the `*` in bash/zsh)
+schwab_cli option NVDA '270115P*' --strikes 4     # puts, 4 strikes around ATM
+schwab_cli option NVDA 270115 --detail=1          # stacked layout with greeks
+schwab_cli option NVDA 270115 --detail=2          # stacked layout + per-contract details
+```
+
+**Spec grammar:** `YYMMDD[P|C]*[strike]`. `YYMMDD` expands to `20YY-MM-DD`; `P` / `C` filter to one side; `*<strike>` pins an exact strike. Shell glob quoting is required whenever `*` appears in the spec.
+
+**`--strikes N`** selects N total strikes around ATM. Even N splits evenly (`N/2` ITM + `N/2` OTM); odd N includes the ATM row (`(N-1)/2` ITM + 1 ATM + `(N-1)/2` OTM). Ignored when the spec names an exact strike.
+
+**Detail levels:**
+
+| `--detail` | Layout | Columns |
+|------------|--------|---------|
+| `0` (default) | Classic side-by-side | Bid / Ask / Last / Δ per side |
+| `1` | One row per contract | + IV, Γ, Θ, 𝒱, Vol, OI |
+| `2` | One row per contract + inline sub-table | + Mark, sizes, OHLC, ρ, time/intrinsic value, settlement type |
+
+When the terminal is too narrow, the renderer drops columns from the right and prints a `note:` line to stderr telling you which. `--json` and `--md` never drop columns.
+
 Output formats:
 
 ```bash
