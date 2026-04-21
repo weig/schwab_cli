@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import sys
 from io import StringIO
 from typing import Any, Literal
 
@@ -195,6 +194,14 @@ def _console(width: int | None) -> tuple[Console, StringIO]:
     return console, buf
 
 
+_STDERR = Console(stderr=True, force_terminal=True, color_system="standard")
+
+
+def _note(msg: str) -> None:
+    """Emit a dimmed advisory to stderr. Keeps stdout clean for piping."""
+    _STDERR.print(f"[dim]{msg}[/]", highlight=False)
+
+
 def _bold_if(itm: bool, s: str) -> str:
     """Bold the cell when the strike row is ITM. Leaves `"—"` unchanged
     (bold em-dash is visually noisy). Existing Rich markup is preserved by
@@ -312,10 +319,7 @@ def render_chain(
         if detail >= 1:
             return _render_human_b(envelope, width)
         if requested_type != "ALL":
-            print(
-                "[note] one-sided chain — rendering as --detail=1.",
-                file=sys.stderr,
-            )
+            _note("[note] one-sided chain — rendering as --detail=1.")
             return _render_human_b(envelope, width)
         return _render_human_a(envelope, width)
     raise NotImplementedError(f"format {fmt} not yet implemented")

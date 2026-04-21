@@ -310,11 +310,7 @@ def test_render_chain_human_b_emits_color_on_delta():
 
 def test_render_chain_human_a_falls_back_to_b_when_puts_only(capsys):
     # Envelope with only put contracts
-    puts_only_raw = dict(_RAW_MULTI_STRIKE)
-    puts_only_raw = {
-        **puts_only_raw,
-        "callExpDateMap": {},
-    }
+    puts_only_raw = {**_RAW_MULTI_STRIKE, "callExpDateMap": {}}
     env = shape_envelope(puts_only_raw)
     out = render_chain(env, fmt=Format.HUMAN, detail=0,
                        requested_type="PUT", width=160)
