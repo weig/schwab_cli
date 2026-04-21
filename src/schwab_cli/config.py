@@ -80,11 +80,10 @@ def save(cfg: Config) -> None:
     path = config_path()
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
-    # Only set 0700 when we just created it; don't re-tighten an existing dir.
     try:
         parent.chmod(0o700)
     except OSError:
-        pass  # best effort; don't block save if chmod is not permitted
+        pass
     payload: dict = {
         "version": cfg.version,
         "client_id": cfg.client_id,
