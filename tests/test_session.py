@@ -136,7 +136,6 @@ def test_save_is_atomic_on_rename_failure(monkeypatch, tmp_path):
     assert list((tmp_path / ".config" / "schwab_cli").glob("*.tmp")) == []
 
 
-@pytest.mark.skip(reason="enabled after oauth.TokenResponse exists in Task 3")
 def test_from_token_response_computes_expiries():
     from schwab_cli.oauth import TokenResponse
     tr = TokenResponse(access_token="a", refresh_token="r", expires_in=1800)
