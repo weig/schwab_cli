@@ -155,3 +155,13 @@ def test_load_raises_on_missing_required_field(monkeypatch, tmp_path):
     _write_config(tmp_path, {"version": 1, "client_id": "cid"})  # no client_secret
     with pytest.raises(ConfigError, match="client_secret"):
         load()
+
+
+def test_load_raises_when_root_is_not_a_dict(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cfg_dir = tmp_path / ".config" / "schwab_cli"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.json").write_text("[1, 2, 3]")
+    with pytest.raises(ConfigError, match="expected object at top level"):
+        load()
