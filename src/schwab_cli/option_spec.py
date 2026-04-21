@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
-_SPEC_RE = re.compile(r"^(?P<date>\d{6})(?P<type>[PC])?\*?(?P<strike>\d+(?:\.\d+)?)?$")
+_SPEC_RE = re.compile(
+    r"^(?P<date>\d{6})(?P<type>[PC])?(?:\*(?P<strike>\d+(?:\.\d+)?)?)?$"
+)
 
 
 @dataclass(frozen=True)
@@ -18,13 +20,18 @@ class OptionSpec:
 class OptionSpecError(ValueError):
     """Raised when the spec string doesn't match the grammar or has an invalid date."""
 
+    def __init__(self, message: str, *, kind: str = "invalid") -> None:
+        super().__init__(message)
+        self.kind = kind
+
 
 def parse_option_spec(spec: str, *, today: date | None = None) -> OptionSpec:
     match = _SPEC_RE.match(spec or "")
     if match is None:
         raise OptionSpecError(
             f"Invalid option spec {spec!r}. "
-            "Expected YYMMDD[P|C]*[strike] — e.g. '270115*250' or '270115P*'."
+            "Expected YYMMDD[P|C]*[strike] — e.g. '270115*250' or '270115P*'.",
+            kind="invalid",
         )
 
     date_str = match.group("date")
@@ -34,12 +41,16 @@ def parse_option_spec(spec: str, *, today: date | None = None) -> OptionSpec:
     try:
         expiry = date(year, month, day)
     except ValueError as e:
-        raise OptionSpecError(f"Invalid expiry date in {spec!r}: {e}") from e
+        raise OptionSpecError(
+            f"Invalid expiry date in {spec!r}: {e}",
+            kind="bad_date",
+        ) from e
 
     now = today or date.today()
     if expiry < now:
         raise OptionSpecError(
-            f"Expiry {expiry.isoformat()} is in the past."
+            f"Expiry {expiry.isoformat()} is in the past.",
+            kind="expired",
         )
 
     type_letter = match.group("type")

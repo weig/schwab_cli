@@ -97,3 +97,31 @@ def test_same_day_expiry_allowed():
 def test_impossible_date_rejected():
     with pytest.raises(OptionSpecError):
         parse_option_spec("270230", today=_TODAY)  # Feb 30
+
+
+def test_strike_without_star_rejected():
+    with pytest.raises(OptionSpecError):
+        parse_option_spec("270115250", today=_TODAY)
+
+
+def test_typed_strike_without_star_rejected():
+    with pytest.raises(OptionSpecError):
+        parse_option_spec("270115P250", today=_TODAY)
+
+
+def test_past_expiry_error_kind_is_expired():
+    with pytest.raises(OptionSpecError) as exc:
+        parse_option_spec("200115", today=_TODAY)
+    assert exc.value.kind == "expired"
+
+
+def test_bad_date_error_kind_is_bad_date():
+    with pytest.raises(OptionSpecError) as exc:
+        parse_option_spec("270230", today=_TODAY)
+    assert exc.value.kind == "bad_date"
+
+
+def test_grammar_miss_error_kind_is_invalid():
+    with pytest.raises(OptionSpecError) as exc:
+        parse_option_spec("abcdef", today=_TODAY)
+    assert exc.value.kind == "invalid"
