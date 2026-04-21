@@ -274,13 +274,17 @@ def _settlement_label(settle_type: str | None) -> str:
     return _SETTLE_LABELS.get(settle_type, settle_type)
 
 
-def _render_human_b(env: dict, width: int | None) -> str:
-    console, buf = _console(width)
-    # highlight=False prevents Rich's ReprHighlighter from colorizing the
-    # header's date / numbers and breaking literal substring tests.
-    console.print(_header_line(env), highlight=False)
-    console.print("")
+def _layout_b_table() -> Table:
+    """Fresh Layout B table with the 13-column header.
 
+    Shared by `_render_human_b` (detail=1, one table for all contracts) and
+    `_render_human_b_inline` (detail=2, one table per contract so the
+    continuation lines can sit between rows). A consequence of the per-
+    contract approach at detail=2 is that column widths are sized
+    independently per contract, so cells don't always align vertically
+    across contracts — an accepted cosmetic trade-off for the interleaved
+    layout.
+    """
     t = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     t.add_column("Symbol")
     t.add_column("Side")
@@ -295,6 +299,17 @@ def _render_human_b(env: dict, width: int | None) -> str:
     t.add_column("𝒱", justify="right")
     t.add_column("Vol", justify="right")
     t.add_column("OI", justify="right")
+    return t
+
+
+def _render_human_b(env: dict, width: int | None) -> str:
+    console, buf = _console(width)
+    # highlight=False prevents Rich's ReprHighlighter from colorizing the
+    # header's date / numbers and breaking literal substring tests.
+    console.print(_header_line(env), highlight=False)
+    console.print("")
+
+    t = _layout_b_table()
 
     for c in env["contracts"]:
         itm = bool(c.get("inTheMoney"))
@@ -331,20 +346,7 @@ def _render_human_b_inline(env: dict, width: int | None) -> str:
         if settle:
             symbol_cell = f"{symbol_cell} ({settle})"
 
-        t = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
-        t.add_column("Symbol")
-        t.add_column("Side")
-        t.add_column("Strike", justify="right")
-        t.add_column("Bid", justify="right")
-        t.add_column("Ask", justify="right")
-        t.add_column("Last", justify="right")
-        t.add_column("IV", justify="right")
-        t.add_column("Δ", justify="right")
-        t.add_column("Γ", justify="right")
-        t.add_column("Θ", justify="right")
-        t.add_column("𝒱", justify="right")
-        t.add_column("Vol", justify="right")
-        t.add_column("OI", justify="right")
+        t = _layout_b_table()
         t.add_row(
             _bold_if(itm, symbol_cell),
             _bold_if(itm, c["side"]),
