@@ -288,6 +288,7 @@ def test_run_full_auth_invalid_client_marker(monkeypatch):
 
 
 @pytest.mark.skip(reason="Stale: selectors+flow changed after live Schwab walk-through; needs FakePage rewrite to support page.expect_request, page.wait_for_url multi-pattern, and the consent modal step")
+@pytest.mark.skip(reason="Substring error markers removed (caused SPA false positives); test no longer applicable")
 def test_run_full_auth_bad_credentials(monkeypatch):
     page = FullFakePage(
         # First content() check (after goto) returns empty, allowing login page.
@@ -307,6 +308,7 @@ def test_run_full_auth_bad_credentials(monkeypatch):
     assert browser.closed is True
 
 
+@pytest.mark.skip(reason="Substring error markers removed (caused SPA false positives); test no longer applicable")
 def test_run_full_auth_redirect_uri_mismatch(monkeypatch):
     page = FullFakePage(
         content_sequence=["", "We are unable to complete your request."],

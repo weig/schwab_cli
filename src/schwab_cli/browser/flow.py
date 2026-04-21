@@ -19,12 +19,11 @@ from schwab_cli.browser.selectors import (
     CONSENT_PAGE_SELECTOR,
     DONE_SELECTOR,
     INVALID_CLIENT_MARKERS,
-    INVALID_CREDENTIALS_TEXT,
     LOGIN_PASSWORD_SELECTOR,
     LOGIN_SUBMIT_SELECTOR,
     LOGIN_USERNAME_SELECTOR,
-    MFA_PAGE_SELECTOR,
-    REDIRECT_URI_MISMATCH_TEXT,
+    MFA_PICKER_PAGE_SELECTOR,
+    MFA_WAITING_PAGE_SELECTOR,
     SCHWAB_APP_OPTION_SELECTOR,
     TRUST_CONTINUE_SELECTOR,
     TRUST_DEVICE_PAGE_SELECTOR,
@@ -40,18 +39,12 @@ from schwab_cli.secrets import resolve_secret
 _DEBUG_SLOW_MO_MS = 1000
 _DEBUG_HOLD_OPEN_SECONDS = 60
 
-# Minimal stealth: hide the most obvious Playwright fingerprints Schwab
-# (and most anti-bot stacks) check for.
-#
-# Note on user_agent: we DON'T override the UA. Spoofing Chrome/<old-version>
-# leaves Sec-CH-UA client-hint headers reporting the real bundled version,
-# which is a trivial mismatch for bot detection to spot. Playwright's
-# default UA already drops 'HeadlessChrome' when not headless, so the
-# default is more believable than our spoof.
+# Stealth: bypass Schwab's anti-bot detection. Manual stealth (just removing
+# navigator.webdriver) wasn't enough — Schwab's server accepted the credentials
+# but silently no-op'd the browser-side response. playwright-stealth patches
+# ~20 fingerprint surfaces (navigator.plugins, webgl, sec-ch-ua, chrome.runtime,
+# etc.) and that's what gets the form submit through cleanly.
 _STEALTH_LAUNCH_ARGS = ("--disable-blink-features=AutomationControlled",)
-_STEALTH_INIT_SCRIPT = (
-    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-)
 
 
 class AuthError(Exception):
@@ -234,6 +227,8 @@ def _launch_browser(headless: bool, slow_mo_ms: int = 0):  # pragma: no cover
     except OSError:
         pass
 
+    from playwright_stealth import Stealth
+
     pw = sync_playwright().start()
     context = pw.chromium.launch_persistent_context(
         user_data_dir=str(user_data_dir),
@@ -241,6 +236,12 @@ def _launch_browser(headless: bool, slow_mo_ms: int = 0):  # pragma: no cover
         slow_mo=slow_mo_ms,
         args=list(_STEALTH_LAUNCH_ARGS),
     )
+    # Apply playwright-stealth's full battery of evasions to every page in the
+    # context. Includes navigator.webdriver removal, plugin spoofing, webgl
+    # vendor masking, sec-ch-ua matching, etc.
+    # We're on macOS, so override the default Win32 navigator.platform to MacIntel
+    # (Sec-CH-UA from real Chromium will say macOS — keep them consistent).
+    Stealth(navigator_platform_override="MacIntel").apply_stealth_sync(context)
 
     original_close = context.close
 
@@ -299,7 +300,9 @@ def run_full_auth(cfg: Config) -> str:
 
     page = None
     try:
-        context.add_init_script(_STEALTH_INIT_SCRIPT)
+        # playwright-stealth (applied at context creation) handles
+        # navigator.webdriver and many other fingerprint surfaces, so no
+        # manual init script needed here.
         page = context.new_page()
         auth_url = build_auth_url(cfg)
         _debug_log(f"navigating to auth URL: {auth_url}")
@@ -328,22 +331,30 @@ def run_full_auth(cfg: Config) -> str:
         page.keyboard.press("Tab")
         page.click(LOGIN_SUBMIT_SELECTOR)
 
-        _debug_log("waiting for MFA / consent page (whichever appears first)")
+        # Three possible post-login destinations:
+        # - consent: device fully trusted, no MFA needed
+        # - mfa_picker: choose verification method (/authenticators)
+        # - mfa_waiting: Schwab remembered method, push already sent (/mobile_approve)
+        # Schwab can take a while to set up the MFA push, so the timeout here
+        # is more generous than the per-step default.
+        # We deliberately do NOT pass text-substring known_errors here: SPA
+        # bundles include localized error strings on every page, producing
+        # false positives. Real failures will surface as a dump on timeout.
+        _debug_log("waiting for MFA picker / waiting / consent (whichever appears first)")
         post_login = wait_for_first_present(
             page,
             candidates={
                 "consent": CONSENT_PAGE_SELECTOR,
-                "mfa": MFA_PAGE_SELECTOR,
+                "mfa_waiting": MFA_WAITING_PAGE_SELECTOR,
+                "mfa_picker": MFA_PICKER_PAGE_SELECTOR,
             },
-            known_errors={
-                INVALID_CREDENTIALS_TEXT: "Login failed — incorrect username/password.",
-                REDIRECT_URI_MISMATCH_TEXT: "Redirect URI mismatch — re-check setup.",
-            },
+            known_errors={},
+            timeout_ms=60_000,
         )
         dump(f"post-login-{post_login}")
 
-        if post_login == "mfa":
-            _debug_log("MFA page detected; looking for Schwab App option")
+        if post_login == "mfa_picker":
+            _debug_log("MFA picker page; clicking Schwab App option")
             schwab_app = page.locator(SCHWAB_APP_OPTION_SELECTOR).first
             if schwab_app.count() == 0:
                 dump("mfa-no-schwab-app")
@@ -353,9 +364,11 @@ def run_full_auth(cfg: Config) -> str:
                     "Schwab is offering."
                 )
             schwab_app.click()
-            _user_message("Schwab App MFA: check your phone to approve (up to 30s)...")
-            _debug_log("waiting for trust-device or consent page (30s)")
+            post_login = "mfa_waiting"  # fall through to waiting-page handler
 
+        if post_login == "mfa_waiting":
+            _user_message("Schwab App MFA: check your phone to approve (up to 60s)...")
+            _debug_log("waiting for trust-device or consent page (60s)")
             after_approval = wait_for_first_present(
                 page,
                 candidates={
@@ -363,7 +376,7 @@ def run_full_auth(cfg: Config) -> str:
                     "consent": CONSENT_PAGE_SELECTOR,
                 },
                 known_errors={},
-                timeout_ms=30_000,
+                timeout_ms=60_000,
             )
             dump(f"post-mfa-{after_approval}")
 
@@ -443,15 +456,14 @@ def run_full_auth(cfg: Config) -> str:
         code = parse_qs(parsed.query).get("code", [None])[0]
         if not code:
             raise AuthError("Redirect reached but no `code` param present.")
-        _debug_log("authorization code captured")
+        _debug_log("authorization code captured (closing browser to exchange before TTL)")
         return code
     except Exception:
-        # Always capture the current page so the user can see exactly what
-        # Schwab was showing when we failed — selectors can be tuned from it.
+        # Capture the page so the user can see what Schwab was showing.
         if page is not None:
             dump("failure")
-        raise
-    finally:
+        # Only hold the browser open on FAILURE — on success the auth code
+        # has a ~30s TTL and the caller needs to exchange it immediately.
         if debug:
             _debug_log(
                 f"holding browser open for {_DEBUG_HOLD_OPEN_SECONDS}s "
@@ -461,6 +473,8 @@ def run_full_auth(cfg: Config) -> str:
                 time.sleep(_DEBUG_HOLD_OPEN_SECONDS)
             except KeyboardInterrupt:
                 _debug_log("hold interrupted; closing browser")
+        raise
+    finally:
         try:
             context.close()
         except Exception:  # pragma: no cover

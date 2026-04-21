@@ -14,9 +14,15 @@ LOGIN_SUBMIT_SELECTOR = "button#btnLogin"
 # --- MFA "Confirm Your Identity" page (URL: /authenticators) ---------------
 # The Schwab App option is a <div role="button">, NOT a real <button>.
 # Use the stable id; the presence of this element is also our "we're on the
-# MFA page" marker (it exists only on this page).
+# MFA method-picker page" marker (it exists only on that page).
 SCHWAB_APP_OPTION_SELECTOR = "#mobile_approve"
-MFA_PAGE_SELECTOR = SCHWAB_APP_OPTION_SELECTOR
+MFA_PICKER_PAGE_SELECTOR = SCHWAB_APP_OPTION_SELECTOR
+
+# --- MFA waiting page (URL: /mobile_approve) -------------------------------
+# Reached either by clicking Schwab App on the picker, OR directly when
+# Schwab remembers the user's preferred method. Detect via a fragment of
+# the page's prompt text — there's no stable id on this page.
+MFA_WAITING_PAGE_SELECTOR = "text=We sent notification to your mobile device"
 
 # --- Trust-device "Security Preference - Device" (URL: /devicetag/remember) -
 # Default is "No, do not remember" — we must click Yes, then Continue.
