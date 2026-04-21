@@ -72,19 +72,21 @@ def test_wait_any_times_out_with_ui_change_message():
         wait_any(page, expected="#ready", known_errors={}, timeout_ms=200)
 
 
-def test_wait_any_known_marker_takes_precedence_over_selector():
+def test_wait_any_expected_selector_takes_precedence_over_stale_marker():
+    # Schwab pages keep error elements in the DOM and toggle visibility; once
+    # the page has advanced, the expected selector is the source of truth and
+    # stale error text must not trigger a false positive.
     page = FakePage(
         content_sequence=["Invalid login ID or password."],
-        selectors_present={"#ready": True},  # selector is also present
+        selectors_present={"#ready": True},  # expected element is present
     )
-    # Marker should be reported because it indicates a definite failure.
-    with pytest.raises(AuthError, match="incorrect"):
-        wait_any(
-            page,
-            expected="#ready",
-            known_errors={"Invalid login ID or password.": "Login failed — incorrect username/password."},
-            timeout_ms=200,
-        )
+    # No exception: expected selector found, error marker ignored.
+    wait_any(
+        page,
+        expected="#ready",
+        known_errors={"Invalid login ID or password.": "Login failed — incorrect username/password."},
+        timeout_ms=200,
+    )
 
 
 from urllib.parse import urlparse, parse_qs

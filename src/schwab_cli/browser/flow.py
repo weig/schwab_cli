@@ -61,8 +61,16 @@ def wait_any(
     """
     deadline = time.monotonic() + timeout_ms / 1000.0
     while True:
-        # Check known error markers FIRST so a definite failure is not masked by
-        # a coincidentally-present expected element.
+        # Check expected selector FIRST. If the page has advanced, trust that
+        # even if stale error text still lives in the DOM (hidden) — Schwab
+        # pages keep error elements in the HTML and toggle visibility.
+        try:
+            page.wait_for_selector(expected, timeout=int(_POLL_INTERVAL_SECONDS * 1000))
+            return
+        except Exception:
+            pass
+
+        # Expected not there yet — check whether a known error explains why.
         try:
             content = page.content()
         except Exception:
@@ -70,13 +78,6 @@ def wait_any(
         for marker, user_message in known_errors.items():
             if marker in content:
                 raise AuthError(user_message)
-
-        # Try the expected selector with a short per-iteration timeout.
-        try:
-            page.wait_for_selector(expected, timeout=int(_POLL_INTERVAL_SECONDS * 1000))
-            return
-        except Exception:
-            pass
 
         if time.monotonic() >= deadline:
             raise AuthError(_UI_CHANGED_MESSAGE)
