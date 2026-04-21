@@ -254,3 +254,47 @@ def test_render_chain_human_a_non_itm_strike_row_not_bold():
     # the bold-strike-label `[bold]80.00[/]` → no `\x1b[1m80.00` substring.
     assert "80.00" in out
     assert "\x1b[1m80.00" not in out
+
+
+def test_render_chain_human_b_columns_present():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=1,
+                       requested_type="ALL", width=160)
+    # Symbol, Side, Strike, Bid, Ask, Last are required columns.
+    assert "Symbol" in out
+    assert "Side" in out
+    assert "Strike" in out
+    # Greeks columns
+    assert "IV" in out or "Δ" in out or "Γ" in out
+
+
+def test_render_chain_human_b_one_row_per_contract():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=1,
+                       requested_type="ALL", width=160)
+    # 3 calls + 3 puts = 6 contract rows
+    assert out.count("270115C00135000") == 1
+    assert out.count("270115P00135000") == 1
+    assert out.count("270115C00140000") == 1
+    assert out.count("270115P00140000") == 1
+
+
+def test_render_chain_human_b_sorted_ascending_call_before_put():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=1,
+                       requested_type="ALL", width=160)
+    # Call 135 appears before Put 135; Put 135 before Call 140.
+    idx_c135 = out.index("270115C00135000")
+    idx_p135 = out.index("270115P00135000")
+    idx_c140 = out.index("270115C00140000")
+    assert idx_c135 < idx_p135 < idx_c140
+
+
+def test_render_chain_human_b_bolds_itm_rows():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=1,
+                       requested_type="ALL", width=160)
+    assert "\x1b[1m" in out  # bold ANSI from ITM rows
+
+
+def test_render_chain_human_b_emits_color_on_delta():
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=1,
+                       requested_type="ALL", width=160)
+    assert "\x1b[32m" in out  # green for positive delta (calls)
+    assert "\x1b[31m" in out  # red for negative delta (puts)

@@ -255,6 +255,49 @@ def _render_human_a(env: dict, width: int | None) -> str:
     return buf.getvalue()
 
 
+def _render_human_b(env: dict, width: int | None) -> str:
+    console, buf = _console(width)
+    # highlight=False prevents Rich's ReprHighlighter from colorizing the
+    # header's date / numbers and breaking literal substring tests.
+    console.print(_header_line(env), highlight=False)
+    console.print("")
+
+    t = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    t.add_column("Symbol")
+    t.add_column("Side")
+    t.add_column("Strike", justify="right")
+    t.add_column("Bid", justify="right")
+    t.add_column("Ask", justify="right")
+    t.add_column("Last", justify="right")
+    t.add_column("IV", justify="right")
+    t.add_column("Δ", justify="right")
+    t.add_column("Γ", justify="right")
+    t.add_column("Θ", justify="right")
+    t.add_column("𝒱", justify="right")
+    t.add_column("Vol", justify="right")
+    t.add_column("OI", justify="right")
+
+    for c in env["contracts"]:
+        itm = bool(c.get("inTheMoney"))
+        t.add_row(
+            _bold_if(itm, c["optionSymbol"]),
+            _bold_if(itm, c["side"]),
+            _bold_if(itm, _fmt(c["strike"])),
+            _bold_if(itm, _fmt(c["bid"])),
+            _bold_if(itm, _fmt(c["ask"])),
+            _bold_if(itm, _fmt_signed(c["last"])),
+            _bold_if(itm, _fmt(c["iv"], 3)),
+            _bold_if(itm, _fmt_signed(c["delta"], 3)),
+            _bold_if(itm, _fmt(c["gamma"], 3)),
+            _bold_if(itm, _fmt(c["theta"], 3)),
+            _bold_if(itm, _fmt(c["vega"], 3)),
+            _bold_if(itm, _fmt(c["volume"], 0)),
+            _bold_if(itm, _fmt(c["openInterest"], 0)),
+        )
+    console.print(t)
+    return buf.getvalue()
+
+
 def render_chain(
     envelope: dict,
     *,
@@ -264,5 +307,7 @@ def render_chain(
     width: int | None = None,
 ) -> str:
     if fmt is Format.HUMAN:
+        if detail >= 1:
+            return _render_human_b(envelope, width)
         return _render_human_a(envelope, width)
     raise NotImplementedError(f"format {fmt} not yet implemented")
