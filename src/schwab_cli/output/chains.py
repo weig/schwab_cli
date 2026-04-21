@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import math
+from io import StringIO
 from typing import Any, Literal
+
+from rich.console import Console
+from rich.table import Table
+
+from schwab_cli.output.format import Format
 
 
 def _finite(v: Any) -> float | None:
@@ -107,15 +113,6 @@ def shape_envelope(raw: dict, *, strike_count: int | None = None) -> dict:
         "contracts": contracts,
     }
 
-
-import json as _json
-from io import StringIO
-
-from rich.console import Console
-from rich.table import Table
-from rich.text import Text
-
-from schwab_cli.output.format import Format
 
 _HEADER_FMT = "{symbol} — {expiry} ({dte} DTE)    Spot: ${spot}  ({change} / {pct}%)"
 
