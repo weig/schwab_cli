@@ -37,6 +37,7 @@ class SchwabClient:
     """
 
     TRADER_BASE = "https://api.schwabapi.com/trader/v1"
+    MARKET_BASE = "https://api.schwabapi.com/marketdata/v1"
 
     def __init__(self, cfg: Config, session: Session) -> None:
         self._cfg = cfg
