@@ -26,6 +26,7 @@ from schwab_cli.oauth import build_auth_url
 from schwab_cli.secrets import resolve_secret
 
 _DEBUG_SLOW_MO_MS = 1000
+_DEBUG_HOLD_OPEN_SECONDS = 10
 
 
 class AuthError(Exception):
@@ -211,6 +212,15 @@ def run_full_auth(cfg: Config) -> str:
         _debug_log("authorization code captured")
         return code
     finally:
+        if debug:
+            _debug_log(
+                f"holding browser open for {_DEBUG_HOLD_OPEN_SECONDS}s "
+                "(Ctrl+C to close now)"
+            )
+            try:
+                time.sleep(_DEBUG_HOLD_OPEN_SECONDS)
+            except KeyboardInterrupt:
+                _debug_log("hold interrupted; closing browser")
         try:
             browser.close()
         except Exception:  # pragma: no cover

@@ -350,6 +350,7 @@ def _happy_page_and_browser():
 
 def test_run_full_auth_passes_slow_mo_when_debug_set(monkeypatch):
     monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda _s: None)
     _, browser = _happy_page_and_browser()
     captured = {}
 
@@ -386,6 +387,7 @@ def test_run_full_auth_no_slow_mo_when_debug_unset(monkeypatch):
 
 def test_run_full_auth_emits_debug_logs_when_debug_set(monkeypatch, capsys):
     monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda _s: None)
     _, browser = _happy_page_and_browser()
     monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
     monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
@@ -398,6 +400,7 @@ def test_run_full_auth_emits_debug_logs_when_debug_set(monkeypatch, capsys):
     assert "[debug] launching chromium" in err
     assert "[debug] navigating to auth URL" in err
     assert "[debug] authorization code captured" in err
+    assert "[debug] holding browser open" in err
     # Credentials must never appear in the log.
     assert "user@example.com" not in err
     assert "op://X/Y/Z" not in err
@@ -413,3 +416,68 @@ def test_run_full_auth_quiet_when_debug_unset(monkeypatch, capsys):
     run_full_auth(_cfg())
     err = capsys.readouterr().err
     assert "[debug]" not in err
+
+
+def test_run_full_auth_holds_open_before_close_when_debug_set(monkeypatch):
+    monkeypatch.setenv("DEBUG", "1")
+    sleeps: list[float] = []
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda s: sleeps.append(s))
+    _, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    assert sleeps == [10]          # _DEBUG_HOLD_OPEN_SECONDS
+    assert browser.closed is True  # still closed after the hold
+
+
+def test_run_full_auth_does_not_hold_open_when_debug_unset(monkeypatch):
+    monkeypatch.delenv("DEBUG", raising=False)
+    sleeps: list[float] = []
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda s: sleeps.append(s))
+    _, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    assert sleeps == []
+    assert browser.closed is True
+
+
+def test_run_full_auth_holds_open_on_failure_then_closes(monkeypatch):
+    monkeypatch.setenv("DEBUG", "1")
+    sleeps: list[float] = []
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda s: sleeps.append(s))
+
+    # Fail at the consent step so we exercise the failure → hold → close path.
+    page = FullFakePage(
+        content_sequence=["", "Invalid login ID or password."],
+        selectors_present={
+            "input#loginIdInput": True,
+            "text=Terms of Use": False,
+        },
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError):
+        run_full_auth(_cfg())
+    assert sleeps == [10]
+    assert browser.closed is True
+
+
+def test_run_full_auth_hold_open_interrupted_by_ctrl_c(monkeypatch):
+    monkeypatch.setenv("DEBUG", "1")
+
+    def interrupt(_s):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", interrupt)
+    _, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    # Ctrl+C during hold must NOT propagate — browser still closes cleanly.
+    run_full_auth(_cfg())
+    assert browser.closed is True
