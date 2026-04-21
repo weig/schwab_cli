@@ -357,3 +357,32 @@ def test_render_chain_human_detail2_no_multiplier_or_itm_columns():
                        requested_type="ALL", width=180)
     assert "Mult:" not in out
     assert "ITM:" not in out
+
+
+def test_render_chain_human_a_drops_rightmost_columns_at_narrow_width(capsys):
+    # At 60 cols the Δ, OI, Vol pairs cannot fit — drop from the right.
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=0,
+                       requested_type="ALL", width=60)
+    err = capsys.readouterr().err
+    assert "terminal too narrow" in err
+    assert "--detail=1" in err
+    # STRIKE column and B/A/L always kept.
+    assert "STRIKE" in out
+
+
+def test_render_chain_human_b_drops_rightmost_greeks_at_narrow_width(capsys):
+    out = render_chain(_envelope(), fmt=Format.HUMAN, detail=1,
+                       requested_type="ALL", width=70)
+    err = capsys.readouterr().err
+    assert "terminal too narrow" in err
+    # Symbol, Side, Strike, Bid, Ask, Last always kept.
+    assert "Symbol" in out
+    assert "Strike" in out
+    assert "Bid" in out
+
+
+def test_render_chain_wide_width_keeps_all_columns(capsys):
+    render_chain(_envelope(), fmt=Format.HUMAN, detail=1,
+                 requested_type="ALL", width=200)
+    err = capsys.readouterr().err
+    assert "too narrow" not in err
