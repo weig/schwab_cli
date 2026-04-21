@@ -1125,6 +1125,7 @@ dependencies = [
     { name = "httpx" },
     { name = "playwright" },
     { name = "playwright-stealth" },
+    { name = "rich" },
     { name = "seleniumbase" },
     { name = "typer" },
 ]
@@ -1144,6 +1145,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
+    { name = "rich", specifier = ">=13.7" },
     { name = "seleniumbase", specifier = ">=4.48.2" },
     { name = "typer", specifier = ">=0.12.0" },
 ]
