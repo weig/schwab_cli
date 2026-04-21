@@ -8,13 +8,22 @@ _ACCOUNTS_PAYLOAD = [
     {"securitiesAccount": {
         "accountNumber": "12345678",
         "type": "MARGIN",
-        "currentBalances": {"liquidationValue": 12345.67, "cashBalance": 1000.0},
+        "currentBalances": {
+            "liquidationValue": 12345.67,
+            "buyingPower": 24691.34,
+            "cashBalance": 1000.0,
+            "maintenanceRequirement": 3456.78,
+        },
         "positions": [{"instrument": {"symbol": "AAPL"}}],
     }},
     {"securitiesAccount": {
         "accountNumber": "87654321",
         "type": "CASH",
-        "currentBalances": {"liquidationValue": 7890.12, "cashBalance": 100.0},
+        "currentBalances": {
+            "liquidationValue": 7890.12,
+            "cashBalance": 100.0,
+            # CASH accounts have no buyingPower / maintenanceRequirement
+        },
         "positions": [],
     }},
 ]
@@ -27,23 +36,39 @@ def test_render_accounts_json_is_parseable():
     assert data[0]["accountNumber"] == "12345678"
     assert data[0]["type"] == "MARGIN"
     assert data[0]["liquidationValue"] == 12345.67
+    assert data[0]["buyingPower"] == 24691.34
+    assert data[0]["maintenanceRequirement"] == 3456.78
+    # Cash account: buying power / maintenance absent from balances → None in output
+    assert data[1]["buyingPower"] is None
+    assert data[1]["maintenanceRequirement"] is None
 
 
 def test_render_accounts_md_has_header_and_rows():
     out = render_accounts(_ACCOUNTS_PAYLOAD, Format.MD)
     lines = out.strip().splitlines()
     assert len(lines) >= 4
-    assert "|" in lines[0]
+    # New header includes all requested columns.
+    assert "Net Liq" in lines[0]
+    assert "Buying Power" in lines[0]
+    assert "Cash" in lines[0]
+    assert "Maint" in lines[0]
+    assert "Positions" in lines[0]
     assert "MARGIN" in out
-    # Suffix should appear (either full or masked); consistency with HUMAN is masked.
     assert "5678" in out
-    # Account numbers should NOT appear unmasked in MD (consistency with HUMAN).
     assert "12345678" not in out
+    # MARGIN row shows values; CASH row shows em-dashes for absent fields.
+    assert "24,691.34" in out  # buying power
+    assert "3,456.78" in out   # maintenance
+    assert "—" in out          # em-dash from missing CASH fields
 
 
 def test_render_accounts_human_includes_last_4_mask():
     out = render_accounts(_ACCOUNTS_PAYLOAD, Format.HUMAN)
     assert "5678" in out or "...5678" in out
+    # Human table must show the new columns too.
+    assert "Net Liq" in out
+    assert "Buying Power" in out
+    assert "Maint" in out  # header may be "Maint Req" or similar
 
 
 _SINGLE_ACCOUNT = {"securitiesAccount": {

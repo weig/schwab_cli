@@ -16,7 +16,9 @@ def _shape_account(raw: dict) -> dict:
         "accountNumber": sec.get("accountNumber", ""),
         "type": sec.get("type", ""),
         "liquidationValue": bal.get("liquidationValue"),
+        "buyingPower": bal.get("buyingPower"),
         "cashBalance": bal.get("cashBalance"),
+        "maintenanceRequirement": bal.get("maintenanceRequirement"),
         "positionCount": len(sec.get("positions") or []),
     }
 
@@ -40,31 +42,38 @@ def render_accounts(raw_list: list[dict], fmt: Format) -> str:
         return _json.dumps(rows, indent=2)
     if fmt is Format.MD:
         lines = [
-            "| Account | Type | Liquidation Value | Cash Balance | Positions |",
-            "|---------|------|-------------------|--------------|-----------|",
+            "| Account | Type | Net Liq | Buying Power | Cash | Maint Req | Positions |",
+            "|---------|------|---------|--------------|------|-----------|-----------|",
         ]
         for r in rows:
             lines.append(
                 f"| {_mask_account(r['accountNumber'])} | {r['type']} | "
                 f"{_fmt_money(r['liquidationValue'])} | "
-                f"{_fmt_money(r['cashBalance'])} | {r['positionCount']} |"
+                f"{_fmt_money(r['buyingPower'])} | "
+                f"{_fmt_money(r['cashBalance'])} | "
+                f"{_fmt_money(r['maintenanceRequirement'])} | "
+                f"{r['positionCount']} |"
             )
         return "\n".join(lines) + "\n"
-    # HUMAN
+    # HUMAN — widen so the extra columns fit cleanly
     buf = StringIO()
-    console = Console(file=buf, force_terminal=False, no_color=True, width=100)
+    console = Console(file=buf, force_terminal=False, no_color=True, width=140)
     t = Table(title="Accounts")
     t.add_column("Account", style="bold")
     t.add_column("Type")
-    t.add_column("Liquidation Value", justify="right")
-    t.add_column("Cash Balance", justify="right")
+    t.add_column("Net Liq", justify="right")
+    t.add_column("Buying Power", justify="right")
+    t.add_column("Cash", justify="right")
+    t.add_column("Maint Req", justify="right")
     t.add_column("Positions", justify="right")
     for r in rows:
         t.add_row(
             _mask_account(r["accountNumber"]),
             r["type"],
             _fmt_money(r["liquidationValue"]),
+            _fmt_money(r["buyingPower"]),
             _fmt_money(r["cashBalance"]),
+            _fmt_money(r["maintenanceRequirement"]),
             str(r["positionCount"]),
         )
     console.print(t)
