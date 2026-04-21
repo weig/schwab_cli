@@ -35,7 +35,10 @@ def test_render_accounts_md_has_header_and_rows():
     assert len(lines) >= 4
     assert "|" in lines[0]
     assert "MARGIN" in out
-    assert "12345678" in out
+    # Suffix should appear (either full or masked); consistency with HUMAN is masked.
+    assert "5678" in out
+    # Account numbers should NOT appear unmasked in MD (consistency with HUMAN).
+    assert "12345678" not in out
 
 
 def test_render_accounts_human_includes_last_4_mask():
@@ -100,3 +103,23 @@ def test_render_positions_md_contains_symbols():
     assert "AAPL" in out
     assert "MSFT" in out
     assert "|" in out.splitlines()[0]
+
+
+def test_render_account_human_has_table():
+    out = render_account(_SINGLE_ACCOUNT, Format.HUMAN)
+    assert "MARGIN" in out
+    assert "12345678" in out  # HUMAN shows the full number in "Number" row
+
+
+def test_render_account_md_has_headings():
+    out = render_account(_SINGLE_ACCOUNT, Format.MD)
+    assert out.startswith("# Account ...5678")
+    assert "**Type:**" in out
+    assert "MARGIN" in out
+
+
+def test_render_positions_human_has_rows():
+    out = render_positions(_POSITION_ROWS, Format.HUMAN)
+    assert "AAPL" in out
+    assert "MSFT" in out
+    assert "200.00" in out  # avg price formatting

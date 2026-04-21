@@ -45,7 +45,7 @@ def render_accounts(raw_list: list[dict], fmt: Format) -> str:
         ]
         for r in rows:
             lines.append(
-                f"| {r['accountNumber']} | {r['type']} | "
+                f"| {_mask_account(r['accountNumber'])} | {r['type']} | "
                 f"{_fmt_money(r['liquidationValue'])} | "
                 f"{_fmt_money(r['cashBalance'])} | {r['positionCount']} |"
             )
