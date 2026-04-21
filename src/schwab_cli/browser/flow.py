@@ -5,6 +5,10 @@ import time
 from typing import Protocol
 from urllib.parse import parse_qs, urlparse
 
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
 from schwab_cli.browser.selectors import (
     ACCEPT_SELECTOR,
     ACCOUNT_CHECKBOX_SELECTOR,
@@ -18,9 +22,14 @@ from schwab_cli.browser.selectors import (
     LOGIN_PASSWORD_SELECTOR,
     LOGIN_SUBMIT_SELECTOR,
     LOGIN_USERNAME_SELECTOR,
+    MFA_PAGE_SELECTOR,
     REDIRECT_URI_MISMATCH_TEXT,
+    SCHWAB_APP_OPTION_SELECTOR,
+    TRUST_DEVICE_PAGE_SELECTOR,
+    TRUST_NEXT_SELECTOR,
+    TRUST_YES_SELECTOR,
 )
-from schwab_cli.config import Config
+from schwab_cli.config import Config, config_path
 from schwab_cli.utils import _debug_log, _is_debug_truthy
 from schwab_cli.oauth import build_auth_url
 from schwab_cli.secrets import resolve_secret
@@ -96,6 +105,105 @@ def wait_any(
             raise AuthError(_UI_CHANGED_MESSAGE)
 
 
+def wait_for_first_present(
+    page,
+    *,
+    candidates: dict[str, str],
+    known_errors: dict[str, str],
+    timeout_ms: int = 15_000,
+) -> str:
+    """Wait for any of the candidate selectors to appear.
+
+    Returns the key of the first selector that matches. Same error/timeout
+    semantics as `wait_any`. Selectors are polled in dict-iteration order each
+    cycle so with Python 3.7+ insertion order is respected — put the more
+    common path first to minimize wait on the slow path.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    per_iter_timeout = int(_POLL_INTERVAL_SECONDS * 1000)
+    while True:
+        for name, selector in candidates.items():
+            try:
+                page.wait_for_selector(selector, timeout=per_iter_timeout)
+                return name
+            except Exception:
+                pass
+
+        try:
+            content = page.content()
+        except Exception:
+            content = ""
+        for marker, user_message in known_errors.items():
+            if marker in content:
+                raise AuthError(user_message)
+
+        if time.monotonic() >= deadline:
+            raise AuthError(_UI_CHANGED_MESSAGE)
+
+
+def _user_message(text: str) -> None:
+    """Print a user-facing status line to stderr (always, not just DEBUG)."""
+    print(text, file=sys.stderr, flush=True)
+
+
+def _make_dump_dir() -> Path:
+    """Create (and lock down) a fresh debug dump directory for this run.
+
+    Returned path looks like: ~/.config/schwab_cli/auth-debug/<ISO-timestamp>/
+    """
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    root = config_path().parent / "auth-debug" / stamp
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root.chmod(0o700)
+        root.parent.chmod(0o700)
+    except OSError:
+        pass
+    return root
+
+
+def _sanitize(content: str, secrets: tuple[str, ...]) -> str:
+    """Redact any occurrences of the given secrets from the page source."""
+    sanitized = content
+    for s in secrets:
+        if s:
+            sanitized = sanitized.replace(s, "[REDACTED]")
+    return sanitized
+
+
+def _dump_page(
+    page,
+    *,
+    label: str,
+    run_dir: Path | None,
+    step_idx: list[int],
+    secrets: tuple[str, ...],
+) -> None:
+    """Save `page.content()` to disk at `<run_dir>/<NN>-<label>.html`.
+
+    No-op if DEBUG is unset or `run_dir` is None. Sanitizes known secrets
+    before writing. `step_idx` is a 1-element list used as a mutable counter
+    so callers don't have to thread an index themselves.
+    """
+    if run_dir is None:
+        return
+    step_idx[0] += 1
+    try:
+        content = page.content()
+    except Exception as e:
+        content = f"<!-- failed to capture: {e} -->"
+    content = _sanitize(content, secrets)
+    filename = f"{step_idx[0]:02d}-{label}.html"
+    path = run_dir / filename
+    try:
+        path.write_text(content)
+        path.chmod(0o600)
+    except OSError as e:
+        _debug_log(f"failed to write dump {filename}: {e}")
+        return
+    _debug_log(f"dumped page source → {path}")
+
+
 def _launch_browser(headless: bool, slow_mo_ms: int = 0):  # pragma: no cover
     """Real Playwright launch. Pulled out so tests can monkeypatch this single seam."""
     from playwright.sync_api import sync_playwright
@@ -148,6 +256,21 @@ def run_full_auth(cfg: Config) -> str:
             ) from e
         raise AuthError(f"Failed to launch browser: {msg}") from e
 
+    run_dir = _make_dump_dir() if debug else None
+    if run_dir is not None:
+        _debug_log(f"page source dumps will be written to {run_dir}")
+    step_idx = [0]
+    secrets_to_redact = (username, password)
+
+    def dump(label: str) -> None:
+        _dump_page(
+            page,
+            label=label,
+            run_dir=run_dir,
+            step_idx=step_idx,
+            secrets=secrets_to_redact,
+        )
+
     try:
         page = browser.new_page(user_agent=_STEALTH_USER_AGENT)
         page.add_init_script(_STEALTH_INIT_SCRIPT)
@@ -164,23 +287,66 @@ def run_full_auth(cfg: Config) -> str:
                 for marker in INVALID_CLIENT_MARKERS
             },
         )
+        dump("login")
 
         _debug_log("filling credentials and submitting login")
         page.fill(LOGIN_USERNAME_SELECTOR, username)
         page.fill(LOGIN_PASSWORD_SELECTOR, password)
         page.click(LOGIN_SUBMIT_SELECTOR)
 
-        _debug_log("waiting for consent page")
-        wait_any(
+        _debug_log("waiting for MFA / consent page (whichever appears first)")
+        post_login = wait_for_first_present(
             page,
-            expected=CONSENT_PAGE_SELECTOR,
+            candidates={
+                "consent": CONSENT_PAGE_SELECTOR,
+                "mfa": MFA_PAGE_SELECTOR,
+            },
             known_errors={
                 INVALID_CREDENTIALS_TEXT: "Login failed — incorrect username/password.",
                 REDIRECT_URI_MISMATCH_TEXT: "Redirect URI mismatch — re-check setup.",
             },
         )
+        dump(f"post-login-{post_login}")
+
+        if post_login == "mfa":
+            _debug_log("MFA page detected; looking for Schwab App option")
+            schwab_app = page.locator(SCHWAB_APP_OPTION_SELECTOR).first
+            if schwab_app.count() == 0:
+                dump("mfa-no-schwab-app")
+                raise AuthError(
+                    "Schwab App MFA option not found. Re-run with DEBUG=1 and "
+                    "inspect the dumped page source to see what options "
+                    "Schwab is offering."
+                )
+            schwab_app.click()
+            _user_message("Schwab App MFA: check your phone to approve (up to 30s)...")
+            _debug_log("waiting for trust-device or consent page (30s)")
+
+            after_approval = wait_for_first_present(
+                page,
+                candidates={
+                    "trust": TRUST_DEVICE_PAGE_SELECTOR,
+                    "consent": CONSENT_PAGE_SELECTOR,
+                },
+                known_errors={},
+                timeout_ms=30_000,
+            )
+            dump(f"post-mfa-{after_approval}")
+
+            if after_approval == "trust":
+                _debug_log("trust-device page: selecting yes and clicking next")
+                page.locator(TRUST_YES_SELECTOR).first.click()
+                page.click(TRUST_NEXT_SELECTOR)
+                dump("after-trust-next")
+                _debug_log("waiting for consent page after trust step")
+                wait_any(
+                    page,
+                    expected=CONSENT_PAGE_SELECTOR,
+                    known_errors={},
+                )
 
         _debug_log("scrolling consent page and accepting")
+        dump("consent")
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         page.click(ACCEPT_SELECTOR)
 
@@ -190,6 +356,7 @@ def run_full_auth(cfg: Config) -> str:
             expected=ACCOUNT_SELECTION_SELECTOR,
             known_errors={},
         )
+        dump("accounts")
 
         checkboxes = page.query_selector_all(ACCOUNT_CHECKBOX_SELECTOR)
         _debug_log(f"found {len(checkboxes)} account checkbox(es)")
@@ -207,6 +374,7 @@ def run_full_auth(cfg: Config) -> str:
             expected=CONFIRM_PAGE_SELECTOR,
             known_errors={},
         )
+        dump("confirm")
 
         _debug_log("clicking done")
         page.click(DONE_SELECTOR)

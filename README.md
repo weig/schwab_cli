@@ -42,11 +42,21 @@ schwab_cli auth --force  # skip refresh; always run the full OAuth flow
 
 Tokens are saved to `~/.config/schwab_cli/session.json` (mode `0600`).
 
+The flow also handles Schwab's MFA when it shows. After login, if Schwab presents the device-verification page, `schwab_cli auth`:
+
+1. Selects the **Schwab App** option. If the option isn't present, auth fails with a clear message telling you to re-run with `DEBUG=1` and inspect the dumped page source.
+2. Prints `"Schwab App MFA: check your phone to approve (up to 30s)..."` to stderr and waits up to 30 seconds for approval.
+3. If Schwab shows the **Trust this device** page afterwards, selects *Yes, trust this device* and clicks **Next**.
+4. Proceeds to the consent page.
+
+If the device is already trusted, the MFA and/or trust steps are skipped automatically.
+
 By default, the OAuth browser runs **headless**. Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to:
 
 - Show the Chromium window
 - Slow down each Playwright action by 1 second so the flow is watchable
 - Emit `[debug] <step>` progress logs to stderr at each phase (navigating, waiting for login, filling credentials, consent, account selection, redirect capture)
+- Dump the HTML source of each page checkpoint to `~/.config/schwab_cli/auth-debug/<timestamp>/<NN>-<label>.html` — useful when Schwab changes their UI and you need to find the right selectors. Resolved username/password are stripped before writing.
 - Hold the browser open for 60 seconds after the flow ends (success or failure) so you can inspect the final page — press Ctrl+C during the hold to close immediately
 
 ```bash

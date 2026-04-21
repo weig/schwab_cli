@@ -117,17 +117,24 @@ class FakeCheckbox:
 
 
 class FullFakePage(FakePage):
-    """FakePage extended for run_full_auth: scripts goto, fill, click, navigation, checkboxes."""
+    """FakePage extended for run_full_auth: scripts goto, fill, click, navigation, checkboxes.
+
+    `click_hooks` lets tests script state transitions — when a specific selector
+    is clicked, a callable receives `self` and can mutate `_selectors` to
+    simulate the page advancing (e.g., clicking Next enables the consent page).
+    """
 
     def __init__(self, **kwargs):
         final_redirect_url = kwargs.pop("final_redirect_url", None)
         checkboxes = kwargs.pop("checkboxes", [FakeCheckbox()])
+        click_hooks = kwargs.pop("click_hooks", None)
         super().__init__(**kwargs)
         self.fills: list[tuple[str, str]] = []
         self.clicks: list[str] = []
         self.gotos: list[str] = []
         self._final_redirect_url = final_redirect_url
         self._checkboxes = checkboxes
+        self._click_hooks = click_hooks or {}
         self._closed = False
 
     def goto(self, url: str) -> None:
@@ -138,6 +145,9 @@ class FullFakePage(FakePage):
 
     def click(self, selector: str) -> None:
         self.clicks.append(selector)
+        hook = self._click_hooks.get(selector)
+        if hook:
+            hook(self)
 
     def query_selector_all(self, selector: str):
         return list(self._checkboxes)
@@ -156,6 +166,32 @@ class FullFakePage(FakePage):
         # Capture for assertion in stealth tests.
         self.init_scripts = getattr(self, "init_scripts", [])
         self.init_scripts.append(script)
+
+    def locator(self, selector: str):
+        present = self._selectors.get(selector, False)
+        return _FakeFoundLocator(self, selector, present)
+
+
+class _FakeFoundLocator:
+    """Minimal Playwright Locator stub supporting .first, .count(), .click()."""
+
+    def __init__(self, page, selector: str, present: bool):
+        self._page = page
+        self._selector = selector
+        self._present = present
+
+    @property
+    def first(self):
+        return self
+
+    def count(self) -> int:
+        return 1 if self._present else 0
+
+    def click(self) -> None:
+        if not self._present:
+            raise RuntimeError(f"locator {self._selector!r} not present")
+        # Route through page.click so click hooks and history are consistent.
+        self._page.click(self._selector)
 
 
 class FakeBrowser:
@@ -507,3 +543,177 @@ def test_run_full_auth_hold_open_interrupted_by_ctrl_c(monkeypatch):
     # Ctrl+C during hold must NOT propagate — browser still closes cleanly.
     run_full_auth(_cfg())
     assert browser.closed is True
+
+
+# ----------------------------------------------------------------------------
+# MFA + trust-device flow
+# ----------------------------------------------------------------------------
+
+
+def _mfa_page_base_selectors(schwab_app_present: bool) -> dict:
+    """Selectors present at the moment the MFA page renders (post-login)."""
+    return {
+        "input#loginIdInput": True,
+        "text=Verify your identity": True,
+        "text=Schwab App": schwab_app_present,
+        # These become True via click hooks as the flow progresses.
+        "text=Trust this device": False,
+        'label:has-text("Yes, trust this device")': False,
+        "text=Terms of Use": False,
+        "text=Select accounts": False,
+        "text=You will now be redirected": False,
+    }
+
+
+def test_run_full_auth_mfa_with_trust_device(monkeypatch):
+    """MFA page → Schwab App clicked → trust-device page → yes + next → consent."""
+    monkeypatch.delenv("DEBUG", raising=False)
+    selectors = _mfa_page_base_selectors(schwab_app_present=True)
+
+    def click_schwab_app(p):
+        # Schwab App click → user approves on phone → trust-device page loads.
+        p._selectors["text=Trust this device"] = True
+        p._selectors['label:has-text("Yes, trust this device")'] = True
+
+    def click_trust_next(p):
+        # Click Next → consent page loads.
+        p._selectors["text=Terms of Use"] = True
+        p._selectors["text=Select accounts"] = True
+        p._selectors["text=You will now be redirected"] = True
+
+    page = FullFakePage(
+        selectors_present=selectors,
+        final_redirect_url="https://127.0.0.1:8443/?code=CODE",
+        checkboxes=[FakeCheckbox(True)],
+        click_hooks={
+            "text=Schwab App": click_schwab_app,
+            'button:has-text("Next")': click_trust_next,
+        },
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    code = run_full_auth(_cfg())
+    assert code == "CODE"
+    assert "text=Schwab App" in page.clicks
+    assert 'label:has-text("Yes, trust this device")' in page.clicks
+    assert 'button:has-text("Next")' in page.clicks
+
+
+def test_run_full_auth_mfa_without_trust_device(monkeypatch, capsys):
+    """MFA required but device already trusted → consent appears right after approval."""
+    monkeypatch.delenv("DEBUG", raising=False)
+    selectors = _mfa_page_base_selectors(schwab_app_present=True)
+
+    def click_schwab_app(p):
+        # Approval goes straight to consent (no trust step).
+        p._selectors["text=Terms of Use"] = True
+        p._selectors["text=Select accounts"] = True
+        p._selectors["text=You will now be redirected"] = True
+
+    page = FullFakePage(
+        selectors_present=selectors,
+        final_redirect_url="https://127.0.0.1:8443/?code=CODE",
+        checkboxes=[FakeCheckbox(True)],
+        click_hooks={"text=Schwab App": click_schwab_app},
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    code = run_full_auth(_cfg())
+    assert code == "CODE"
+    assert "text=Schwab App" in page.clicks
+    assert 'label:has-text("Yes, trust this device")' not in page.clicks
+    assert 'button:has-text("Next")' not in page.clicks
+    err = capsys.readouterr().err
+    assert "check your phone" in err
+
+
+def test_run_full_auth_mfa_no_schwab_app_option(monkeypatch):
+    monkeypatch.delenv("DEBUG", raising=False)
+    selectors = _mfa_page_base_selectors(schwab_app_present=False)
+    page = FullFakePage(
+        selectors_present=selectors,
+        final_redirect_url="https://127.0.0.1:8443/?code=CODE",
+        checkboxes=[FakeCheckbox(True)],
+    )
+    browser = _happy_browser(page)
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    with pytest.raises(AuthError, match="Schwab App MFA option not found"):
+        run_full_auth(_cfg())
+    assert browser.closed is True
+
+
+# ----------------------------------------------------------------------------
+# Page source dumping
+# ----------------------------------------------------------------------------
+
+
+def test_run_full_auth_dumps_page_source_when_debug_set(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda _s: None)
+
+    _, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    debug_root = tmp_path / ".config" / "schwab_cli" / "auth-debug"
+    assert debug_root.exists(), "debug root directory not created"
+    runs = list(debug_root.iterdir())
+    assert len(runs) == 1, f"expected one run dir, got {runs}"
+    dumps = sorted(runs[0].iterdir())
+    # Expect at least: login, post-login-consent, consent, accounts, confirm.
+    names = [p.name for p in dumps]
+    assert any("01-login" in n for n in names)
+    assert any("post-login" in n for n in names)
+    assert any("consent" in n for n in names)
+    assert any("accounts" in n for n in names)
+    assert any("confirm" in n for n in names)
+
+
+def test_run_full_auth_no_dumps_when_debug_unset(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("DEBUG", raising=False)
+
+    _, browser = _happy_page_and_browser()
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr("schwab_cli.browser.flow.resolve_secret", lambda v: v)
+
+    run_full_auth(_cfg())
+    debug_root = tmp_path / ".config" / "schwab_cli" / "auth-debug"
+    assert not debug_root.exists()
+
+
+def test_run_full_auth_dumps_sanitize_secrets(monkeypatch, tmp_path):
+    """Resolved username and password must never appear in the dumped HTML."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setattr("schwab_cli.browser.flow.time.sleep", lambda _s: None)
+
+    page, browser = _happy_page_and_browser()
+    # Page content includes the secrets so we can confirm they are stripped.
+    page._content = ["<html>hello user-super-secret password-deadbeef bye</html>"]
+    monkeypatch.setattr("schwab_cli.browser.flow._launch_browser", lambda headless, **_: browser)
+    monkeypatch.setattr(
+        "schwab_cli.browser.flow.resolve_secret",
+        lambda v: {"user@example.com": "user-super-secret", "op://X/Y/Z": "password-deadbeef"}.get(v, v),
+    )
+
+    run_full_auth(_cfg())
+
+    debug_root = tmp_path / ".config" / "schwab_cli" / "auth-debug"
+    dump_files = list(debug_root.glob("**/*.html"))
+    assert dump_files, "no dump files written"
+    for f in dump_files:
+        text = f.read_text()
+        assert "user-super-secret" not in text
+        assert "password-deadbeef" not in text

@@ -9,6 +9,15 @@ LOGIN_USERNAME_SELECTOR = "input#loginIdInput"
 LOGIN_PASSWORD_SELECTOR = "input#passwordInput"
 LOGIN_SUBMIT_SELECTOR = "button#btnLogin"
 
+# MFA / device-verification page (may be skipped on already-trusted devices)
+MFA_PAGE_SELECTOR = "text=Verify your identity"
+SCHWAB_APP_OPTION_SELECTOR = "text=Schwab App"
+
+# Trust-device page (may be skipped if device is already trusted)
+TRUST_DEVICE_PAGE_SELECTOR = "text=Trust this device"
+TRUST_YES_SELECTOR = 'label:has-text("Yes, trust this device")'
+TRUST_NEXT_SELECTOR = 'button:has-text("Next")'
+
 # Consent / agree page
 CONSENT_PAGE_SELECTOR = "text=Terms of Use"
 ACCEPT_SELECTOR = 'button:has-text("Accept")'
