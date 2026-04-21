@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Literal
 
 
 def _finite(v: Any) -> float | None:
-    if v is None:
+    if v is None or isinstance(v, bool):
         return None
     try:
         fv = float(v)
@@ -16,7 +16,16 @@ def _finite(v: Any) -> float | None:
     return fv
 
 
-def _shape_contract(raw: dict, side: str) -> dict:
+def _int(v: Any) -> int | None:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _shape_contract(raw: dict, side: Literal["C", "P"]) -> dict:
     iv_pct = _finite(raw.get("volatility"))
     return {
         "optionSymbol": (raw.get("symbol") or ""),
@@ -30,12 +39,12 @@ def _shape_contract(raw: dict, side: str) -> dict:
         "gamma": _finite(raw.get("gamma")),
         "theta": _finite(raw.get("theta")),
         "vega": _finite(raw.get("vega")),
-        "volume": raw.get("totalVolume"),
-        "openInterest": raw.get("openInterest"),
+        "volume": _int(raw.get("totalVolume")),
+        "openInterest": _int(raw.get("openInterest")),
         "mark": _finite(raw.get("mark")),
-        "bidSize": raw.get("bidSize"),
-        "askSize": raw.get("askSize"),
-        "lastSize": raw.get("lastSize"),
+        "bidSize": _int(raw.get("bidSize")),
+        "askSize": _int(raw.get("askSize")),
+        "lastSize": _int(raw.get("lastSize")),
         "open": _finite(raw.get("openPrice")),
         "high": _finite(raw.get("highPrice")),
         "low": _finite(raw.get("lowPrice")),
@@ -44,7 +53,7 @@ def _shape_contract(raw: dict, side: str) -> dict:
         "timeValue": _finite(raw.get("timeValue")),
         "intrinsic": _finite(raw.get("intrinsicValue")),
         "inTheMoney": bool(raw.get("inTheMoney")),
-        "multiplier": raw.get("multiplier"),
+        "multiplier": _int(raw.get("multiplier")),
         "settlementType": raw.get("settlementType"),
     }
 
@@ -54,7 +63,9 @@ def shape_envelope(raw: dict, *, strike_count: int | None = None) -> dict:
 
     If `strike_count` is given, keeps only the N strikes whose prices are
     closest to the underlying spot — both the call and the put at each kept
-    strike survive the trim.
+    strike survive the trim. If the underlying spot is unavailable (e.g.
+    Schwab response omits `underlying.last` or it's non-numeric), trimming
+    is silently skipped and all contracts are returned.
     """
     underlying_raw = (raw or {}).get("underlying") or {}
     underlying = {
@@ -80,8 +91,8 @@ def shape_envelope(raw: dict, *, strike_count: int | None = None) -> dict:
     if strike_count is not None and contracts:
         spot = underlying["last"]
         if spot is not None:
-            strikes = sorted({c["strike"] for c in contracts if c["strike"] is not None})
-            strikes.sort(key=lambda s: (abs(s - spot), s))
+            unique_strikes = {c["strike"] for c in contracts if c["strike"] is not None}
+            strikes = sorted(unique_strikes, key=lambda s: (abs(s - spot), s))
             keep = set(strikes[:strike_count])
             contracts = [c for c in contracts if c["strike"] in keep]
 

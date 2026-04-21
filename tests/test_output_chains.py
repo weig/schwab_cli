@@ -100,7 +100,7 @@ def test_shape_envelope_nan_iv_becomes_none():
     assert call_145["iv"] is None
 
 
-def test_shape_envelope_symbol_whitespace_trimmed():
+def test_shape_envelope_option_symbol_internal_spaces_preserved():
     env = shape_envelope(_RAW_MULTI_STRIKE)
     call_135 = next(r for r in env["contracts"] if r["side"] == "C" and r["strike"] == 135.0)
     assert call_135["optionSymbol"] == "NVDA  270115C00135000"  # Schwab's internal double-space preserved
@@ -133,3 +133,31 @@ def test_shape_envelope_settlement_type_preserved():
     env = shape_envelope(_RAW_MULTI_STRIKE)
     call_135 = next(r for r in env["contracts"] if r["side"] == "C" and r["strike"] == 135.0)
     assert call_135["settlementType"] == "P"
+
+
+def test_shape_envelope_trim_tie_breaks_toward_lower_strike():
+    raw = {
+        "symbol": "TIE",
+        "underlying": {"last": 100.0, "change": 0, "percentChange": 0},
+        "callExpDateMap": {
+            "2027-01-15:100": {
+                "90.0": [{"putCall": "CALL", "symbol": "C90",
+                          "strikePrice": 90.0, "inTheMoney": True,
+                          "expirationDate": "2027-01-15", "daysToExpiration": 100}],
+                "110.0": [{"putCall": "CALL", "symbol": "C110",
+                           "strikePrice": 110.0, "inTheMoney": False,
+                           "expirationDate": "2027-01-15", "daysToExpiration": 100}],
+            },
+        },
+        "putExpDateMap": {},
+    }
+    env = shape_envelope(raw, strike_count=1)
+    strikes = sorted({r["strike"] for r in env["contracts"]})
+    # 90 and 110 are equidistant from spot 100 — tie-break picks the lower strike.
+    assert strikes == [90.0]
+
+
+def test_shape_envelope_trim_with_count_exceeding_available_keeps_all():
+    env = shape_envelope(_RAW_MULTI_STRIKE, strike_count=99)
+    # Only 3 strikes exist in fixture — keep all 3 (6 contracts: 3 calls + 3 puts).
+    assert len(env["contracts"]) == 6
