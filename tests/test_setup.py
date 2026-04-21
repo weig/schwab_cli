@@ -95,3 +95,31 @@ def test_fresh_setup_reprompts_on_empty_client_id(monkeypatch, tmp_path):
     assert "Client ID is required" in result.output
     cfg = load()
     assert cfg.client_id == "cid_value"
+
+
+def test_malformed_existing_config_decline_overwrite_leaves_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cfg_dir = tmp_path / ".config" / "schwab_cli"
+    cfg_dir.mkdir(parents=True)
+    bad = cfg_dir / "config.json"
+    bad.write_text("{not valid")
+    original_bytes = bad.read_bytes()
+
+    result = runner.invoke(app, ["setup"], input="n\n")  # decline overwrite
+    assert result.exit_code == 0, result.output
+    assert bad.read_bytes() == original_bytes
+
+
+def test_malformed_existing_config_accept_overwrite_writes_new(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cfg_dir = tmp_path / ".config" / "schwab_cli"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.json").write_text("{not valid")
+
+    # y = overwrite, then client_id, client_secret, decline auto-login
+    result = runner.invoke(app, ["setup"], input="y\ncid\ncsec\nn\n")
+    assert result.exit_code == 0, result.output
+    cfg = load()
+    assert cfg == Config(client_id="cid", client_secret="csec")
