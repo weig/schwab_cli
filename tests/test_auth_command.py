@@ -72,7 +72,7 @@ def test_auth_falls_back_to_full_auth_on_refresh_failure(monkeypatch, tmp_path):
     refresh_err = httpx.HTTPStatusError("401", request=req, response=resp)
 
     with patch("schwab_cli.commands.auth.oauth.refresh", side_effect=refresh_err), \
-         patch("schwab_cli.commands.auth.run_full_auth", return_value="CODE"), \
+         patch("schwab_cli.commands.auth.get_code", return_value="CODE"), \
          patch("schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr), \
          patch("schwab_cli.commands.auth.time.time", return_value=2_000_000):
         result = runner.invoke(app, ["auth"])
@@ -93,7 +93,7 @@ def test_auth_force_skips_refresh(monkeypatch, tmp_path):
     fake_tr = TokenResponse(access_token="full_a", refresh_token="full_r", expires_in=1800)
 
     with patch("schwab_cli.commands.auth.oauth.refresh") as refresh_mock, \
-         patch("schwab_cli.commands.auth.run_full_auth", return_value="CODE"), \
+         patch("schwab_cli.commands.auth.get_code", return_value="CODE"), \
          patch("schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr):
         result = runner.invoke(app, ["auth", "--force"])
 
@@ -110,7 +110,7 @@ def test_auth_full_auth_failure_exits_1_no_session_written(monkeypatch, tmp_path
 
     from schwab_cli.browser.flow import AuthError
 
-    with patch("schwab_cli.commands.auth.run_full_auth",
+    with patch("schwab_cli.commands.auth.get_code",
                side_effect=AuthError("Login failed — incorrect username/password.")):
         result = runner.invoke(app, ["auth"])
 
@@ -125,7 +125,7 @@ def test_auth_full_auth_runs_when_no_session(monkeypatch, tmp_path):
 
     fake_tr = TokenResponse(access_token="full_a", refresh_token="full_r", expires_in=1800)
 
-    with patch("schwab_cli.commands.auth.run_full_auth", return_value="CODE") as full, \
+    with patch("schwab_cli.commands.auth.get_code", return_value="CODE") as full, \
          patch("schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr) as ex:
         result = runner.invoke(app, ["auth"])
 
@@ -143,7 +143,7 @@ def test_auth_token_exchange_failure_after_full_auth(monkeypatch, tmp_path):
     resp = httpx.Response(400, request=req, json={"error": "invalid_grant"})
     err = httpx.HTTPStatusError("400", request=req, response=resp)
 
-    with patch("schwab_cli.commands.auth.run_full_auth", return_value="CODE"), \
+    with patch("schwab_cli.commands.auth.get_code", return_value="CODE"), \
          patch("schwab_cli.commands.auth.oauth.exchange_code", side_effect=err):
         result = runner.invoke(app, ["auth"])
 

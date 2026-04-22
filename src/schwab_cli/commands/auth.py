@@ -8,7 +8,8 @@ import typer
 
 from schwab_cli import config as config_module
 from schwab_cli import oauth
-from schwab_cli.browser.flow import AuthError, run_full_auth
+from schwab_cli.auth_flows import AuthFlowError, get_code
+from schwab_cli.browser.flow import AuthError
 from schwab_cli.utils import _summarize_error
 from schwab_cli.secrets import SecretError
 from schwab_cli.session import Session
@@ -49,8 +50,8 @@ def run(force: bool) -> None:
                 # fall through
 
     try:
-        code = run_full_auth(cfg)
-    except (AuthError, SecretError) as e:
+        code = get_code(cfg)
+    except (AuthError, AuthFlowError, SecretError) as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 

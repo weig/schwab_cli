@@ -17,8 +17,8 @@ def _run(inputs, monkeypatch, tmp_path):
 
 
 def test_fresh_setup_without_auto_login(monkeypatch, tmp_path):
-    # client_id, client_secret, redirect_uri, decline auto-login
-    result = _run("cid_value\ncsec_value\nhttps://127.0.0.1:8443\nn\n", monkeypatch, tmp_path)
+    # client_id, client_secret, redirect_uri, auth_flow (Enter→default 'local'), decline auto-login
+    result = _run("cid_value\ncsec_value\nhttps://127.0.0.1:8443\n\nn\n", monkeypatch, tmp_path)
     assert result.exit_code == 0, result.output
     cfg = load()
     assert cfg == Config(client_id="cid_value", client_secret="csec_value", redirect_uri="https://127.0.0.1:8443")
@@ -26,9 +26,9 @@ def test_fresh_setup_without_auto_login(monkeypatch, tmp_path):
 
 
 def test_fresh_setup_with_auto_login(monkeypatch, tmp_path):
-    # client_id, client_secret, redirect_uri, accept auto-login, username, password
+    # client_id, client_secret, redirect_uri, auth_flow (default), accept auto-login, username, password
     result = _run(
-        "cid_value\ncsec_value\nhttps://127.0.0.1:8443\ny\nuser@example.com\nop://Personal/Schwab/password\n",
+        "cid_value\ncsec_value\nhttps://127.0.0.1:8443\n\ny\nuser@example.com\nop://Personal/Schwab/password\n",
         monkeypatch,
         tmp_path,
     )
@@ -44,6 +44,33 @@ def test_fresh_setup_with_auto_login(monkeypatch, tmp_path):
     assert cfg.auto_login_enabled
 
 
+def test_fresh_setup_with_code_relay_flow(monkeypatch, tmp_path):
+    # client_id, client_secret, redirect_uri, auth_flow=code_relay, code_relay_url, decline auto-login
+    relay = "https://relay.example.com/uuid/secret/wait"
+    result = _run(
+        f"cid\ncsec\nhttps://relay.example.com/uuid/secret\ncode_relay\n{relay}\nn\n",
+        monkeypatch,
+        tmp_path,
+    )
+    assert result.exit_code == 0, result.output
+    cfg = load()
+    assert cfg.auth_flow == "code_relay"
+    assert cfg.code_relay_url == relay
+
+
+def test_fresh_setup_reprompts_on_invalid_auth_flow(monkeypatch, tmp_path):
+    # bad auth_flow value triggers reprompt; second time passes
+    result = _run(
+        "cid\ncsec\nhttps://127.0.0.1:8443\nbogus\nlocal\nn\n",
+        monkeypatch,
+        tmp_path,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Auth flow must be one of" in result.output
+    cfg = load()
+    assert cfg.auth_flow == "local"
+
+
 def test_rerun_accepting_defaults_preserves_all_values(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
@@ -56,8 +83,9 @@ def test_rerun_accepting_defaults_preserves_all_values(monkeypatch, tmp_path):
             password="op://Personal/Schwab/password",
         )
     )
-    # Press Enter through every prompt: client_id, client_secret, redirect_uri, auto-login confirm, username, password
-    result = runner.invoke(app, ["setup"], input="\n\n\n\n\n\n")
+    # Press Enter through every prompt: client_id, client_secret, redirect_uri, auth_flow,
+    # auto-login confirm, username, password
+    result = runner.invoke(app, ["setup"], input="\n\n\n\n\n\n\n")
     assert result.exit_code == 0, result.output
     cfg = load()
     assert cfg == Config(
@@ -81,8 +109,8 @@ def test_rerun_disabling_auto_login_removes_credentials(monkeypatch, tmp_path):
             password="existing_pass",
         )
     )
-    # Enter for client_id, Enter for client_secret, Enter for redirect_uri, 'n' to disable auto-login.
-    result = runner.invoke(app, ["setup"], input="\n\n\nn\n")
+    # Enter for client_id, client_secret, redirect_uri, auth_flow, then 'n' to disable auto-login.
+    result = runner.invoke(app, ["setup"], input="\n\n\n\nn\n")
     assert result.exit_code == 0, result.output
     cfg = load()
     assert cfg.username is None
@@ -93,8 +121,9 @@ def test_rerun_disabling_auto_login_removes_credentials(monkeypatch, tmp_path):
 def test_fresh_setup_reprompts_on_empty_client_id(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    # First: empty client_id (should re-prompt), then valid one, client_secret, redirect_uri, decline auto.
-    result = runner.invoke(app, ["setup"], input="\ncid_value\ncsec_value\nhttps://127.0.0.1:8443\nn\n")
+    # First: empty client_id (should re-prompt), then valid one, client_secret, redirect_uri,
+    # auth_flow (default), decline auto.
+    result = runner.invoke(app, ["setup"], input="\ncid_value\ncsec_value\nhttps://127.0.0.1:8443\n\nn\n")
     assert result.exit_code == 0, result.output
     assert "Client ID is required" in result.output
     cfg = load()
@@ -123,8 +152,8 @@ def test_malformed_existing_config_accept_overwrite_writes_new(monkeypatch, tmp_
     cfg_dir.mkdir(parents=True)
     (cfg_dir / "config.json").write_text("{not valid")
 
-    # y = overwrite, then client_id, client_secret, redirect_uri, decline auto-login
-    result = runner.invoke(app, ["setup"], input="y\ncid\ncsec\nhttps://127.0.0.1:8443\nn\n")
+    # y = overwrite, then client_id, client_secret, redirect_uri, auth_flow (default), decline auto-login
+    result = runner.invoke(app, ["setup"], input="y\ncid\ncsec\nhttps://127.0.0.1:8443\n\nn\n")
     assert result.exit_code == 0, result.output
     cfg = load()
     assert cfg == Config(client_id="cid", client_secret="csec", redirect_uri="https://127.0.0.1:8443")

@@ -16,11 +16,16 @@ def config_path() -> Path:
     return base / "schwab_cli" / "config.json"
 
 
+AUTH_FLOWS = ("local", "code_relay", "client")
+
+
 @dataclass(frozen=True)
 class Config:
     client_id: str
     client_secret: str
     redirect_uri: str
+    auth_flow: str = "local"
+    code_relay_url: str | None = None
     username: str | None = None
     password: str | None = None
     version: int = 1
@@ -31,7 +36,7 @@ class Config:
 
 
 SUPPORTED_VERSION = 1
-_REQUIRED_FIELDS = ("client_id", "client_secret", "redirect_uri")
+_REQUIRED_FIELDS = ("client_id", "client_secret", "redirect_uri", "auth_flow")
 
 
 class ConfigError(Exception):
@@ -62,10 +67,23 @@ def load() -> Config | None:
     for field in _REQUIRED_FIELDS:
         if field not in raw:
             raise ConfigError(f"missing required field '{field}' in {path}")
+    auth_flow = raw["auth_flow"]
+    if auth_flow not in AUTH_FLOWS:
+        raise ConfigError(
+            f"invalid auth_flow {auth_flow!r} in {path}; "
+            f"expected one of: {', '.join(AUTH_FLOWS)}"
+        )
+    code_relay_url = raw.get("code_relay_url")
+    if auth_flow == "code_relay" and not code_relay_url:
+        raise ConfigError(
+            f"auth_flow='code_relay' requires 'code_relay_url' in {path}"
+        )
     return Config(
         client_id=raw["client_id"],
         client_secret=raw["client_secret"],
         redirect_uri=raw["redirect_uri"],
+        auth_flow=auth_flow,
+        code_relay_url=code_relay_url,
         username=raw.get("username"),
         password=raw.get("password"),
         version=version,
@@ -91,7 +109,10 @@ def save(cfg: Config) -> None:
         "client_id": cfg.client_id,
         "client_secret": cfg.client_secret,
         "redirect_uri": cfg.redirect_uri,
+        "auth_flow": cfg.auth_flow,
     }
+    if cfg.code_relay_url is not None:
+        payload["code_relay_url"] = cfg.code_relay_url
     if cfg.username is not None:
         payload["username"] = cfg.username
     if cfg.password is not None:

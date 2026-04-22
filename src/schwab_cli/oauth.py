@@ -33,12 +33,15 @@ class TokenResponse:
         )
 
 
-def build_auth_url(cfg: Config) -> str:
-    return f"{AUTH_URL}?" + urlencode({
+def build_auth_url(cfg: Config, *, state: str | None = None) -> str:
+    params = {
         "response_type": "code",
         "client_id": cfg.client_id,
         "redirect_uri": cfg.redirect_uri,
-    })
+    }
+    if state:
+        params["state"] = state
+    return f"{AUTH_URL}?" + urlencode(params)
 
 
 def exchange_code(cfg: Config, code: str) -> TokenResponse:

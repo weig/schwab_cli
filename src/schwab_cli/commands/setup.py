@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import typer
 
-from schwab_cli.config import Config, ConfigError, config_path, load, mask_secret, save
+from schwab_cli.config import (
+    AUTH_FLOWS,
+    Config,
+    ConfigError,
+    config_path,
+    load,
+    mask_secret,
+    save,
+)
 
 
 def _prompt_value(
@@ -33,6 +41,25 @@ def _prompt_value(
         if existing:
             return existing
         typer.secho(f"{label} {error_suffix}", fg=typer.colors.RED, err=True)
+
+
+def _prompt_auth_flow(default: str) -> str:
+    """Prompt for an auth_flow value; loop until input is one of AUTH_FLOWS."""
+    options = "/".join(AUTH_FLOWS)
+    typer.echo(f"  (one of: {options})")
+    while True:
+        entered = typer.prompt(
+            "Auth flow",
+            default=default,
+            show_default=True,
+        ).strip()
+        if entered in AUTH_FLOWS:
+            return entered
+        typer.secho(
+            f"Auth flow must be one of: {options}",
+            fg=typer.colors.RED,
+            err=True,
+        )
 
 
 def run() -> None:
@@ -75,6 +102,17 @@ def _run() -> None:
         sensitive=False,
     )
 
+    auth_flow = _prompt_auth_flow(existing.auth_flow if existing else "local")
+
+    code_relay_url: str | None = None
+    if auth_flow == "code_relay":
+        code_relay_url = _prompt_value(
+            "Code relay URL",
+            existing.code_relay_url if existing else None,
+            sensitive=False,
+            hint="e.g. https://oauth-relay.example.com/<uuid>/<secret>/wait",
+        )
+
     auto_default = bool(existing and existing.auto_login_enabled)
     enable_auto = typer.confirm("Enable automatic login?", default=auto_default)
 
@@ -99,6 +137,8 @@ def _run() -> None:
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
+        auth_flow=auth_flow,
+        code_relay_url=code_relay_url,
         username=username,
         password=password,
     )

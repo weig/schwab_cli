@@ -88,6 +88,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
+        "auth_flow": "local",
         "username": "u",
         "password": "op://Personal/Schwab/password",
     })
@@ -96,6 +97,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
         client_id="cid",
         client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
+        auth_flow="local",
         username="u",
         password="op://Personal/Schwab/password",
     )
@@ -110,6 +112,7 @@ def test_load_parses_minimal_config_without_auto_login(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
+        "auth_flow": "local",
     })
     cfg = load()
     assert cfg.username is None
@@ -125,6 +128,7 @@ def test_load_ignores_unknown_fields(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
+        "auth_flow": "local",
         "future_field": "ignore me",
     })
     cfg = load()
@@ -149,6 +153,7 @@ def test_load_raises_on_unsupported_future_version(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
+        "auth_flow": "local",
     })
     with pytest.raises(ConfigError, match="version"):
         load()
@@ -161,6 +166,7 @@ def test_load_raises_on_missing_required_field(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "redirect_uri": "https://127.0.0.1:8443",
+        "auth_flow": "local",
     })  # no client_secret
     with pytest.raises(ConfigError, match="client_secret"):
         load()
@@ -173,9 +179,67 @@ def test_load_raises_on_missing_redirect_uri(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "client_secret": "csec",
+        "auth_flow": "local",
     })
     with pytest.raises(ConfigError, match="redirect_uri"):
         load()
+
+
+def test_load_raises_on_missing_auth_flow(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write_config(tmp_path, {
+        "version": 1,
+        "client_id": "cid",
+        "client_secret": "csec",
+        "redirect_uri": "https://127.0.0.1:8443",
+    })
+    with pytest.raises(ConfigError, match="auth_flow"):
+        load()
+
+
+def test_load_raises_on_invalid_auth_flow_value(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write_config(tmp_path, {
+        "version": 1,
+        "client_id": "cid",
+        "client_secret": "csec",
+        "redirect_uri": "https://127.0.0.1:8443",
+        "auth_flow": "magic",
+    })
+    with pytest.raises(ConfigError, match="invalid auth_flow"):
+        load()
+
+
+def test_load_raises_on_code_relay_without_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write_config(tmp_path, {
+        "version": 1,
+        "client_id": "cid",
+        "client_secret": "csec",
+        "redirect_uri": "https://127.0.0.1:8443",
+        "auth_flow": "code_relay",
+    })
+    with pytest.raises(ConfigError, match="code_relay_url"):
+        load()
+
+
+def test_load_parses_code_relay_with_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write_config(tmp_path, {
+        "version": 1,
+        "client_id": "cid",
+        "client_secret": "csec",
+        "redirect_uri": "https://relay.example.com/u/s",
+        "auth_flow": "code_relay",
+        "code_relay_url": "https://relay.example.com/u/s/wait",
+    })
+    cfg = load()
+    assert cfg.auth_flow == "code_relay"
+    assert cfg.code_relay_url == "https://relay.example.com/u/s/wait"
 
 
 def test_load_raises_when_root_is_not_a_dict(monkeypatch, tmp_path):
