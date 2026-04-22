@@ -16,7 +16,7 @@ def config_path() -> Path:
     return base / "schwab_cli" / "config.json"
 
 
-AUTH_FLOWS = ("local", "code_relay", "client")
+AUTH_FLOWS = ("client", "code_relay")
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class Config:
     client_id: str
     client_secret: str
     redirect_uri: str
-    auth_flow: str = "local"
+    auth_flow: str = "client"
     code_relay_url: str | None = None
     username: str | None = None
     password: str | None = None

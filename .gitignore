@@ -10,3 +10,4 @@ build/
 .DS_Store
 .playwright-mcp/
 .claude/
+downloaded_files/

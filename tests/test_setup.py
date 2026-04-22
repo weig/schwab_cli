@@ -17,7 +17,7 @@ def _run(inputs, monkeypatch, tmp_path):
 
 
 def test_fresh_setup_without_auto_login(monkeypatch, tmp_path):
-    # client_id, client_secret, redirect_uri, auth_flow (Enter→default 'local'), decline auto-login
+    # client_id, client_secret, redirect_uri, auth_flow (Enter→default 'client'), decline auto-login
     result = _run("cid_value\ncsec_value\nhttps://127.0.0.1:8443\n\nn\n", monkeypatch, tmp_path)
     assert result.exit_code == 0, result.output
     cfg = load()
@@ -61,14 +61,14 @@ def test_fresh_setup_with_code_relay_flow(monkeypatch, tmp_path):
 def test_fresh_setup_reprompts_on_invalid_auth_flow(monkeypatch, tmp_path):
     # bad auth_flow value triggers reprompt; second time passes
     result = _run(
-        "cid\ncsec\nhttps://127.0.0.1:8443\nbogus\nlocal\nn\n",
+        "cid\ncsec\nhttps://127.0.0.1:8443\nbogus\nclient\nn\n",
         monkeypatch,
         tmp_path,
     )
     assert result.exit_code == 0, result.output
     assert "Auth flow must be one of" in result.output
     cfg = load()
-    assert cfg.auth_flow == "local"
+    assert cfg.auth_flow == "client"
 
 
 def test_rerun_accepting_defaults_preserves_all_values(monkeypatch, tmp_path):

@@ -100,6 +100,10 @@ class SchwabClient:
             ]
         return self._account_ids_cache
 
+    def account_ids(self) -> list[AccountIds]:
+        """Return all (accountNumber, hashValue) pairs for this session. Cached."""
+        return self._load_account_ids()
+
     def resolve_account(self, user_input: str) -> AccountIds:
         """Match user input against account_number (exact or suffix).
 

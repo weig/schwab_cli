@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch
 
 import httpx
@@ -40,6 +41,38 @@ def test_auth_errors_when_no_config(monkeypatch, tmp_path):
     result = runner.invoke(app, ["auth"])
     assert result.exit_code == 1
     assert "Run `schwab_cli setup` first" in result.output
+
+
+def test_auth_errors_when_config_malformed(monkeypatch, tmp_path):
+    _setup_env(monkeypatch, tmp_path)
+    cfg_dir = tmp_path / ".config" / "schwab_cli"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.json").write_text("{not valid json")
+
+    result = runner.invoke(app, ["auth"])
+    assert result.exit_code == 1
+    assert "Config is unusable" in result.output
+    assert "setup" in result.output
+
+
+def test_auth_falls_back_to_full_auth_on_malformed_session(monkeypatch, tmp_path):
+    _setup_env(monkeypatch, tmp_path)
+    _seed_config()
+    # Corrupt session JSON — load_session() raises SessionError, which auth.run
+    # should treat as "no session" and fall through to the full flow.
+    cfg_dir = tmp_path / ".config" / "schwab_cli"
+    (cfg_dir / "session.json").write_text("{not valid")
+
+    fake_tr = TokenResponse(access_token="full_a", refresh_token="full_r", expires_in=1800)
+    with patch("schwab_cli.commands.auth.get_code", return_value="CODE"), \
+         patch("schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr):
+        result = runner.invoke(app, ["auth"])
+
+    assert result.exit_code == 0, result.output
+    assert "Stored session is unreadable" in result.output
+    assert "Authenticated" in result.output
+    s = load_session()
+    assert s.access_token == "full_a"
 
 
 def test_auth_refreshes_when_session_present(monkeypatch, tmp_path):
@@ -133,6 +166,72 @@ def test_auth_full_auth_runs_when_no_session(monkeypatch, tmp_path):
     full.assert_called_once()
     ex.assert_called_once()
     assert "Authenticated" in result.output
+
+
+def test_auth_manual_sets_headless_zero(monkeypatch, tmp_path):
+    """`--manual` must set HEADLESS=0 in os.environ for the remainder
+    of the invocation, overriding any HEADLESS=1 from the caller."""
+    _setup_env(monkeypatch, tmp_path)
+    _seed_config()
+    monkeypatch.setenv("HEADLESS", "1")
+
+    fake_tr = TokenResponse(access_token="m_a", refresh_token="m_r", expires_in=1800)
+    captured = {}
+
+    def fake_get_code(cfg, *, manual=False):
+        captured["HEADLESS"] = os.environ.get("HEADLESS")
+        return "CODE"
+
+    with patch("schwab_cli.commands.auth.get_code", side_effect=fake_get_code), \
+         patch("schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr):
+        result = runner.invoke(app, ["auth", "--manual"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["HEADLESS"] == "0"
+
+
+def test_auth_no_manual_preserves_headless(monkeypatch, tmp_path):
+    """Without `--manual`, HEADLESS env var is left untouched."""
+    _setup_env(monkeypatch, tmp_path)
+    _seed_config()
+    monkeypatch.setenv("HEADLESS", "1")
+
+    fake_tr = TokenResponse(access_token="m_a", refresh_token="m_r", expires_in=1800)
+    captured = {}
+
+    def fake_get_code(cfg, *, manual=False):
+        captured["HEADLESS"] = os.environ.get("HEADLESS")
+        return "CODE"
+
+    with patch("schwab_cli.commands.auth.get_code", side_effect=fake_get_code), \
+         patch("schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr):
+        runner.invoke(app, ["auth"])
+
+    assert captured["HEADLESS"] == "1"
+
+
+def test_auth_manual_force_combines_correctly(monkeypatch, tmp_path):
+    """`--manual --force` skips refresh AND sets HEADLESS=0."""
+    _setup_env(monkeypatch, tmp_path)
+    _seed_config()
+    _seed_session()
+    monkeypatch.setenv("HEADLESS", "1")
+
+    fake_tr = TokenResponse(access_token="f_a", refresh_token="f_r", expires_in=1800)
+    captured = {}
+
+    def fake_get_code(cfg, *, manual=False):
+        captured["HEADLESS"] = os.environ.get("HEADLESS")
+        return "CODE"
+
+    with patch("schwab_cli.commands.auth.oauth.refresh") as refresh_mock, \
+         patch("schwab_cli.commands.auth.get_code", side_effect=fake_get_code), \
+         patch("schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr):
+        result = runner.invoke(app, ["auth", "--manual", "--force"])
+
+    assert result.exit_code == 0, result.output
+    refresh_mock.assert_not_called()  # --force skipped refresh
+    assert captured["HEADLESS"] == "0"  # --manual set it
 
 
 def test_auth_token_exchange_failure_after_full_auth(monkeypatch, tmp_path):

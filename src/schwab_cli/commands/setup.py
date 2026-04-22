@@ -102,7 +102,7 @@ def _run() -> None:
         sensitive=False,
     )
 
-    auth_flow = _prompt_auth_flow(existing.auth_flow if existing else "local")
+    auth_flow = _prompt_auth_flow(existing.auth_flow if existing else "client")
 
     code_relay_url: str | None = None
     if auth_flow == "code_relay":

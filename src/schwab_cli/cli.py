@@ -2,9 +2,11 @@ import typer
 
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
+from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
+from schwab_cli.commands import transactions as transactions_cmd
 
 app = typer.Typer(
     name="schwab_cli",
@@ -31,8 +33,16 @@ def auth(
         "--force",
         help="Skip session refresh and run the full OAuth flow.",
     ),
+    manual: bool = typer.Option(
+        False,
+        "--manual",
+        help=(
+            "Skip saved-credential automation and drive the Schwab login "
+            "yourself in a visible browser (forces HEADLESS=0 for this run)."
+        ),
+    ),
 ) -> None:
-    auth_cmd.run(force=force)
+    auth_cmd.run(force=force, manual=manual)
 
 
 @app.command("accounts", help="List Schwab accounts.")
@@ -96,6 +106,63 @@ def option(
         spec,
         strikes=strikes,
         detail=detail,
+        as_json=as_json,
+        as_md=as_md,
+    )
+
+
+@app.command(
+    "history",
+    help="Fetch OHLCV price history for a symbol.",
+)
+def history(
+    symbol: str = typer.Argument(..., help="Ticker (e.g. NVDA)."),
+    range_str: str = typer.Option(
+        "-1y..now", "--range",
+        help="Date range: '<start>..<end>' or one of: ytd, mtd, wtd. "
+             "Endpoints: YYYYMMDD, -Nu (u in d/w/mo/y), or 'now'.",
+    ),
+    interval_str: str = typer.Option(
+        "1day", "--interval",
+        help="Candle interval: 1min, 5min, 10min, 15min, 30min, 1day, 1wk, 1mo.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+) -> None:
+    history_cmd.run(
+        symbol,
+        range_str=range_str,
+        interval_str=interval_str,
+        as_json=as_json,
+        as_md=as_md,
+    )
+
+
+@app.command(
+    "transactions",
+    help="List account transactions over a date range (default: last 7 days, TRADE only).",
+)
+def transactions(
+    account: str = typer.Argument(
+        None, help="Optional account number or suffix. Default: all accounts.",
+    ),
+    range_str: str = typer.Option(
+        "-7d..now", "--range",
+        help="Date range: '<start>..<end>' or one of: ytd, mtd, wtd. "
+             "Endpoints: YYYYMMDD, -Nu (u in d/w/mo/y), or 'now'.",
+    ),
+    type_filter: str = typer.Option(
+        "TRADE", "--type",
+        help="Transaction type filter: TRADE, DIVIDEND_OR_INTEREST, JOURNAL, "
+             "RECEIVE_AND_DELIVER, or ALL for no filter.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+) -> None:
+    transactions_cmd.run(
+        account,
+        range_str=range_str,
+        type_filter=type_filter,
         as_json=as_json,
         as_md=as_md,
     )

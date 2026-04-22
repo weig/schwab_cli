@@ -88,7 +88,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "local",
+        "auth_flow": "client",
         "username": "u",
         "password": "op://Personal/Schwab/password",
     })
@@ -97,7 +97,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
         client_id="cid",
         client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
-        auth_flow="local",
+        auth_flow="client",
         username="u",
         password="op://Personal/Schwab/password",
     )
@@ -112,7 +112,7 @@ def test_load_parses_minimal_config_without_auto_login(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "local",
+        "auth_flow": "client",
     })
     cfg = load()
     assert cfg.username is None
@@ -128,7 +128,7 @@ def test_load_ignores_unknown_fields(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "local",
+        "auth_flow": "client",
         "future_field": "ignore me",
     })
     cfg = load()
@@ -153,7 +153,7 @@ def test_load_raises_on_unsupported_future_version(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "local",
+        "auth_flow": "client",
     })
     with pytest.raises(ConfigError, match="version"):
         load()
@@ -166,7 +166,7 @@ def test_load_raises_on_missing_required_field(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "local",
+        "auth_flow": "client",
     })  # no client_secret
     with pytest.raises(ConfigError, match="client_secret"):
         load()
@@ -179,7 +179,7 @@ def test_load_raises_on_missing_redirect_uri(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "client_secret": "csec",
-        "auth_flow": "local",
+        "auth_flow": "client",
     })
     with pytest.raises(ConfigError, match="redirect_uri"):
         load()
