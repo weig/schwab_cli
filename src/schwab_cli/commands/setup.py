@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import typer
 
@@ -61,11 +62,44 @@ _AUTH_FLOW_DESCRIPTIONS: dict[str, str] = {
 
 
 def _prompt_auth_flow(default: str) -> str:
-    """Prompt for an auth_flow, showing a description of each option.
+    """Prompt for an auth_flow.
 
-    Accepts either the flow name (``client``, ``code_relay``) or its
-    menu number. Loops until the input is valid.
+    In an interactive terminal, shows an arrow-key-navigable select menu
+    (one choice per flow). When stdin is not a TTY — i.e. tests or pipes —
+    falls back to a numbered text prompt that accepts either the flow
+    name or its menu number.
     """
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return _prompt_auth_flow_tty(default)
+    return _prompt_auth_flow_text(default)
+
+
+def _prompt_auth_flow_tty(default: str) -> str:
+    """Arrow-key auth_flow selector for interactive terminals."""
+    import questionary
+
+    choices = [
+        questionary.Choice(
+            title=f"{name}  —  {_AUTH_FLOW_DESCRIPTIONS[name].split('. ')[0]}.",
+            value=name,
+        )
+        for name in AUTH_FLOWS
+    ]
+    answer = questionary.select(
+        "Auth flow (how the CLI captures the OAuth `code`):",
+        choices=choices,
+        default=default if default in AUTH_FLOWS else None,
+        instruction="(↑/↓ to move, Enter to select)",
+        use_shortcuts=True,
+    ).ask()
+    if answer is None:
+        # Ctrl-C inside questionary returns None.
+        raise typer.Abort()
+    return answer
+
+
+def _prompt_auth_flow_text(default: str) -> str:
+    """Numbered-menu fallback for non-TTY stdin (tests, pipes, CI)."""
     typer.echo("")
     typer.echo("Auth flow — how the CLI captures the OAuth `code`:")
     for idx, name in enumerate(AUTH_FLOWS, start=1):
@@ -147,18 +181,11 @@ def _run(*, dry_run: bool) -> None:
 
     code_relay_url: str | None = None
     if auth_flow == "code_relay":
-        typer.echo("")
-        typer.echo(
-            "The relay has two paths: a callback path (set as redirect_uri "
-            "above) and a /wait path the CLI long-polls for the captured "
-            "code. Example pair:"
-        )
-        typer.echo("  redirect_uri   = https://<host>/<uuid>/<secret>")
-        typer.echo("  code_relay_url = https://<host>/<uuid>/<secret>/wait")
         code_relay_url = _prompt_value(
-            "Code relay /wait URL",
+            "Code Relay URL",
             existing.code_relay_url if existing else None,
             sensitive=False,
+            hint="the URL the CLI polls for the captured OAuth code",
         )
 
     auto_default = bool(existing and existing.auto_login_enabled)

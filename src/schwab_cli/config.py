@@ -9,8 +9,17 @@ from pathlib import Path
 def config_path() -> Path:
     """Return the absolute path to config.json.
 
-    Honors XDG_CONFIG_HOME; falls back to ~/.config.
+    Resolution order (first match wins):
+      1. ``SCHWAB_CLI_CONFIG`` — absolute path override. Use this for
+         ad-hoc shell runs or scripted setups; it bypasses every other
+         lookup so there's no risk of a stray ``HOME`` tweak pointing at
+         the real file.
+      2. ``XDG_CONFIG_HOME/schwab_cli/config.json``.
+      3. ``~/.config/schwab_cli/config.json``.
     """
+    override = os.environ.get("SCHWAB_CLI_CONFIG")
+    if override:
+        return Path(override)
     xdg = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg) if xdg else Path.home() / ".config"
     return base / "schwab_cli" / "config.json"

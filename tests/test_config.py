@@ -62,6 +62,15 @@ def test_config_path_honors_xdg_config_home(monkeypatch, tmp_path):
     assert config_path() == tmp_path / "xdg" / "schwab_cli" / "config.json"
 
 
+def test_config_path_override_env_wins_over_xdg_and_home(monkeypatch, tmp_path):
+    """SCHWAB_CLI_CONFIG takes absolute precedence so a shell-level override
+    can't be fooled by a stray HOME/XDG value pointing at the real file."""
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG", "/tmp/explicit-override.json")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert config_path() == Path("/tmp/explicit-override.json")
+
+
 from schwab_cli.config import ConfigError, load
 
 

@@ -10,6 +10,7 @@ dependencies = [
     "playwright-stealth>=2.0.3",
     "seleniumbase>=4.48.2",
     "rich>=13.7",
+    "questionary>=2.0",
 ]
 
 [project.scripts]
