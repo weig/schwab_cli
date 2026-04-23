@@ -3,9 +3,11 @@
 Volatility context for a stock — implied vol (IV), historical vol (HV),
 HV percentile (HVP), put/call ratio (P/C), and IV percentile (IVP).
 
-Each invocation makes **two** Schwab API calls (one chain, one
-year-long price history) and appends one row to a local SQLite store
-so IVP can ripen over time.
+Each invocation makes **two** Schwab API calls in steady state (one
+chain, one year-long price history) and appends one row to a local
+SQLite store so IVP can ripen over time. The first invocation per
+symbol makes one extra call to backfill a synthetic IV series so IVP
+isn't stuck at "insufficient history" for a year.
 
 ## Usage
 
@@ -95,7 +97,7 @@ IVP              54%  252-day percentile
 | **HVP** | Percentile rank of today's HV within the rolling-30 HV series for the past 252 trading days. Uses midrank for ties. | Same history call. |
 | **P/C vol** | `Σ put_volume / Σ call_volume` across every strike and every expiry in the chain response. | Chain, no extra call. |
 | **P/C OI** | `Σ put_OI / Σ call_OI`, same aggregation. | Chain, no extra call. |
-| **IVP** | Percentile rank of today's ATM IV against the accumulated daily ATM IV series in the local store. | Local SQLite (populated by this command). |
+| **IVP** | Percentile rank of today's ATM IV against the accumulated daily ATM IV series in the local store. Seed populated via BS-reconstruction from option + underlying price history; future runs append live observations. | Local SQLite (populated by this command). |
 
 ## API calls per invocation
 
@@ -132,6 +134,40 @@ available sample, so it's still useful — just note the denominator.
 The per-day collapse keeps the sample useful: the CLI can run many
 times in a trading day without inflating the sample — only the latest
 write per NY trading day counts.
+
+## First-run backfill
+
+When a symbol has no rows in the local store, `vol` performs a one-time
+Black-Scholes reconstruction of the last ~1 year of IV data:
+
+  1. Picks a LEAPS contract with DTE near 365 days, strike near today's
+     spot. LEAPS have long trading histories; near-term weeklies don't.
+  2. Fetches that contract's daily candles alongside the underlying's
+     daily candles (both already needed for HV anyway).
+  3. For each matching day, BS-solves IV from the pair of closes using
+     that day's time-to-expiry and a configurable risk-free rate.
+  4. Inserts the resulting days as rows tagged `source = synthetic`.
+
+Synthetic rows are distinguished from live observations in the store
+and annotated in HUMAN output. Over time, observed rows accumulate on
+top of the synthetic seed; both contribute to the IVP percentile.
+
+Caveats:
+
+* **Strike drift bias.** The reference LEAPS strike is near *today's*
+  spot — a year ago that strike may have been OTM or ITM, so its IV
+  isn't a clean stand-in for back-then ATM IV. The percentile is
+  directionally useful but shouldn't be traded off.
+* **Limited reach.** Strikes are listed as spot moves, so a LEAPS at
+  today's spot may only have a few months of trading history — we
+  backfill whatever exists.
+* **Rejected days.** The BS solver rejects days where the option close
+  was sub-intrinsic or solved to an absurd IV; those days are silently
+  skipped.
+
+After the first-run backfill, `vol SYMBOL` is back to two API calls.
+Phase out by deleting the synthetic rows once you have 252 days of
+observed data, or leave them to continue informing the percentile.
 
 ## Local storage
 

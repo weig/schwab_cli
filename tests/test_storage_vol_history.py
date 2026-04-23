@@ -198,6 +198,48 @@ def test_read_applies_lookback_limit(monkeypatch, tmp_path):
     assert series == pytest.approx([0.37, 0.38, 0.39])
 
 
+def test_v1_to_v2_migration_adds_source_column(monkeypatch, tmp_path):
+    """A DB created under schema v1 (no `source` column) should receive
+    the column on reopen, and existing rows default to 'observed'."""
+    import sqlite3 as _sqlite3
+
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    tmp_path.mkdir(exist_ok=True)
+    # Hand-write a v1 database — no `source` column, v1 schema version.
+    db = tmp_path / "vol_history.db"
+    conn = _sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (1);
+        CREATE TABLE vol_snapshots (
+            captured_at_ms  INTEGER NOT NULL,
+            symbol          TEXT    NOT NULL,
+            spot            REAL    NOT NULL,
+            atm_iv          REAL    NOT NULL,
+            atm_strike      REAL    NOT NULL,
+            atm_expiry      TEXT    NOT NULL,
+            atm_dte         INTEGER NOT NULL,
+            PRIMARY KEY (captured_at_ms, symbol)
+        );
+    """)
+    conn.execute(
+        "INSERT INTO vol_snapshots VALUES (?,?,?,?,?,?,?)",
+        (_ms_at(2026, 3, 1), "NVDA", 150.0, 0.40, 150.0, "2026-05-01", 60),
+    )
+    conn.commit()
+    conn.close()
+
+    # Reopen via our migration-aware connect().
+    with connect() as c:
+        row = c.execute(
+            "SELECT source FROM vol_snapshots WHERE symbol='NVDA'"
+        ).fetchone()
+        version = c.execute("SELECT version FROM schema_version").fetchone()[0]
+
+    assert row["source"] == "observed"
+    assert version == 2
+
+
 def test_read_isolates_by_symbol(monkeypatch, tmp_path):
     monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
     with connect() as conn:

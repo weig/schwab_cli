@@ -13,12 +13,14 @@ needed for ``vol`` happens inside this module.
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import typer
 
 from schwab_cli import config as config_module
+from schwab_cli.analytics.bs import implied_vol
 from schwab_cli.analytics.vol import (
     aggregate_pc,
     percentile_rank,
@@ -34,16 +36,26 @@ from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.vol import render_vol
 from schwab_cli.session import load as load_session
 from schwab_cli.storage.vol_history import (
+    SOURCE_OBSERVED,
+    SOURCE_SYNTHETIC,
     connect as vol_store_connect,
-    read_recent_per_day,
+    count_snapshots,
+    read_recent_per_day_with_source,
     record_snapshot,
 )
-from schwab_cli.ticker import TickerError, resolve as resolve_ticker
+from schwab_cli.ticker import Ticker, TickerError, resolve as resolve_ticker
 
 
 # Minimum accumulated days before IVP starts rendering a percentile.
 # Below this, the IVP cell shows "insufficient history (N/lookback)".
 _IVP_MIN_SAMPLE = 30
+
+# Fallback risk-free rate used by the BS backfill (3-month T-bill
+# approximation). Error contribution vs the "true" daily rate is small;
+# sensitivity of short-dated IV to r is on the order of 0.1%/pct.
+_BACKFILL_RISK_FREE_RATE = 0.045
+
+_NY = ZoneInfo("America/New_York")
 
 
 # ---- client helper ------------------------------------------------------
@@ -155,13 +167,16 @@ def run(
     # Call 1 — chain (wide strikes, ~1y of expirations) for IV + P/C.
     today = date.today()
     try:
+        # Expiry window goes out ~1.5 years so the backfill can find a
+        # long-dated LEAPS with real trading history without a second
+        # /chains call.
         chain_raw = get_chain(
             client,
             under,
             contract_type="ALL",
             strike_count=60,
             from_date=today,
-            to_date=today + timedelta(days=365),
+            to_date=today + timedelta(days=540),
         )
     except (ApiError, SessionExpired) as e:
         typer.secho(str(e) or type(e).__name__, fg=typer.colors.RED, err=True)
@@ -211,7 +226,12 @@ def run(
     # IVP: record today's ATM IV, then rank against the accumulated series.
     # A storage failure is surfaced to stderr but never blocks the main
     # render — at worst IVP falls back to "insufficient history" next run.
-    ivp_series: list[float] = []
+    #
+    # First-run-per-symbol also attempts a BS backfill so IVP can be
+    # meaningful immediately. The backfill costs one extra history call
+    # on the current ATM contract; underlying history is already in hand
+    # from the HV calculation.
+    ivp_series_tagged: list[tuple[float, str]] = []
     storage_error: str | None = None
     try:
         with vol_store_connect() as conn:
@@ -224,15 +244,43 @@ def run(
                     atm_strike=atm["strike"],
                     atm_expiry=atm["expiry"],
                     atm_dte=atm["dte"],
+                    source=SOURCE_OBSERVED,
                 )
-            ivp_series = read_recent_per_day(
+            # Auto-backfill: populate synthetic history the first time we
+            # see this symbol. Honour --no-record since backfill writes.
+            if (
+                not no_record
+                and atm
+                and atm.get("iv") is not None
+                and count_snapshots(conn, symbol=under) <= 1
+            ):
+                n_synth = _backfill_synthetic_iv(
+                    conn,
+                    client=client,
+                    symbol=under,
+                    atm=atm,
+                    expiries=expiries,
+                    underlying_closes=closes,
+                    underlying_candles=history_raw.get("candles") or [],
+                )
+                # Only mention the backfill to human readers — in JSON/MD
+                # modes or --snapshot-only the extra stderr line would
+                # fight with piping into `jq` / `sed` etc.
+                if n_synth and not (as_json or as_md or snapshot_only):
+                    typer.secho(
+                        f"vol: backfilled {n_synth} synthetic IV days "
+                        f"for {under} from option + underlying history.",
+                        fg=typer.colors.CYAN,
+                        err=True,
+                    )
+            ivp_series_tagged = read_recent_per_day_with_source(
                 conn, symbol=under, lookback_days=ivp_lookback
             )
     except sqlite3.Error as e:
         storage_error = str(e)
 
     ivp = _compute_ivp_state(
-        series=ivp_series,
+        series_tagged=ivp_series_tagged,
         today_iv=atm["iv"] if atm and atm.get("iv") is not None else None,
         lookback=ivp_lookback,
     )
@@ -279,7 +327,7 @@ def run(
 
 def _compute_ivp_state(
     *,
-    series: list[float],
+    series_tagged: list[tuple[float, str]],
     today_iv: float | None,
     lookback: int,
 ) -> dict[str, Any]:
@@ -294,21 +342,188 @@ def _compute_ivp_state(
     ``effective_min = min(_IVP_MIN_SAMPLE, lookback)`` so a short
     user-chosen lookback (e.g. ``--ivp-lookback=5``) can still resolve
     to a valid percentile once a handful of snapshots exist.
+
+    The emitted block also carries ``observed`` / ``synthetic`` counts
+    so the renderer can annotate IVP with a "N synthetic, N observed"
+    breakdown when the auto-backfill has contributed to the series.
     """
-    n = len(series)
+    n = len(series_tagged)
+    observed = sum(1 for _, src in series_tagged if src == SOURCE_OBSERVED)
+    synthetic = n - observed
     effective_min = min(_IVP_MIN_SAMPLE, lookback)
-    if today_iv is None or n < effective_min:
-        return {
-            "state": "insufficient",
-            "value": None,
-            "sample_size": n,
-            "lookback": lookback,
-        }
-    pct = percentile_rank(series, today_iv)
-    state = "ok" if n >= lookback else "partial"
-    return {
-        "state": state,
-        "value": pct,
+    common: dict[str, Any] = {
         "sample_size": n,
+        "observed": observed,
+        "synthetic": synthetic,
         "lookback": lookback,
     }
+    if today_iv is None or n < effective_min:
+        return {"state": "insufficient", "value": None, **common}
+    series_values = [iv for iv, _ in series_tagged]
+    pct = percentile_rank(series_values, today_iv)
+    state = "ok" if n >= lookback else "partial"
+    return {"state": state, "value": pct, **common}
+
+
+# ---- backfill ----------------------------------------------------------
+
+
+def _backfill_synthetic_iv(
+    conn,
+    *,
+    client: SchwabClient,
+    symbol: str,
+    atm: dict[str, Any],
+    expiries: list[dict[str, Any]],
+    underlying_closes: list[float],
+    underlying_candles: list[dict[str, Any]],
+) -> int:
+    """Populate the store with a 1-year synthetic ATM-IV series.
+
+    Fetches ~1y of daily candles for a LONG-DATED reference contract
+    (LEAPS near today's spot), joins by datetime against the underlying
+    candles already in hand (for HV), BS-solves IV per day, and inserts
+    rows with source='synthetic'. Using a long-dated strike — not
+    today's near-term ATM — is load-bearing: near-term contracts only
+    have a few weeks of trading history, far too short to populate a
+    252-day IVP.
+
+    Returns the number of synthetic rows written. Never raises on API
+    or math failures; the command continues with whatever got recorded.
+    """
+    # A LEAPS-strike-near-spot has been listed for months-to-years, so
+    # its price history covers enough calendar time for the backfill.
+    # Fall back to today's ATM if no LEAPS is available.
+    backfill = _pick_backfill_contract(expiries, atm["strike"]) or atm
+    try:
+        option_sym = _build_atm_call_symbol(symbol, backfill)
+    except ValueError:
+        return 0
+
+    # Use the same range we used for the underlying history.
+    try:
+        start, end = parse_range("-280d..now")
+        opt_raw = get_history(
+            client, option_sym,
+            frequency_type="daily", frequency=1,
+            start=start, end=end,
+        )
+    except Exception:
+        return 0
+
+    opt_candles = opt_raw.get("candles") or []
+    if not opt_candles:
+        return 0
+
+    # Align by NY trading day (underlying and option candles may use
+    # slightly different intraday timestamps but share the same session).
+    und_by_day: dict[str, tuple[int, float]] = {}
+    for c in underlying_candles:
+        dt_ms = c.get("datetime")
+        close = c.get("close")
+        if not isinstance(dt_ms, (int, float)) or close is None:
+            continue
+        day = _ny_date_of_ms(int(dt_ms))
+        und_by_day[day] = (int(dt_ms), float(close))
+
+    expiry_date = _parse_iso_date(backfill["expiry"])
+    if expiry_date is None:
+        return 0
+    strike = float(backfill["strike"])
+
+    written = 0
+    for oc in opt_candles:
+        dt_ms = oc.get("datetime")
+        opt_close = oc.get("close")
+        if not isinstance(dt_ms, (int, float)) or opt_close is None:
+            continue
+        day = _ny_date_of_ms(int(dt_ms))
+        und_entry = und_by_day.get(day)
+        if und_entry is None:
+            continue
+        _und_ms, und_close = und_entry
+        # DTE at the historical moment.
+        obs_date = _parse_iso_date(day)
+        if obs_date is None:
+            continue
+        T = (expiry_date - obs_date).days / 365.0
+        if T <= 0:
+            continue
+        iv = implied_vol(
+            float(opt_close), und_close, strike, T,
+            _BACKFILL_RISK_FREE_RATE, is_call=True,
+        )
+        # Sanity-filter: reject absurd solver outputs from illiquid days.
+        if iv is None or iv <= 0.02 or iv > 3.0:
+            continue
+        record_snapshot(
+            conn,
+            symbol=symbol,
+            spot=und_close,
+            atm_iv=iv,
+            atm_strike=strike,
+            atm_expiry=backfill["expiry"],
+            atm_dte=(expiry_date - obs_date).days,
+            captured_at_ms=int(dt_ms),
+            source=SOURCE_SYNTHETIC,
+        )
+        written += 1
+    return written
+
+
+def _pick_backfill_contract(
+    expiries: list[dict[str, Any]],
+    target_strike: float,
+) -> dict[str, Any] | None:
+    """Pick a long-dated reference contract for the IV backfill.
+
+    Preference: DTE >= 180 (months of trading history available), strike
+    closest to the current ATM strike. If no expiry qualifies, returns
+    None so the caller falls back to today's ATM.
+    """
+    long_dated = [e for e in expiries if e.get("dte", 0) >= 180]
+    if not long_dated:
+        return None
+    # Among long-dated, prefer the DTE closest to ~1 year (365) so the
+    # reference contract has roughly a year of history already. Then
+    # pick the strike closest to the current ATM.
+    best_exp = min(long_dated, key=lambda e: abs(e["dte"] - 365))
+    contracts = best_exp.get("contracts", [])
+    strikes = sorted({c["strike"] for c in contracts if c.get("strike") is not None})
+    if not strikes:
+        return None
+    strike = min(strikes, key=lambda s: abs(s - target_strike))
+    return {
+        "expiry": best_exp["expiry"],
+        "dte": best_exp["dte"],
+        "strike": strike,
+        "iv": None,  # unused for backfill
+    }
+
+
+def _build_atm_call_symbol(symbol: str, atm: dict[str, Any]) -> str:
+    """Return the Schwab-canonical OSI symbol for the ATM call of the
+    contract picked by :func:`pick_atm_contract`."""
+    from schwab_cli.ticker import OptionPart, Ticker
+
+    date_str = atm["expiry"].replace("-", "")  # YYYY-MM-DD → YYYYMMDD
+    return Ticker(
+        type="option",
+        underlying=symbol,
+        option=OptionPart(date=date_str, type="C", strike=float(atm["strike"])),
+    ).to_schwab_symbol()
+
+
+def _ny_date_of_ms(dt_ms: int) -> str:
+    """Return ISO date (YYYY-MM-DD) of the NY calendar day for an epoch-ms."""
+    return (
+        datetime.fromtimestamp(dt_ms / 1000, tz=timezone.utc)
+        .astimezone(_NY).date().isoformat()
+    )
+
+
+def _parse_iso_date(s: str) -> date | None:
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None

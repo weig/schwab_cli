@@ -26,7 +26,10 @@ from zoneinfo import ZoneInfo
 
 from schwab_cli.storage import storage_dir
 
-_SCHEMA_VERSION = 1
+# Schema version bumps when the on-disk layout changes. _migrate() is
+# responsible for stepping v(N) databases up to the current version
+# via additive-only DDL (ALTER TABLE) so we never lose captured data.
+_SCHEMA_VERSION = 2
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -39,12 +42,17 @@ CREATE TABLE IF NOT EXISTS vol_snapshots (
     atm_strike      REAL    NOT NULL,
     atm_expiry      TEXT    NOT NULL,
     atm_dte         INTEGER NOT NULL,
+    source          TEXT    NOT NULL DEFAULT 'observed',
     PRIMARY KEY (captured_at_ms, symbol)
 );
 
 CREATE INDEX IF NOT EXISTS idx_vol_lookup
     ON vol_snapshots (symbol, captured_at_ms);
 """
+
+# Allowed values for the `source` column.
+SOURCE_OBSERVED = "observed"    # captured live from Schwab's chain endpoint
+SOURCE_SYNTHETIC = "synthetic"  # BS-reconstructed from option + underlying history
 
 _NY = ZoneInfo("America/New_York")
 
@@ -74,12 +82,33 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Apply the schema idempotently and record the schema version."""
+    """Apply the schema idempotently and record the schema version.
+
+    v1 → v2 added the ``source`` column so we can distinguish live
+    observations from BS-reconstructed (synthetic) historical values.
+    Pre-v2 rows are assumed to be live observations.
+    """
     conn.executescript(_SCHEMA_DDL)
     row = conn.execute("SELECT version FROM schema_version").fetchone()
-    if row is None:
+    current = row[0] if row else None
+
+    # v1 DBs (from before we added the `source` column) lack it even
+    # though the DDL above is idempotent — CREATE TABLE IF NOT EXISTS
+    # doesn't alter existing tables. Back-fill the column explicitly.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(vol_snapshots)").fetchall()}
+    if "source" not in cols:
+        conn.execute(
+            "ALTER TABLE vol_snapshots "
+            "ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'"
+        )
+
+    if current is None:
         conn.execute(
             "INSERT INTO schema_version VALUES (?)", (_SCHEMA_VERSION,)
+        )
+    elif current < _SCHEMA_VERSION:
+        conn.execute(
+            "UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,)
         )
 
 
@@ -93,12 +122,18 @@ def record_snapshot(
     atm_expiry: str,
     atm_dte: int,
     captured_at_ms: int | None = None,
+    source: str = SOURCE_OBSERVED,
 ) -> None:
     """Insert a single vol snapshot.
 
     ``captured_at_ms`` defaults to ``now()`` in UTC milliseconds.
-    Idempotent on ``(captured_at_ms, symbol)`` — a second identical
-    write is a no-op (first-write-wins via INSERT OR IGNORE).
+    ``source`` is ``'observed'`` for live captures or ``'synthetic'``
+    for BS-reconstructed backfill rows.
+
+    Idempotent on ``(captured_at_ms, symbol)`` — a second write for the
+    same key is a no-op (first-write-wins via INSERT OR IGNORE), so
+    synthetic rows are never clobbered by later observations and vice
+    versa.
     """
     if captured_at_ms is None:
         captured_at_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
@@ -106,15 +141,25 @@ def record_snapshot(
         """
         INSERT OR IGNORE INTO vol_snapshots (
             captured_at_ms, symbol, spot, atm_iv,
-            atm_strike, atm_expiry, atm_dte
+            atm_strike, atm_expiry, atm_dte, source
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             captured_at_ms, symbol, spot, atm_iv,
-            atm_strike, atm_expiry, atm_dte,
+            atm_strike, atm_expiry, atm_dte, source,
         ),
     )
+
+
+def count_snapshots(conn: sqlite3.Connection, *, symbol: str) -> int:
+    """Return the number of rows for ``symbol`` — used to detect
+    first-run-per-symbol for the auto-backfill trigger."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM vol_snapshots WHERE symbol = ?",
+        (symbol,),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def read_recent_per_day(
@@ -129,21 +174,41 @@ def read_recent_per_day(
     value wins. The return list is sorted by day ascending and trimmed
     to the most recent ``lookback_days`` entries.
     """
-    rows = conn.execute(
+    rows = _recent_rows(conn, symbol=symbol)
+    per_day: dict[str, float] = {}
+    for row in rows:
+        ts = datetime.fromtimestamp(row["captured_at_ms"] / 1000, tz=timezone.utc)
+        day = ts.astimezone(_NY).date().isoformat()
+        per_day[day] = row["atm_iv"]
+    days_sorted = sorted(per_day.keys())[-lookback_days:]
+    return [per_day[d] for d in days_sorted]
+
+
+def read_recent_per_day_with_source(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    lookback_days: int,
+) -> list[tuple[float, str]]:
+    """Like :func:`read_recent_per_day` but returns ``(iv, source)`` tuples
+    so the caller can annotate IVP output with observed/synthetic splits."""
+    rows = _recent_rows(conn, symbol=symbol)
+    per_day: dict[str, tuple[float, str]] = {}
+    for row in rows:
+        ts = datetime.fromtimestamp(row["captured_at_ms"] / 1000, tz=timezone.utc)
+        day = ts.astimezone(_NY).date().isoformat()
+        per_day[day] = (row["atm_iv"], row["source"] or SOURCE_OBSERVED)
+    days_sorted = sorted(per_day.keys())[-lookback_days:]
+    return [per_day[d] for d in days_sorted]
+
+
+def _recent_rows(conn: sqlite3.Connection, *, symbol: str) -> list[sqlite3.Row]:
+    return conn.execute(
         """
-        SELECT captured_at_ms, atm_iv
+        SELECT captured_at_ms, atm_iv, source
         FROM vol_snapshots
         WHERE symbol = ?
         ORDER BY captured_at_ms ASC
         """,
         (symbol,),
     ).fetchall()
-
-    per_day: dict[str, float] = {}
-    for row in rows:
-        ts = datetime.fromtimestamp(row["captured_at_ms"] / 1000, tz=timezone.utc)
-        day = ts.astimezone(_NY).date().isoformat()
-        per_day[day] = row["atm_iv"]  # later rows overwrite earlier same-day
-
-    days_sorted = sorted(per_day.keys())[-lookback_days:]
-    return [per_day[d] for d in days_sorted]

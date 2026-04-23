@@ -102,10 +102,14 @@ def _history_resp(n_days: int) -> dict:
 
 
 def test_vol_happy_path_human(monkeypatch, tmp_path):
+    """`vol` in interactive mode renders all rows. We pass --no-record so
+    the auto-backfill doesn't fire in tests where we haven't staged
+    realistic option-price history (the synthetic side-effect would
+    inflate the sample count)."""
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
-        result = runner.invoke(app, ["vol", "NVDA"])
+        result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
     assert result.exit_code == 0, result.output
 
     # Header carries symbol + spot.
@@ -117,7 +121,7 @@ def test_vol_happy_path_human(monkeypatch, tmp_path):
     # IV value derived from midpoint of call/put at 202.5 strike.
     # Midpoint is 0.3658 → rendered as 36.58%.
     assert "36.58%" in result.output
-    # First run against a fresh store → IVP is insufficient (only 1 day).
+    # --no-record means IVP has no accumulated samples at all.
     assert "insufficient history" in result.output
 
 
@@ -125,7 +129,8 @@ def test_vol_json_shape_and_values(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
-        result = runner.invoke(app, ["vol", "NVDA", "--json"])
+        # --no-record keeps the envelope predictable: no backfill side-effects.
+        result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
     assert result.exit_code == 0, result.output
     env = json.loads(result.output)
 
@@ -154,18 +159,17 @@ def test_vol_json_shape_and_values(monkeypatch, tmp_path):
     # OI: 820/950 ≈ 0.863
     assert abs(env["pc"]["oi_ratio"] - (820 / 950)) < 1e-9
 
-    # Fresh store + one write on first call → still below the 30-day
-    # minimum, so IVP reports insufficient history.
+    # --no-record means nothing is written. IVP reports insufficient.
     assert env["ivp"]["state"] == "insufficient"
     assert env["ivp"]["value"] is None
-    assert env["ivp"]["sample_size"] == 1
+    assert env["ivp"]["sample_size"] == 0
 
 
 def test_vol_md_has_all_rows(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
-        result = runner.invoke(app, ["vol", "NVDA", "--md"])
+        result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--md"])
     assert result.exit_code == 0, result.output
     for label in ("| IV ", "| HV ", "| HVP ", "| P/C vol ", "| P/C OI ", "| IVP "):
         assert label in result.output
@@ -194,7 +198,7 @@ def test_vol_hv_none_when_history_too_short(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(10)):
-        result = runner.invoke(app, ["vol", "NVDA", "--json"])
+        result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
     assert result.exit_code == 0, result.output
     env = json.loads(result.output)
     assert env["hv"]["value"] is None
@@ -274,7 +278,9 @@ def test_vol_no_record_skips_write(monkeypatch, tmp_path):
 
 
 def test_vol_snapshot_only_writes_and_is_silent(monkeypatch, tmp_path):
-    """--snapshot-only records the snapshot and produces no stdout."""
+    """--snapshot-only records the snapshot (plus any backfill) without
+    rendering. stdout stays empty; stderr may carry the backfill notice
+    but we don't require it here."""
     from schwab_cli.storage.vol_history import connect
 
     _prep(monkeypatch, tmp_path)
@@ -282,13 +288,116 @@ def test_vol_snapshot_only_writes_and_is_silent(monkeypatch, tmp_path):
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
     assert result.exit_code == 0, result.output
-    # Silent: no IV/HV/HVP/P/C labels in output.
+    # stdout stays empty in snapshot-only mode (the backfill notice is
+    # suppressed in non-interactive modes).
     assert "IV" not in result.output
     assert "HV" not in result.output
-    # But the write went through.
+    assert "─" not in result.output  # no rendered header
+    # At minimum, today's observed row was written.
     with connect() as conn:
-        n = conn.execute("SELECT COUNT(*) FROM vol_snapshots").fetchone()[0]
+        n = conn.execute(
+            "SELECT COUNT(*) FROM vol_snapshots WHERE source = 'observed'"
+        ).fetchone()[0]
     assert n == 1
+
+
+def test_vol_backfill_populates_synthetic_rows_on_first_run(monkeypatch, tmp_path):
+    """First `vol SYMBOL` run with an empty store triggers the BS backfill.
+
+    The mock option-history is constructed so BS-solving each candle
+    yields a valid IV (strike = current spot, sensible premiums). After
+    the command runs, the store should contain ≥ 1 observed + many
+    synthetic rows, and the envelope should reflect both counts.
+    """
+    from schwab_cli.storage.vol_history import connect
+
+    _prep(monkeypatch, tmp_path)
+
+    # Timestamps must be recent so T (time to expiry 2026-05-01) is
+    # sane — otherwise the BS solver returns absurd IVs that the
+    # sanity filter rejects and backfill writes nothing.
+    from datetime import datetime, timezone
+    base = int(datetime(2026, 4, 1, 20, tzinfo=timezone.utc).timestamp() * 1000)
+    ms_per_day = 86_400_000
+
+    # Underlying history: monotonic prices so BS is well-conditioned.
+    und = {
+        "symbol": "NVDA",
+        "candles": [
+            {"datetime": base + i * ms_per_day, "open": 200.0, "high": 205.0,
+             "low": 198.0, "close": 200.0 + 0.05 * i, "volume": 1_000_000}
+            for i in range(20)
+        ],
+    }
+    # Option history: ATM 202.5 call priced near parity + time value.
+    # These prices map to sensible IVs in BS.
+    opt = {
+        "symbol": "NVDA  260501C00202500",
+        "candles": [
+            {"datetime": base + i * ms_per_day, "open": 4.5, "high": 5.2,
+             "low": 4.2, "close": 4.6 + 0.02 * i, "volume": 1000}
+            for i in range(20)
+        ],
+    }
+
+    def fake_history(client, symbol, **kwargs):
+        # Differentiate by symbol: the option symbol carries spaces.
+        return opt if " " in symbol else und
+
+    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", side_effect=fake_history):
+        result = runner.invoke(app, ["vol", "NVDA", "--json"])
+
+    assert result.exit_code == 0, result.output
+    env = json.loads(result.output)
+    # Backfill delivered synthetics.
+    assert env["ivp"]["synthetic"] >= 1
+    assert env["ivp"]["observed"] >= 1
+    assert env["ivp"]["sample_size"] == env["ivp"]["synthetic"] + env["ivp"]["observed"]
+    # Store carries both sources.
+    with connect() as conn:
+        src_counts = dict(conn.execute(
+            "SELECT source, COUNT(*) FROM vol_snapshots GROUP BY source"
+        ).fetchall())
+    assert src_counts.get("observed", 0) >= 1
+    assert src_counts.get("synthetic", 0) >= 1
+
+
+def test_vol_backfill_only_fires_on_first_run(monkeypatch, tmp_path):
+    """Once a symbol has rows in the store, backfill is skipped."""
+    from schwab_cli.storage.vol_history import connect, record_snapshot
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    _prep(monkeypatch, tmp_path)
+    NY = ZoneInfo("America/New_York")
+    # Pre-seed a few observed days.
+    with connect() as conn:
+        for i in range(5):
+            ts = int(
+                datetime(2026, 4, 1, 16, 0, tzinfo=NY).timestamp() * 1000
+            ) + i * 86_400_000
+            record_snapshot(
+                conn, symbol="NVDA", spot=200.0, atm_iv=0.30,
+                atm_strike=200.0, atm_expiry="2026-05-01", atm_dte=9,
+                captured_at_ms=ts,
+            )
+
+    backfill_called = {"count": 0}
+    real_backfill = __import__(
+        "schwab_cli.commands.vol", fromlist=["_backfill_synthetic_iv"]
+    )._backfill_synthetic_iv
+
+    def spy(*args, **kwargs):
+        backfill_called["count"] += 1
+        return real_backfill(*args, **kwargs)
+
+    with patch("schwab_cli.commands.vol._backfill_synthetic_iv", side_effect=spy), \
+         patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+        runner.invoke(app, ["vol", "NVDA"])
+
+    assert backfill_called["count"] == 0, "backfill should skip when rows exist"
 
 
 def test_vol_chain_call_uses_wide_params(monkeypatch, tmp_path):
@@ -303,7 +412,9 @@ def test_vol_chain_call_uses_wide_params(monkeypatch, tmp_path):
 
     with patch("schwab_cli.commands.vol.get_chain", side_effect=fake_chain), \
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
-        runner.invoke(app, ["vol", "NVDA"])
+        # --no-record suppresses the backfill's extra chain call so the
+        # captured dict only reflects the primary vol-window lookup.
+        runner.invoke(app, ["vol", "NVDA", "--no-record"])
 
     assert captured["symbol"] == "NVDA"
     assert captured["contract_type"] == "ALL"

@@ -85,19 +85,32 @@ def _money(v: Any) -> str:
 
 
 def _ivp_value_and_note(ivp: dict[str, Any]) -> tuple[str, str]:
-    """Split the IVP row into (value, note) so wide notes don't wrap values."""
+    """Split the IVP row into (value, note) so wide notes don't wrap values.
+
+    Also annotates the breakdown between BS-backfilled (``synthetic``)
+    rows and live-captured (``observed``) rows when any synthetics are
+    present, so the user can see at a glance how much of the percentile
+    is reconstructed vs. measured.
+    """
     state = ivp.get("state")
     value = ivp.get("value")
     n = ivp.get("sample_size", 0)
     lookback = ivp.get("lookback", 252)
+    synthetic = ivp.get("synthetic", 0)
+    observed = ivp.get("observed", 0)
+
+    def _breakdown() -> str:
+        if synthetic > 0:
+            return f"  ({synthetic} synthetic, {observed} observed)"
+        return ""
+
     if state == "ok":
-        return _percentile(value), f"{lookback}-day percentile"
+        return _percentile(value), f"{lookback}-day percentile" + _breakdown()
     if state == "partial":
-        return _percentile(value), f"partial: {n}/{lookback} days"
+        return _percentile(value), f"partial: {n}/{lookback} days" + _breakdown()
     if state == "insufficient":
-        return "—", f"insufficient history: {n}/{lookback} days"
-    # "not_yet_active" or any unknown state
-    return "—", "not yet active (phase 2)"
+        return "—", f"insufficient history: {n}/{lookback} days" + _breakdown()
+    return "—", "not yet active"
 
 
 # ---- HUMAN --------------------------------------------------------------
