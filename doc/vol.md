@@ -1,15 +1,18 @@
 # `vol`
 
 Volatility context for a stock — implied vol (IV), historical vol (HV),
-HV percentile (HVP), and put/call ratio (P/C). Phase 1 ships without
-any local storage. IVP is a placeholder until phase 2 wires up local
-accumulation (see
-`docs/superpowers/plans/2026-04-23-schwab-cli-vol-command.md`).
+HV percentile (HVP), put/call ratio (P/C), and IV percentile (IVP).
+
+Each invocation makes **two** Schwab API calls (one chain, one
+year-long price history) and appends one row to a local SQLite store
+so IVP can ripen over time.
 
 ## Usage
 
 ```
-schwab_cli vol SYMBOL [--hv-window=N] [--hv-lookback=N] [--json | --md]
+schwab_cli vol SYMBOL [--hv-window=N] [--hv-lookback=N]
+                      [--ivp-lookback=N] [--no-record] [--snapshot-only]
+                      [--json | --md]
 ```
 
 ## Argument
@@ -24,10 +27,15 @@ schwab_cli vol SYMBOL [--hv-window=N] [--hv-lookback=N] [--json | --md]
 | --- | --- | --- |
 | `--hv-window=N` | 30 | Rolling HV window in trading days. |
 | `--hv-lookback=N` | 252 | HVP percentile lookback in trading days (~1 year). |
+| `--ivp-lookback=N` | 252 | IVP percentile lookback in trading days. |
+| `--no-record` | off | Skip appending today's ATM IV to the store. |
+| `--snapshot-only` | off | Write today's snapshot and exit silently. Cron-friendly. |
 | `--json` | | JSON envelope. |
 | `--md` | | GitHub-flavoured markdown. |
 
 ## Example: HUMAN
+
+First run against a fresh store:
 
 ```
 $ schwab_cli vol NVDA
@@ -38,7 +46,13 @@ NVDA  $202.50
  HVP              39%  252-day percentile (179/252 available)
  P/C vol         0.43  puts/calls, volume, all expiries
  P/C OI          0.58  puts/calls, open interest, all expiries
- IVP                —  not yet active (phase 2)
+ IVP                —  insufficient history: 1/252 days
+```
+
+After a full year of daily runs (or via the cron pattern below):
+
+```
+IVP              54%  252-day percentile
 ```
 
 ## Example: `--json`
@@ -81,7 +95,7 @@ NVDA  $202.50
 | **HVP** | Percentile rank of today's HV within the rolling-30 HV series for the past 252 trading days. Uses midrank for ties. | Same history call. |
 | **P/C vol** | `Σ put_volume / Σ call_volume` across every strike and every expiry in the chain response. | Chain, no extra call. |
 | **P/C OI** | `Σ put_OI / Σ call_OI`, same aggregation. | Chain, no extra call. |
-| **IVP** | Placeholder in phase 1. Phase 2 will accumulate daily ATM IV in a local SQLite DB and rank today's value against the 252-day series. | Local storage (phase 2). |
+| **IVP** | Percentile rank of today's ATM IV against the accumulated daily ATM IV series in the local store. | Local SQLite (populated by this command). |
 
 ## API calls per invocation
 
@@ -107,14 +121,46 @@ shorter than a year, or because the 1-year price-history call was
 truncated server-side. The percentile is computed against the
 available sample, so it's still useful — just note the denominator.
 
-## IVP state machine (for future phase-2 rendering)
+## IVP state machine
 
-| State | Meaning |
-| --- | --- |
-| `not_yet_active` | Phase 2 not deployed (current build). |
-| `insufficient` | < 30 days of snapshots accumulated. |
-| `partial` | 30–251 days accumulated. Value is shown with `(N/252 days)` annotation. |
-| `ok` | ≥ 252 days of snapshots; full-year percentile. |
+| State | Trigger | Rendering |
+| --- | --- | --- |
+| `insufficient` | fewer than `min(30, --ivp-lookback)` distinct NY trading days in the store | value `—`, note `insufficient history: N/lookback days` |
+| `partial` | between the minimum and the lookback window | value `XX%`, note `partial: N/lookback days` |
+| `ok` | at least `--ivp-lookback` days accumulated | value `XX%`, note `lookback-day percentile` |
+
+The per-day collapse keeps the sample useful: the CLI can run many
+times in a trading day without inflating the sample — only the latest
+write per NY trading day counts.
+
+## Local storage
+
+The store lives at `~/.config/schwab_cli/storage/vol_history.db` by
+default. Override the directory with the `SCHWAB_CLI_STORAGE` env var
+(mirrors the `SCHWAB_CLI_CONFIG` pattern) — useful for scripting or
+keeping separate stores per broker account.
+
+Schema is idempotent — every invocation runs `CREATE TABLE IF NOT
+EXISTS` before writing, and `INSERT OR IGNORE` on the
+`(captured_at_ms, symbol)` primary key keeps rerun-within-the-same-
+millisecond safe. The DB is < 1 KB per symbol per year of daily
+snapshots.
+
+No other command writes to this store. `option` and `greeks` stay
+side-effect-free.
+
+## Populating IVP without watching it
+
+`--snapshot-only` captures today's ATM IV silently and exits 0 — ideal
+for cron. A minimal setup that ripens IVP for a symbol over a year:
+
+```cron
+# Record NVDA's daily ATM IV at 3:55 pm ET, Mon-Fri.
+55 15 * * 1-5 schwab_cli vol NVDA --snapshot-only
+```
+
+After ~30 trading days IVP starts rendering a `partial` percentile;
+after ~252 it graduates to `ok`.
 
 ## Notes
 

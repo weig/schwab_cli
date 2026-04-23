@@ -186,6 +186,21 @@ def vol(
         "--hv-lookback",
         help="HVP percentile lookback in trading days (default 252 ≈ 1 year).",
     ),
+    ivp_lookback: int = typer.Option(
+        252,
+        "--ivp-lookback",
+        help="IVP percentile lookback in trading days (default 252).",
+    ),
+    no_record: bool = typer.Option(
+        False,
+        "--no-record",
+        help="Do not append today's ATM IV to the local store.",
+    ),
+    snapshot_only: bool = typer.Option(
+        False,
+        "--snapshot-only",
+        help="Record today's ATM IV and exit silently (cron-friendly).",
+    ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
 ) -> None:
@@ -193,6 +208,9 @@ def vol(
         symbol,
         hv_window=hv_window,
         hv_lookback=hv_lookback,
+        ivp_lookback=ivp_lookback,
+        no_record=no_record,
+        snapshot_only=snapshot_only,
         as_json=as_json,
         as_md=as_md,
     )

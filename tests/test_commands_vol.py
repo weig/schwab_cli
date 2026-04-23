@@ -23,6 +23,9 @@ runner = CliRunner()
 def _prep(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    # Keep the vol-history DB inside the test's tmp_path so tests can't
+    # pollute the user's real `~/.config/schwab_cli/storage/vol_history.db`.
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path / "storage"))
     save_config(Config(
         client_id="cid", client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
@@ -114,8 +117,8 @@ def test_vol_happy_path_human(monkeypatch, tmp_path):
     # IV value derived from midpoint of call/put at 202.5 strike.
     # Midpoint is 0.3658 → rendered as 36.58%.
     assert "36.58%" in result.output
-    # IVP is the phase-1 placeholder.
-    assert "not yet active" in result.output
+    # First run against a fresh store → IVP is insufficient (only 1 day).
+    assert "insufficient history" in result.output
 
 
 def test_vol_json_shape_and_values(monkeypatch, tmp_path):
@@ -151,9 +154,11 @@ def test_vol_json_shape_and_values(monkeypatch, tmp_path):
     # OI: 820/950 ≈ 0.863
     assert abs(env["pc"]["oi_ratio"] - (820 / 950)) < 1e-9
 
-    # IVP is explicit placeholder.
-    assert env["ivp"]["state"] == "not_yet_active"
+    # Fresh store + one write on first call → still below the 30-day
+    # minimum, so IVP reports insufficient history.
+    assert env["ivp"]["state"] == "insufficient"
     assert env["ivp"]["value"] is None
+    assert env["ivp"]["sample_size"] == 1
 
 
 def test_vol_md_has_all_rows(monkeypatch, tmp_path):
@@ -195,6 +200,95 @@ def test_vol_hv_none_when_history_too_short(monkeypatch, tmp_path):
     assert env["hv"]["value"] is None
     assert env["hvp"]["value"] is None
     assert env["hvp"]["sample_size"] == 0
+
+
+def test_vol_ivp_partial_when_history_between_min_and_lookback(monkeypatch, tmp_path):
+    """Seed the store with 60 days of prior snapshots → IVP shows partial."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    from schwab_cli.storage.vol_history import connect, record_snapshot
+
+    _prep(monkeypatch, tmp_path)
+    NY = ZoneInfo("America/New_York")
+    with connect() as conn:
+        for i in range(60):
+            ts = int(
+                datetime(2026, 2, 1, 16, 0, tzinfo=NY).timestamp() * 1000
+            ) + i * 86_400_000
+            record_snapshot(
+                conn, symbol="NVDA", spot=200.0, atm_iv=0.30 + i * 0.001,
+                atm_strike=200.0, atm_expiry="2026-05-01", atm_dte=9,
+                captured_at_ms=ts,
+            )
+    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+        result = runner.invoke(app, ["vol", "NVDA", "--json"])
+    env = json.loads(result.output)
+    # 60 seeded + 1 from this run = 61 distinct days.
+    assert env["ivp"]["state"] == "partial"
+    assert env["ivp"]["sample_size"] == 61
+    assert env["ivp"]["value"] is not None
+    assert 0 <= env["ivp"]["value"] <= 100
+
+
+def test_vol_ivp_ok_when_history_exceeds_lookback(monkeypatch, tmp_path):
+    """With --ivp-lookback=5 and 10 days of history, state is ok."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    from schwab_cli.storage.vol_history import connect, record_snapshot
+
+    _prep(monkeypatch, tmp_path)
+    NY = ZoneInfo("America/New_York")
+    # Seed 30 days with distinct NY dates so the partial sample crosses
+    # the 30-day minimum threshold for the "ok" branch.
+    with connect() as conn:
+        for i in range(30):
+            ts = int(
+                datetime(2026, 2, 1, 16, 0, tzinfo=NY).timestamp() * 1000
+            ) + i * 86_400_000
+            record_snapshot(
+                conn, symbol="NVDA", spot=200.0, atm_iv=0.30 + i * 0.001,
+                atm_strike=200.0, atm_expiry="2026-05-01", atm_dte=9,
+                captured_at_ms=ts,
+            )
+    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+        result = runner.invoke(app, ["vol", "NVDA", "--ivp-lookback=5", "--json"])
+    env = json.loads(result.output)
+    assert env["ivp"]["state"] == "ok"
+    assert env["ivp"]["lookback"] == 5
+
+
+def test_vol_no_record_skips_write(monkeypatch, tmp_path):
+    """--no-record keeps the store empty after an invocation."""
+    from schwab_cli.storage.vol_history import connect
+
+    _prep(monkeypatch, tmp_path)
+    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+        result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
+    assert result.exit_code == 0, result.output
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM vol_snapshots").fetchone()[0]
+    assert n == 0
+
+
+def test_vol_snapshot_only_writes_and_is_silent(monkeypatch, tmp_path):
+    """--snapshot-only records the snapshot and produces no stdout."""
+    from schwab_cli.storage.vol_history import connect
+
+    _prep(monkeypatch, tmp_path)
+    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+        result = runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
+    assert result.exit_code == 0, result.output
+    # Silent: no IV/HV/HVP/P/C labels in output.
+    assert "IV" not in result.output
+    assert "HV" not in result.output
+    # But the write went through.
+    with connect() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM vol_snapshots").fetchone()[0]
+    assert n == 1
 
 
 def test_vol_chain_call_uses_wide_params(monkeypatch, tmp_path):
