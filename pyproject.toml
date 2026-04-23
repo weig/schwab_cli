@@ -30,6 +30,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/schwab_cli"]
 
+# Copy the repo-level doc/ into the wheel so `schwab_cli <cmd> --doc`
+# can find the markdown pages after `uv tool install`. The runtime
+# helper (src/schwab_cli/_doc.py) first checks <repo>/doc/ for dev
+# mode and falls back to this bundled location.
+[tool.hatch.build.targets.wheel.force-include]
+"doc" = "schwab_cli/doc"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --cov=schwab_cli --cov-report=term-missing"

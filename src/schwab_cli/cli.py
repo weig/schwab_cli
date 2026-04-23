@@ -1,5 +1,6 @@
 import typer
 
+from schwab_cli._doc import doc_option
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
 from schwab_cli.commands import greeks as greeks_cmd
@@ -19,7 +20,9 @@ app = typer.Typer(
 
 
 @app.callback()
-def main() -> None:
+def main(
+    doc: bool = doc_option(),
+) -> None:
     """Charles Schwab CLI."""
 
 
@@ -30,6 +33,7 @@ def setup(
         "--dry-run",
         help="Print the resulting config.json to stdout without saving it.",
     ),
+    doc: bool = doc_option(),
 ) -> None:
     setup_cmd.run(dry_run=dry_run)
 
@@ -49,6 +53,7 @@ def auth(
             "yourself in a visible browser (forces HEADLESS=0 for this run)."
         ),
     ),
+    doc: bool = doc_option(),
 ) -> None:
     auth_cmd.run(force=force, manual=manual)
 
@@ -57,6 +62,7 @@ def auth(
 def accounts(
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     accounts_cmd.run_list(as_json=as_json, as_md=as_md)
 
@@ -66,6 +72,7 @@ def account(
     account_number: str = typer.Argument(..., help="Full number or last-N-digit suffix."),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     accounts_cmd.run_show(account_number, as_json=as_json, as_md=as_md)
 
@@ -75,6 +82,7 @@ def positions(
     account_number: str = typer.Argument(None, help="Optional account number or suffix."),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     accounts_cmd.run_positions(account_number, as_json=as_json, as_md=as_md)
 
@@ -84,6 +92,7 @@ def quote(
     symbols: list[str] = typer.Argument(..., help="One or more ticker symbols."),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     quote_cmd.run(symbols, as_json=as_json, as_md=as_md)
 
@@ -108,6 +117,7 @@ def option(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     option_cmd.run(
         symbol,
@@ -133,6 +143,7 @@ def greeks(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     greeks_cmd.run(ticker, as_json=as_json, as_md=as_md)
 
@@ -157,6 +168,7 @@ def history(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     history_cmd.run(
         symbol,
@@ -203,6 +215,7 @@ def vol(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     vol_cmd.run(
         symbol,
@@ -236,6 +249,7 @@ def transactions(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
 ) -> None:
     transactions_cmd.run(
         account,
