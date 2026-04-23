@@ -135,6 +135,14 @@ def _human(env: dict[str, Any]) -> str:
         iv_note = f"ATM {iv['expiry']}, {iv.get('dte', '?')} DTE, strike {_money(iv.get('strike'))}"
     t.add_row("IV", _pct(iv.get("value")), f"[dim]{iv_note}[/]")
 
+    iv_ref = env.get("iv_ref")
+    if iv_ref and iv_ref.get("value") is not None:
+        ref_note = (
+            f"LEAPS {iv_ref['expiry']}, {iv_ref.get('dte', '?')} DTE, "
+            f"strike {_money(iv_ref.get('strike'))} (used for IVP)"
+        )
+        t.add_row("IV (1y)", _pct(iv_ref.get("value")), f"[dim]{ref_note}[/]")
+
     hv = env.get("hv") or {}
     t.add_row("HV", _pct(hv.get("value")), f"[dim]{hv.get('window')}-day realized[/]")
 
@@ -178,6 +186,13 @@ def _md(env: dict[str, Any]) -> str:
             f"strike {_money(iv.get('strike'))}"
         )
     lines.append(f"| IV | {_pct(iv.get('value'))} | {iv_note} |")
+    iv_ref = env.get("iv_ref")
+    if iv_ref and iv_ref.get("value") is not None:
+        ref_note = (
+            f"LEAPS {iv_ref['expiry']}, {iv_ref.get('dte', '?')} DTE, "
+            f"strike {_money(iv_ref.get('strike'))} (used for IVP)"
+        )
+        lines.append(f"| IV (1y) | {_pct(iv_ref.get('value'))} | {ref_note} |")
     lines.append(f"| HV | {_pct(hv.get('value'))} | {hv.get('window')}-day realized |")
     hvp_note = f"{hvp.get('lookback', 252)}-day percentile"
     if hvp.get("sample_size", 0) < hvp.get("lookback", 252):

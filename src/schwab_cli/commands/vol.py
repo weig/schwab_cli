@@ -194,6 +194,15 @@ def run(
     atm = pick_atm_contract(expiries, spot)
     pc = aggregate_pc(flat_contracts)
 
+    # IVP is computed against a long-dated reference contract whose price
+    # history can be backfilled across a full year. Mixing that series
+    # with today's near-term IV gives nonsense percentiles (near-term is
+    # structurally lower than LEAPS). We pick the LEAPS now so we can
+    # surface its current IV next to the near-term one and record *that*
+    # value as today's snapshot — keeping display, storage, and
+    # percentile all term-consistent.
+    ivp_ref = _pick_backfill_contract(expiries, atm["strike"]) if atm else None
+
     # Call 2 — 1-year daily history for HV + HVP.
     start, end = parse_range(f"-{hv_lookback + hv_window + 20}d..now")
     try:
@@ -233,17 +242,24 @@ def run(
     # from the HV calculation.
     ivp_series_tagged: list[tuple[float, str]] = []
     storage_error: str | None = None
+    # What gets recorded as "today's observation" must match the reference
+    # contract the backfill uses; otherwise the IVP series mixes tenors.
+    snapshot_contract = ivp_ref if (ivp_ref and ivp_ref.get("iv") is not None) else atm
     try:
         with vol_store_connect() as conn:
-            if not no_record and atm and atm.get("iv") is not None:
+            if (
+                not no_record
+                and snapshot_contract
+                and snapshot_contract.get("iv") is not None
+            ):
                 record_snapshot(
                     conn,
                     symbol=under,
                     spot=spot,
-                    atm_iv=atm["iv"],
-                    atm_strike=atm["strike"],
-                    atm_expiry=atm["expiry"],
-                    atm_dte=atm["dte"],
+                    atm_iv=snapshot_contract["iv"],
+                    atm_strike=snapshot_contract["strike"],
+                    atm_expiry=snapshot_contract["expiry"],
+                    atm_dte=snapshot_contract["dte"],
                     source=SOURCE_OBSERVED,
                 )
             # Auto-backfill: populate synthetic history once per symbol.
@@ -287,7 +303,11 @@ def run(
 
     ivp = _compute_ivp_state(
         series_tagged=ivp_series_tagged,
-        today_iv=atm["iv"] if atm and atm.get("iv") is not None else None,
+        today_iv=(
+            snapshot_contract["iv"]
+            if snapshot_contract and snapshot_contract.get("iv") is not None
+            else None
+        ),
         lookback=ivp_lookback,
     )
 
@@ -311,6 +331,14 @@ def run(
             "dte": atm["dte"] if atm else None,
             "strike": atm["strike"] if atm else None,
         },
+        # Long-dated IV the IVP percentile is actually computed against.
+        # Surfaced here so users can see why IVP sits where it does.
+        "iv_ref": {
+            "value": ivp_ref["iv"] if ivp_ref and ivp_ref.get("iv") is not None else None,
+            "expiry": ivp_ref["expiry"] if ivp_ref else None,
+            "dte": ivp_ref["dte"] if ivp_ref else None,
+            "strike": ivp_ref["strike"] if ivp_ref else None,
+        } if ivp_ref else None,
         "hv": {"window": hv_window, "value": hv_today},
         "hvp": {
             "lookback": hv_lookback,
@@ -484,26 +512,36 @@ def _pick_backfill_contract(
     """Pick a long-dated reference contract for the IV backfill.
 
     Preference: DTE >= 180 (months of trading history available), strike
-    closest to the current ATM strike. If no expiry qualifies, returns
-    None so the caller falls back to today's ATM.
+    closest to the current ATM strike. Returns the picked contract's
+    current IV (midpoint of call + put) so it can be used as "today's
+    IV" in the IVP calculation — keeping the percentile term-consistent
+    with the historical synthetic series we back-compute from this same
+    contract's price history.
+
+    If no expiry qualifies, returns None so the caller falls back to
+    today's near-term ATM for both display and IVP (biased but better
+    than nothing on illiquid names).
     """
     long_dated = [e for e in expiries if e.get("dte", 0) >= 180]
     if not long_dated:
         return None
-    # Among long-dated, prefer the DTE closest to ~1 year (365) so the
-    # reference contract has roughly a year of history already. Then
-    # pick the strike closest to the current ATM.
     best_exp = min(long_dated, key=lambda e: abs(e["dte"] - 365))
     contracts = best_exp.get("contracts", [])
-    strikes = sorted({c["strike"] for c in contracts if c.get("strike") is not None})
-    if not strikes:
+    by_strike: dict[float, list[dict[str, Any]]] = {}
+    for c in contracts:
+        if c.get("strike") is None:
+            continue
+        by_strike.setdefault(c["strike"], []).append(c)
+    if not by_strike:
         return None
-    strike = min(strikes, key=lambda s: abs(s - target_strike))
+    strike = min(by_strike.keys(), key=lambda s: abs(s - target_strike))
+    ivs = [c["iv"] for c in by_strike[strike] if c.get("iv") is not None]
+    iv = (sum(ivs) / len(ivs)) if ivs else None
     return {
         "expiry": best_exp["expiry"],
         "dte": best_exp["dte"],
         "strike": strike,
-        "iv": None,  # unused for backfill
+        "iv": iv,
     }
 
 
