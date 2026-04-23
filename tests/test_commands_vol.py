@@ -363,6 +363,96 @@ def test_vol_backfill_populates_synthetic_rows_on_first_run(monkeypatch, tmp_pat
     assert src_counts.get("synthetic", 0) >= 1
 
 
+def test_vol_stitched_backfill_uses_multiple_strikes(monkeypatch, tmp_path):
+    """When a long-dated expiry exists, backfill fans out across several
+    distinct strikes and joins by closest-to-spot per day."""
+    from schwab_cli.storage.vol_history import connect
+    from datetime import datetime, timezone
+
+    _prep(monkeypatch, tmp_path)
+
+    # Chain response with a single LEAPS expiry (DTE=365) carrying a
+    # range of strikes — the stitched backfill should pick ~5 of these.
+    leaps_key = "2027-04-01:365"
+    call_strikes = {str(float(s)): [{
+        "putCall": "CALL", "strikePrice": float(s),
+        "volatility": 40.0,  # provides today's IV for picker
+        "totalVolume": 200, "openInterest": 500,
+    }] for s in (130, 150, 170, 190, 200, 210)}
+    put_strikes = {str(float(s)): [{
+        "putCall": "PUT", "strikePrice": float(s),
+        "volatility": 40.0, "totalVolume": 100, "openInterest": 300,
+    }] for s in (130, 150, 170, 190, 200, 210)}
+    chain = {
+        "underlying": {"last": 200.0, "change": 0.0, "percentChange": 0.0},
+        "callExpDateMap": {leaps_key: call_strikes},
+        "putExpDateMap": {leaps_key: put_strikes},
+    }
+
+    # Timestamps: recent so BS's T stays sane.
+    base = int(datetime(2026, 1, 1, 20, tzinfo=timezone.utc).timestamp() * 1000)
+    ms_day = 86_400_000
+    # Underlying spot slowly rises from $150 to $200 across 100 days.
+    und = {
+        "symbol": "NVDA",
+        "candles": [
+            {"datetime": base + i * ms_day, "open": 150.0, "high": 155.0,
+             "low": 145.0, "close": 150.0 + 0.5 * i, "volume": 10_000_000}
+            for i in range(100)
+        ],
+    }
+    # Per-strike option histories: each strike has close ≈ premium
+    # priced near parity + time value. Keeps BS solvable.
+    def opt_resp_for_strike(strike: float) -> dict:
+        return {
+            "symbol": f"NVDA  270401C{int(strike*1000):08d}",
+            "candles": [
+                {"datetime": base + i * ms_day, "open": max(1.0, 200.0 - strike),
+                 "high": max(1.0, 200.0 - strike + 5),
+                 "low": max(0.5, 200.0 - strike - 2),
+                 "close": max(1.0, 200.0 - strike + 0.01 * i), "volume": 500}
+                for i in range(100)
+            ],
+        }
+
+    history_calls: list[str] = []
+
+    def fake_history(client, symbol, **kwargs):
+        history_calls.append(symbol)
+        if " " not in symbol:
+            return und
+        # Extract strike from the OSI-padded symbol.
+        # Format: "NVDA  270401C00150000" → last 8 chars / 1000 = 150.0
+        raw_strike = int(symbol[-8:]) / 1000.0
+        return opt_resp_for_strike(raw_strike)
+
+    with patch("schwab_cli.commands.vol.get_chain", return_value=chain), \
+         patch("schwab_cli.commands.vol.get_history", side_effect=fake_history):
+        result = runner.invoke(app, ["vol", "NVDA", "--json"])
+    assert result.exit_code == 0, result.output
+
+    # Should have fetched: 1 underlying + ~5 strike histories.
+    option_calls = [s for s in history_calls if " " in s]
+    assert len(option_calls) >= 3, (
+        f"expected ≥ 3 option-strike history calls, got {len(option_calls)}: {option_calls}"
+    )
+    # Each call should target a distinct strike.
+    distinct_strikes = {s[-8:] for s in option_calls}
+    assert len(distinct_strikes) == len(option_calls), "duplicate strike calls"
+
+    # The DB should carry synthetic rows spanning multiple strikes.
+    with connect() as conn:
+        used_strikes = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT atm_strike FROM vol_snapshots "
+                "WHERE symbol='NVDA' AND source='synthetic'"
+            ).fetchall()
+        }
+    assert len(used_strikes) >= 2, (
+        f"expected synthetic rows to span ≥ 2 strikes, got {used_strikes}"
+    )
+
+
 def test_vol_backfill_skipped_when_synthetic_rows_exist(monkeypatch, tmp_path):
     """Once we've backfilled a symbol (any synthetic rows exist), a
     second invocation must not backfill again."""

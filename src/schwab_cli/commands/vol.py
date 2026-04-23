@@ -414,20 +414,34 @@ def _backfill_synthetic_iv(
 ) -> int:
     """Populate the store with a 1-year synthetic ATM-IV series.
 
-    Fetches ~1y of daily candles for a LONG-DATED reference contract
-    (LEAPS near today's spot), joins by datetime against the underlying
-    candles already in hand (for HV), BS-solves IV per day, and inserts
-    rows with source='synthetic'. Using a long-dated strike — not
-    today's near-term ATM — is load-bearing: near-term contracts only
-    have a few weeks of trading history, far too short to populate a
-    252-day IVP.
+    Strategy: **stitched multi-strike**. We pick a long-dated expiry
+    (LEAPS ~365 DTE), then fetch price history for several distinct
+    strikes that cover the underlying's 1-year spot range. For each
+    historical trading day we pick the strike closest to *that day's*
+    spot and BS-solve IV from its close. This gives us a series that
+    stays moneyness-consistent even as spot drifted over the year,
+    which a single-strike series can't — strikes get listed by OCC
+    progressively as spot moves, so "today's ATM strike" typically
+    hasn't been trading for a full year.
+
+    Falls back to a single-strike backfill (today's LEAPS at current
+    spot) when no long-dated expiry is available — illiquid names, or
+    when the chain window is too narrow.
 
     Returns the number of synthetic rows written. Never raises on API
     or math failures; the command continues with whatever got recorded.
     """
-    # A LEAPS-strike-near-spot has been listed for months-to-years, so
-    # its price history covers enough calendar time for the backfill.
-    # Fall back to today's ATM if no LEAPS is available.
+    long_exp = _pick_long_dated_expiry(expiries)
+    if long_exp is not None:
+        written = _stitched_backfill(
+            conn, client,
+            symbol=symbol,
+            expiry=long_exp,
+            underlying_candles=underlying_candles,
+        )
+        if written > 0:
+            return written
+    # Fallback: use today's near-term ATM.
     backfill = _pick_backfill_contract(expiries, atm["strike"]) or atm
     try:
         option_sym = _build_atm_call_symbol(symbol, backfill)
@@ -499,6 +513,170 @@ def _backfill_synthetic_iv(
             atm_expiry=backfill["expiry"],
             atm_dte=(expiry_date - obs_date).days,
             captured_at_ms=int(dt_ms),
+            source=SOURCE_SYNTHETIC,
+        )
+        written += 1
+    return written
+
+
+# ---- stitched backfill -------------------------------------------------
+
+
+# Number of distinct strikes we fetch history for when building a
+# stitched series. Five is enough to cover a year of NVDA-like drift
+# without blowing past Schwab's rate limits on a single first-run.
+_STITCH_STRIKE_COUNT = 5
+
+# Rate for BS solve. 3-month T-bill stand-in; error contribution to IV
+# is ~10 bps/1% rate sensitivity for short-dated ATM options.
+# (Already declared above but repeated here to make the stitched path
+# self-contained conceptually.)
+
+
+def _pick_long_dated_expiry(
+    expiries: list[dict[str, Any]],
+    *,
+    min_dte: int = 180,
+) -> dict[str, Any] | None:
+    """Return the expiry whose DTE is closest to 365, restricted to
+    ``min_dte`` or later. Used as the fixed LEAPS reference for the
+    stitched backfill — we reuse this contract for every strike so the
+    synthesised IV series stays on a single term.
+    """
+    candidates = [e for e in expiries if e.get("dte", 0) >= min_dte]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda e: abs(e["dte"] - 365))
+
+
+def _choose_stitch_strikes(
+    spot_values: list[float],
+    available_strikes: list[float],
+    *,
+    count: int = _STITCH_STRIKE_COUNT,
+) -> list[float]:
+    """Pick up to ``count`` strikes that cover the spot distribution.
+
+    Targets the 10/30/50/70/90th percentiles of the year's spot prices
+    (so high-density regimes get more coverage), rounds each to the
+    nearest available strike, and de-duplicates.
+    """
+    if not spot_values or not available_strikes:
+        return []
+    s_sorted = sorted(spot_values)
+    pct_anchors = [10, 30, 50, 70, 90][:count]
+    n = len(s_sorted)
+    targets = [s_sorted[min(n - 1, max(0, int(p * n / 100)))] for p in pct_anchors]
+    chosen: set[float] = set()
+    for t in targets:
+        k = min(available_strikes, key=lambda s: abs(s - t))
+        chosen.add(k)
+    return sorted(chosen)
+
+
+def _stitched_backfill(
+    conn,
+    client: SchwabClient,
+    *,
+    symbol: str,
+    expiry: dict[str, Any],
+    underlying_candles: list[dict[str, Any]],
+) -> int:
+    """Fetch multiple strikes on ``expiry`` and emit one IV row per
+    underlying trading day, using the strike closest to that day's spot.
+    """
+    und_by_day: dict[str, tuple[int, float]] = {}
+    for c in underlying_candles:
+        dt_ms = c.get("datetime")
+        close = c.get("close")
+        if not isinstance(dt_ms, (int, float)) or close is None:
+            continue
+        und_by_day[_ny_date_of_ms(int(dt_ms))] = (int(dt_ms), float(close))
+    if len(und_by_day) < 30:
+        return 0
+
+    available_strikes = sorted({
+        c["strike"] for c in expiry.get("contracts", [])
+        if c.get("strike") is not None
+    })
+    spot_values = [s for _ms, s in und_by_day.values()]
+    strikes = _choose_stitch_strikes(spot_values, available_strikes)
+    if not strikes:
+        return 0
+
+    # Fetch a year of daily candles for each chosen strike. Soft-fail on
+    # per-strike errors — we emit what we can from what succeeds.
+    try:
+        start, end = parse_range("-400d..now")
+    except Exception:
+        return 0
+
+    from schwab_cli.ticker import OptionPart, Ticker
+
+    date_str = expiry["expiry"].replace("-", "")
+    opt_per_day: dict[str, list[tuple[float, float, int]]] = {}
+    fetched = 0
+    for strike in strikes:
+        sym = Ticker(
+            type="option",
+            underlying=symbol,
+            option=OptionPart(date=date_str, type="C", strike=float(strike)),
+        ).to_schwab_symbol()
+        try:
+            raw = get_history(
+                client, sym,
+                frequency_type="daily", frequency=1,
+                start=start, end=end,
+            )
+        except Exception:
+            continue
+        candles = raw.get("candles") or []
+        if not candles:
+            continue
+        fetched += 1
+        for c in candles:
+            dt_ms = c.get("datetime")
+            close = c.get("close")
+            if not isinstance(dt_ms, (int, float)) or close is None:
+                continue
+            day = _ny_date_of_ms(int(dt_ms))
+            opt_per_day.setdefault(day, []).append(
+                (float(strike), float(close), int(dt_ms))
+            )
+    if fetched == 0:
+        return 0
+
+    expiry_date = _parse_iso_date(expiry["expiry"])
+    if expiry_date is None:
+        return 0
+
+    written = 0
+    for day, (_und_ms, spot) in und_by_day.items():
+        day_obj = _parse_iso_date(day)
+        if day_obj is None:
+            continue
+        T = (expiry_date - day_obj).days / 365.0
+        if T <= 0:
+            continue
+        candidates = opt_per_day.get(day)
+        if not candidates:
+            continue
+        strike, opt_close, dt_ms = min(candidates, key=lambda t: abs(t[0] - spot))
+        iv = implied_vol(
+            opt_close, spot, strike, T,
+            _BACKFILL_RISK_FREE_RATE, is_call=True,
+        )
+        if iv is None or iv <= 0.02 or iv > 3.0:
+            continue
+        record_snapshot(
+            conn,
+            symbol=symbol,
+            spot=spot,
+            atm_iv=iv,
+            atm_strike=strike,
+            atm_expiry=expiry["expiry"],
+            atm_dte=(expiry_date - day_obj).days,
+            captured_at_ms=dt_ms,
             source=SOURCE_SYNTHETIC,
         )
         written += 1
