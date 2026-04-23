@@ -11,3 +11,4 @@ build/
 .playwright-mcp/
 .claude/
 downloaded_files/
+docs/
