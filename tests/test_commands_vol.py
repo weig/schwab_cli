@@ -363,24 +363,57 @@ def test_vol_backfill_populates_synthetic_rows_on_first_run(monkeypatch, tmp_pat
     assert src_counts.get("synthetic", 0) >= 1
 
 
-def test_vol_backfill_only_fires_on_first_run(monkeypatch, tmp_path):
-    """Once a symbol has rows in the store, backfill is skipped."""
-    from schwab_cli.storage.vol_history import connect, record_snapshot
+def test_vol_backfill_skipped_when_synthetic_rows_exist(monkeypatch, tmp_path):
+    """Once we've backfilled a symbol (any synthetic rows exist), a
+    second invocation must not backfill again."""
+    from schwab_cli.storage.vol_history import SOURCE_SYNTHETIC, connect, record_snapshot
+
+    _prep(monkeypatch, tmp_path)
+    # A single synthetic row is enough to suppress the trigger.
+    with connect() as conn:
+        record_snapshot(
+            conn, symbol="NVDA", spot=200.0, atm_iv=0.30,
+            atm_strike=200.0, atm_expiry="2027-01-15", atm_dte=365,
+            captured_at_ms=1_700_000_000_000,
+            source=SOURCE_SYNTHETIC,
+        )
+
+    backfill_called = {"count": 0}
+    real_backfill = __import__(
+        "schwab_cli.commands.vol", fromlist=["_backfill_synthetic_iv"]
+    )._backfill_synthetic_iv
+
+    def spy(*args, **kwargs):
+        backfill_called["count"] += 1
+        return real_backfill(*args, **kwargs)
+
+    with patch("schwab_cli.commands.vol._backfill_synthetic_iv", side_effect=spy), \
+         patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+        runner.invoke(app, ["vol", "NVDA"])
+
+    assert backfill_called["count"] == 0, "backfill should skip when synthetics exist"
+
+
+def test_vol_backfill_skipped_when_enough_real_observations(monkeypatch, tmp_path):
+    """A user who has accumulated ≥ 30 observed days doesn't need the
+    synthetic seed anymore — backfill should leave the store alone."""
+    from schwab_cli.storage.vol_history import SOURCE_OBSERVED, connect, record_snapshot
     from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
 
     _prep(monkeypatch, tmp_path)
     NY = ZoneInfo("America/New_York")
-    # Pre-seed a few observed days.
+    # Seed 40 distinct observed days — well above the 30-day threshold.
     with connect() as conn:
-        for i in range(5):
+        for i in range(40):
             ts = int(
-                datetime(2026, 4, 1, 16, 0, tzinfo=NY).timestamp() * 1000
+                datetime(2026, 2, 1, 16, 0, tzinfo=NY).timestamp() * 1000
             ) + i * 86_400_000
             record_snapshot(
                 conn, symbol="NVDA", spot=200.0, atm_iv=0.30,
-                atm_strike=200.0, atm_expiry="2026-05-01", atm_dte=9,
-                captured_at_ms=ts,
+                atm_strike=200.0, atm_expiry="2027-01-15", atm_dte=365,
+                captured_at_ms=ts, source=SOURCE_OBSERVED,
             )
 
     backfill_called = {"count": 0}
@@ -397,7 +430,41 @@ def test_vol_backfill_only_fires_on_first_run(monkeypatch, tmp_path):
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
         runner.invoke(app, ["vol", "NVDA"])
 
-    assert backfill_called["count"] == 0, "backfill should skip when rows exist"
+    assert backfill_called["count"] == 0, (
+        "backfill should skip when >= 30 observed days already exist"
+    )
+
+
+def test_vol_backfill_still_fires_with_some_legacy_observed_rows(monkeypatch, tmp_path):
+    """Users with a few legacy observed rows (from pre-backfill runs)
+    still need the synthetic seed — trigger must fire when synth=0 AND
+    observed < 30."""
+    from schwab_cli.storage.vol_history import SOURCE_OBSERVED, connect, record_snapshot
+
+    _prep(monkeypatch, tmp_path)
+    with connect() as conn:
+        for i in range(3):  # handful of legacy rows, well under 30
+            record_snapshot(
+                conn, symbol="NVDA", spot=200.0, atm_iv=0.30,
+                atm_strike=200.0, atm_expiry="2027-01-15", atm_dte=365,
+                captured_at_ms=1_700_000_000_000 + i * 86_400_000,
+                source=SOURCE_OBSERVED,
+            )
+
+    backfill_called = {"count": 0}
+
+    def spy(*args, **kwargs):
+        backfill_called["count"] += 1
+        return 0  # short-circuit — we only care that it was invoked
+
+    with patch("schwab_cli.commands.vol._backfill_synthetic_iv", side_effect=spy), \
+         patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+        runner.invoke(app, ["vol", "NVDA"])
+
+    assert backfill_called["count"] == 1, (
+        "backfill should still run for users with a few legacy observed rows"
+    )
 
 
 def test_vol_chain_call_uses_wide_params(monkeypatch, tmp_path):

@@ -153,13 +153,30 @@ def record_snapshot(
 
 
 def count_snapshots(conn: sqlite3.Connection, *, symbol: str) -> int:
-    """Return the number of rows for ``symbol`` — used to detect
-    first-run-per-symbol for the auto-backfill trigger."""
+    """Return the total number of rows for ``symbol``."""
     row = conn.execute(
         "SELECT COUNT(*) FROM vol_snapshots WHERE symbol = ?",
         (symbol,),
     ).fetchone()
     return int(row[0]) if row else 0
+
+
+def count_by_source(conn: sqlite3.Connection, *, symbol: str) -> dict[str, int]:
+    """Return ``{'observed': N, 'synthetic': N}`` for ``symbol``.
+
+    Used by the backfill trigger: we should run the one-shot BS
+    reconstruction when the user has no synthetics yet AND not enough
+    real observations to support a meaningful IVP on their own.
+    """
+    rows = conn.execute(
+        "SELECT source, COUNT(*) FROM vol_snapshots "
+        "WHERE symbol = ? GROUP BY source",
+        (symbol,),
+    ).fetchall()
+    out = {SOURCE_OBSERVED: 0, SOURCE_SYNTHETIC: 0}
+    for source, n in rows:
+        out[source or SOURCE_OBSERVED] = int(n)
+    return out
 
 
 def read_recent_per_day(

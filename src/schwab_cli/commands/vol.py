@@ -39,7 +39,7 @@ from schwab_cli.storage.vol_history import (
     SOURCE_OBSERVED,
     SOURCE_SYNTHETIC,
     connect as vol_store_connect,
-    count_snapshots,
+    count_by_source,
     read_recent_per_day_with_source,
     record_snapshot,
 )
@@ -246,13 +246,19 @@ def run(
                     atm_dte=atm["dte"],
                     source=SOURCE_OBSERVED,
                 )
-            # Auto-backfill: populate synthetic history the first time we
-            # see this symbol. Honour --no-record since backfill writes.
+            # Auto-backfill: populate synthetic history once per symbol.
+            # Trigger when no synthetics exist yet AND the user hasn't
+            # accumulated enough real observations to support a
+            # percentile on their own. This works both for brand-new
+            # symbols and for users who have a handful of legacy
+            # observed rows from pre-backfill runs.
+            counts = count_by_source(conn, symbol=under)
             if (
                 not no_record
                 and atm
                 and atm.get("iv") is not None
-                and count_snapshots(conn, symbol=under) <= 1
+                and counts[SOURCE_SYNTHETIC] == 0
+                and counts[SOURCE_OBSERVED] < _IVP_MIN_SAMPLE
             ):
                 n_synth = _backfill_synthetic_iv(
                     conn,
