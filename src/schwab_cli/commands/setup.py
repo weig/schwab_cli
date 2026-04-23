@@ -43,20 +43,53 @@ def _prompt_value(
         typer.secho(f"{label} {error_suffix}", fg=typer.colors.RED, err=True)
 
 
+_AUTH_FLOW_DESCRIPTIONS: dict[str, str] = {
+    "client": (
+        "Schwab redirects to your loopback redirect_uri (e.g. "
+        "https://127.0.0.1:8443). The CLI reads the OAuth code straight "
+        "from the browser's URL bar. No external server required."
+    ),
+    "code_relay": (
+        "Your redirect_uri points to a pre-deployed public relay "
+        "(e.g. a Cloudflare Worker). The relay catches the callback and "
+        "the CLI polls it for the OAuth code. Use this when the loopback "
+        "redirect isn't reachable (remote shells, mobile login, etc.)."
+    ),
+}
+
+
 def _prompt_auth_flow(default: str) -> str:
-    """Prompt for an auth_flow value; loop until input is one of AUTH_FLOWS."""
-    options = "/".join(AUTH_FLOWS)
-    typer.echo(f"  (one of: {options})")
+    """Prompt for an auth_flow, showing a description of each option.
+
+    Accepts either the flow name (``client``, ``code_relay``) or its
+    menu number. Loops until the input is valid.
+    """
+    typer.echo("")
+    typer.echo("Auth flow — how the CLI captures the OAuth `code`:")
+    for idx, name in enumerate(AUTH_FLOWS, start=1):
+        typer.echo("")
+        typer.echo(f"  {idx}. {name}")
+        for line in _AUTH_FLOW_DESCRIPTIONS[name].split(". "):
+            line = line.strip().rstrip(".")
+            if line:
+                typer.echo(f"     {line}.")
+    typer.echo("")
+
     while True:
         entered = typer.prompt(
-            "Auth flow",
+            "Auth flow (name or number)",
             default=default,
             show_default=True,
         ).strip()
+        if entered.isdigit():
+            idx = int(entered)
+            if 1 <= idx <= len(AUTH_FLOWS):
+                return AUTH_FLOWS[idx - 1]
         if entered in AUTH_FLOWS:
             return entered
         typer.secho(
-            f"Auth flow must be one of: {options}",
+            f"Auth flow must be one of: {', '.join(AUTH_FLOWS)} "
+            f"(or a number 1-{len(AUTH_FLOWS)}).",
             fg=typer.colors.RED,
             err=True,
         )
@@ -106,11 +139,18 @@ def _run() -> None:
 
     code_relay_url: str | None = None
     if auth_flow == "code_relay":
+        typer.echo("")
+        typer.echo(
+            "The relay has two paths: a callback path (set as redirect_uri "
+            "above) and a /wait path the CLI long-polls for the captured "
+            "code. Example pair:"
+        )
+        typer.echo("  redirect_uri   = https://<host>/<uuid>/<secret>")
+        typer.echo("  code_relay_url = https://<host>/<uuid>/<secret>/wait")
         code_relay_url = _prompt_value(
-            "Code relay URL",
+            "Code relay /wait URL",
             existing.code_relay_url if existing else None,
             sensitive=False,
-            hint="e.g. https://oauth-relay.example.com/<uuid>/<secret>/wait",
         )
 
     auto_default = bool(existing and existing.auto_login_enabled)

@@ -71,6 +71,36 @@ def test_fresh_setup_reprompts_on_invalid_auth_flow(monkeypatch, tmp_path):
     assert cfg.auth_flow == "client"
 
 
+def test_fresh_setup_auth_flow_by_number_picks_code_relay(monkeypatch, tmp_path):
+    # Selecting "2" should map to the second AUTH_FLOWS entry (code_relay).
+    # Follow-up prompts the relay /wait URL, then declines auto-login.
+    relay = "https://relay.example.com/uuid/secret/wait"
+    result = _run(
+        f"cid\ncsec\nhttps://relay.example.com/uuid/secret\n2\n{relay}\nn\n",
+        monkeypatch,
+        tmp_path,
+    )
+    assert result.exit_code == 0, result.output
+    cfg = load()
+    assert cfg.auth_flow == "code_relay"
+    assert cfg.code_relay_url == relay
+
+
+def test_setup_shows_auth_flow_descriptions(monkeypatch, tmp_path):
+    """The menu must describe each auth_flow so the user can pick informedly."""
+    result = _run(
+        "cid\ncsec\nhttps://127.0.0.1:8443\n\nn\n",
+        monkeypatch,
+        tmp_path,
+    )
+    assert result.exit_code == 0, result.output
+    # Each flow name + a distinctive phrase from its description appears.
+    assert "client" in result.output
+    assert "loopback redirect_uri" in result.output
+    assert "code_relay" in result.output
+    assert "public relay" in result.output
+
+
 def test_rerun_accepting_defaults_preserves_all_values(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
