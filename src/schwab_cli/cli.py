@@ -2,6 +2,7 @@ import typer
 
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
+from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
@@ -118,8 +119,29 @@ def option(
 
 
 @app.command(
+    "greeks",
+    help=(
+        "Show detailed greeks for a single option contract. "
+        "Accepts any common form: NVDA260501C240, 'NVDA  260501C00240000', "
+        "NVDA260501C240.0."
+    ),
+)
+def greeks(
+    ticker: str = typer.Argument(
+        ..., help="Option ticker in any supported form (NVDA260501C240, …)."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+) -> None:
+    greeks_cmd.run(ticker, as_json=as_json, as_md=as_md)
+
+
+@app.command(
     "history",
-    help="Fetch OHLCV price history for a symbol.",
+    help=(
+        "Fetch OHLCV price history for a stock or option. "
+        "Option tickers accept any common form (NVDA260501C240, …)."
+    ),
 )
 def history(
     symbol: str = typer.Argument(..., help="Ticker (e.g. NVDA)."),

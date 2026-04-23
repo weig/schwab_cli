@@ -14,6 +14,7 @@ from schwab_cli.history_spec import (
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.history import render_history, shape_envelope
 from schwab_cli.session import load as load_session
+from schwab_cli.ticker import TickerError, resolve as resolve_ticker
 
 
 def _client() -> SchwabClient:
@@ -50,6 +51,16 @@ def run(
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
+    # Resolve to Schwab's canonical symbol so option inputs like
+    # "NVDA260501C240" and "NVDA  260501C00240000" both reach the API in
+    # the right shape without the caller having to know the OSI padding.
+    try:
+        ticker = resolve_ticker(symbol)
+    except TickerError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    schwab_symbol = ticker.to_schwab_symbol()
+
     try:
         interval = parse_interval(interval_str)
     except IntervalSpecError as e:
@@ -71,7 +82,7 @@ def run(
     try:
         raw = get_history(
             client,
-            symbol.upper(),
+            schwab_symbol,
             frequency_type=interval.frequency_type,
             frequency=interval.frequency,
             start=start,
@@ -85,7 +96,7 @@ def run(
     envelope = shape_envelope(raw, interval=interval.label)
     if not envelope["candles"]:
         typer.secho(
-            f"No candles found for {symbol.upper()} in "
+            f"No candles found for {schwab_symbol} in "
             f"{range_str} at {interval.label}.",
             fg=typer.colors.RED,
             err=True,
