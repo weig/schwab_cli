@@ -86,6 +86,61 @@ def test_fresh_setup_auth_flow_by_number_picks_code_relay(monkeypatch, tmp_path)
     assert cfg.code_relay_url == relay
 
 
+def test_dry_run_prints_payload_and_does_not_save(monkeypatch, tmp_path):
+    """--dry-run runs the prompts but prints JSON instead of writing the file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    result = runner.invoke(
+        app,
+        ["setup", "--dry-run"],
+        input="cid_value\ncsec_value\nhttps://127.0.0.1:8443\n\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+
+    # No file on disk.
+    assert load() is None
+    assert not (tmp_path / ".config" / "schwab_cli" / "config.json").exists()
+
+    # Output carries the dry-run banner and the JSON payload the `save`
+    # path would have written.
+    assert "dry-run" in result.output.lower()
+    assert '"client_id": "cid_value"' in result.output
+    assert '"client_secret": "csec_value"' in result.output
+    assert '"auth_flow": "client"' in result.output
+
+
+def test_dry_run_does_not_overwrite_existing_config(monkeypatch, tmp_path):
+    """Existing config bytes survive untouched after a --dry-run session."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    save_cfg(
+        Config(
+            client_id="existing_id",
+            client_secret="existing_secret",
+            redirect_uri="https://127.0.0.1:8443",
+        )
+    )
+    file = tmp_path / ".config" / "schwab_cli" / "config.json"
+    original_bytes = file.read_bytes()
+
+    # Type new values for every prompt so the dry-run payload differs from
+    # the on-disk config; decline auto-login.
+    result = runner.invoke(
+        app,
+        ["setup", "--dry-run"],
+        input="new_id\nnew_secret\nhttps://127.0.0.1:9999\n\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+
+    # File is bit-for-bit unchanged.
+    assert file.read_bytes() == original_bytes
+    assert load().client_id == "existing_id"
+
+    # But the dry-run printout reflects the NEW values we typed.
+    assert '"client_id": "new_id"' in result.output
+    assert '"redirect_uri": "https://127.0.0.1:9999"' in result.output
+
+
 def test_setup_shows_auth_flow_descriptions(monkeypatch, tmp_path):
     """The menu must describe each auth_flow so the user can pick informedly."""
     result = _run(

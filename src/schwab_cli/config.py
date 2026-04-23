@@ -34,6 +34,28 @@ class Config:
     def auto_login_enabled(self) -> bool:
         return self.username is not None and self.password is not None
 
+    def to_payload(self) -> dict:
+        """Return the on-disk JSON representation of this config.
+
+        Omits optional fields when they are ``None`` so the written file
+        doesn't carry explicit ``null`` entries. Used by :func:`save` and
+        by ``setup --dry-run`` to show what would be written.
+        """
+        payload: dict = {
+            "version": self.version,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "redirect_uri": self.redirect_uri,
+            "auth_flow": self.auth_flow,
+        }
+        if self.code_relay_url is not None:
+            payload["code_relay_url"] = self.code_relay_url
+        if self.username is not None:
+            payload["username"] = self.username
+        if self.password is not None:
+            payload["password"] = self.password
+        return payload
+
 
 SUPPORTED_VERSION = 1
 _REQUIRED_FIELDS = ("client_id", "client_secret", "redirect_uri", "auth_flow")
@@ -104,19 +126,7 @@ def save(cfg: Config) -> None:
         parent.chmod(0o700)
     except OSError:
         pass
-    payload: dict = {
-        "version": cfg.version,
-        "client_id": cfg.client_id,
-        "client_secret": cfg.client_secret,
-        "redirect_uri": cfg.redirect_uri,
-        "auth_flow": cfg.auth_flow,
-    }
-    if cfg.code_relay_url is not None:
-        payload["code_relay_url"] = cfg.code_relay_url
-    if cfg.username is not None:
-        payload["username"] = cfg.username
-    if cfg.password is not None:
-        payload["password"] = cfg.password
+    payload = cfg.to_payload()
 
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n")

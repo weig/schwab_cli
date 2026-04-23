@@ -22,8 +22,14 @@ def main() -> None:
 
 
 @app.command("setup", help="Configure Schwab CLI credentials.")
-def setup() -> None:
-    setup_cmd.run()
+def setup(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the resulting config.json to stdout without saving it.",
+    ),
+) -> None:
+    setup_cmd.run(dry_run=dry_run)
 
 
 @app.command("auth", help="Authenticate with Schwab (refresh or full OAuth).")

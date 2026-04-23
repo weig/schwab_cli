@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import typer
 
 from schwab_cli.config import (
@@ -95,19 +97,25 @@ def _prompt_auth_flow(default: str) -> str:
         )
 
 
-def run() -> None:
-    """Interactive setup: capture credentials and persist to ~/.config/schwab_cli/config.json."""
+def run(*, dry_run: bool = False) -> None:
+    """Interactive setup: capture credentials and persist to ~/.config/schwab_cli/config.json.
+
+    When ``dry_run`` is true, the prompts run normally but the resulting
+    config is printed to stdout instead of being written to disk.
+    """
     try:
-        _run()
+        _run(dry_run=dry_run)
     except (KeyboardInterrupt, typer.Abort):
         typer.echo("\nSetup cancelled.", err=True)
         raise typer.Exit(code=130)
 
 
-def _run() -> None:
+def _run(*, dry_run: bool) -> None:
     path = config_path()
     typer.echo("Schwab CLI Setup")
     typer.echo(f"Config: {path}")
+    if dry_run:
+        typer.secho("(dry-run: nothing will be written)", fg=typer.colors.YELLOW)
     typer.echo("")
 
     try:
@@ -182,6 +190,21 @@ def _run() -> None:
         username=username,
         password=password,
     )
+
+    if dry_run:
+        typer.echo("")
+        typer.secho(
+            f"--- dry-run: would write {path} ---",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo(json.dumps(cfg.to_payload(), indent=2))
+        typer.secho("--- not saved ---", fg=typer.colors.YELLOW)
+        typer.echo(
+            f"Auto-login: {'enabled' if cfg.auto_login_enabled else 'disabled'} "
+            "(dry-run)"
+        )
+        return
+
     try:
         save(cfg)
     except OSError as e:
