@@ -117,6 +117,31 @@ def test_greeks_md_output_has_table_sections(monkeypatch, tmp_path):
     assert "| Δ delta |" in result.output
 
 
+def test_greeks_omits_strike_count_so_schwab_honors_strike(monkeypatch, tmp_path):
+    """Regression: Schwab's chain endpoint silently prefers `strikeCount`
+    over `strike`. For a deep-ITM/OTM contract (e.g. LEAPS far from
+    spot), sending `strikeCount=1` returns the single ATM strike instead
+    of the requested strike, which then fails the client-side filter.
+    The greeks command must send `strike` **alone**."""
+    _prep(monkeypatch, tmp_path)
+    captured: dict = {}
+
+    def fake_get_chain(client, symbol, **kwargs):
+        captured.update(kwargs)
+        return _CHAIN_RESP
+
+    with patch("schwab_cli.commands.greeks.get_chain", side_effect=fake_get_chain):
+        result = runner.invoke(app, ["greeks", "AMZN270115C00230000"])
+    # Regardless of whether the mocked response has the strike, the key
+    # invariant is: strike_count was not sent.
+    assert captured.get("strike_count") is None, (
+        f"strike_count must be None so Schwab doesn't override `strike` "
+        f"with an ATM-window lookup; got {captured.get('strike_count')!r}"
+    )
+    # And `strike` must be the exact number we asked for.
+    assert captured.get("strike") == 230.0
+
+
 def test_greeks_all_ticker_forms_same_api_call(monkeypatch, tmp_path):
     """Every accepted ticker form must send the same params to the API."""
     _prep(monkeypatch, tmp_path)
@@ -145,6 +170,7 @@ def test_greeks_all_ticker_forms_same_api_call(monkeypatch, tmp_path):
     assert first["symbol"] == "NVDA"
     assert first["contract_type"] == "CALL"
     assert first["strike"] == 202.5
+    assert first["strike_count"] is None  # must NOT be sent (see regression test)
     assert first["from_date"].isoformat() == "2026-05-01"
     assert first["to_date"].isoformat() == "2026-05-01"
 

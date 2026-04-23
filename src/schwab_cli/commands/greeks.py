@@ -73,12 +73,16 @@ def run(ticker_raw: str, *, as_json: bool, as_md: bool) -> None:
 
     client = _client()
     try:
+        # Schwab's chain endpoint prefers `strikeCount` over `strike` when
+        # both are passed, returning strikes around ATM rather than the
+        # one we asked for. Omit `strike_count` entirely so `strike` wins
+        # — we just want this single strike back.
         raw = get_chain(
             client,
             ticker.underlying,
             contract_type=contract_type,
             strike=opt.strike,
-            strike_count=1,
+            strike_count=None,
             from_date=expiry_date,
             to_date=expiry_date,
         )
