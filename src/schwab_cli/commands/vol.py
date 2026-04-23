@@ -46,9 +46,13 @@ from schwab_cli.storage.vol_history import (
 from schwab_cli.ticker import Ticker, TickerError, resolve as resolve_ticker
 
 
-# Minimum accumulated days before IVP starts rendering a percentile.
-# Below this, the IVP cell shows "insufficient history (N/lookback)".
-_IVP_MIN_SAMPLE = 30
+# Minimum accumulated days required before the percentile itself is
+# rendered. 90 ≈ one quarter — below that, a "percentile" reading is
+# dominated by the specific regime captured in the short window and
+# conveys false precision. The IVP cell falls back to showing the
+# sample's IV range + today's value so the user still has a useful
+# data point, without pretending it's a real 52-week IVP.
+_IVP_MIN_SAMPLE = 90
 
 # Fallback risk-free rate used by the BS backfill (3-month T-bill
 # approximation). Error contribution vs the "true" daily rate is small;
@@ -367,33 +371,42 @@ def _compute_ivp_state(
 ) -> dict[str, Any]:
     """Map the accumulated IV series + today's IV to the IVP envelope block.
 
-    States (rendered as a dim note next to the value column):
+    States (rendered next to the value column):
 
-        insufficient   — n < effective_min
-        partial        — [effective_min, lookback) days
-        ok             — n >= lookback days
+        insufficient   — n < effective_min. Value is ``None`` — we
+                         deliberately don't show a percentile that
+                         reads like a real IVP at this sample size.
+                         ``range_min`` / ``range_max`` / ``today_iv``
+                         are populated so the renderer can surface
+                         "today 38.5% vs window 41.0–47.7%".
+        partial        — [effective_min, lookback) days — value shown,
+                         annotated with the actual sample size.
+        ok             — n >= lookback days.
 
-    ``effective_min = min(_IVP_MIN_SAMPLE, lookback)`` so a short
-    user-chosen lookback (e.g. ``--ivp-lookback=5``) can still resolve
-    to a valid percentile once a handful of snapshots exist.
+    ``effective_min = min(_IVP_MIN_SAMPLE, lookback)`` — a user-chosen
+    short lookback (``--ivp-lookback=30``) can still resolve to a value
+    once the sample matches the lookback, without forcing the 90-day
+    minimum everywhere.
 
-    The emitted block also carries ``observed`` / ``synthetic`` counts
-    so the renderer can annotate IVP with a "N synthetic, N observed"
-    breakdown when the auto-backfill has contributed to the series.
+    Also carries ``observed`` / ``synthetic`` counts so the renderer
+    can annotate the source breakdown.
     """
     n = len(series_tagged)
     observed = sum(1 for _, src in series_tagged if src == SOURCE_OBSERVED)
     synthetic = n - observed
     effective_min = min(_IVP_MIN_SAMPLE, lookback)
+    series_values = [iv for iv, _ in series_tagged]
     common: dict[str, Any] = {
         "sample_size": n,
         "observed": observed,
         "synthetic": synthetic,
         "lookback": lookback,
+        "today_iv": today_iv,
+        "range_min": min(series_values) if series_values else None,
+        "range_max": max(series_values) if series_values else None,
     }
     if today_iv is None or n < effective_min:
         return {"state": "insufficient", "value": None, **common}
-    series_values = [iv for iv, _ in series_tagged]
     pct = percentile_rank(series_values, today_iv)
     state = "ok" if n >= lookback else "partial"
     return {"state": state, "value": pct, **common}

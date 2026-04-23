@@ -87,10 +87,13 @@ def _money(v: Any) -> str:
 def _ivp_value_and_note(ivp: dict[str, Any]) -> tuple[str, str]:
     """Split the IVP row into (value, note) so wide notes don't wrap values.
 
-    Also annotates the breakdown between BS-backfilled (``synthetic``)
-    rows and live-captured (``observed``) rows when any synthetics are
-    present, so the user can see at a glance how much of the percentile
-    is reconstructed vs. measured.
+    Annotations:
+
+    * Below the minimum sample size, the value cell stays ``—`` and the
+      note surfaces today's IV against the sample's min/max range so the
+      user gets actionable context without a fake-precise percentile.
+    * Partial/ok states carry the lookback scope and, if any synthetic
+      rows contributed, the synthetic/observed breakdown.
     """
     state = ivp.get("state")
     value = ivp.get("value")
@@ -98,6 +101,9 @@ def _ivp_value_and_note(ivp: dict[str, Any]) -> tuple[str, str]:
     lookback = ivp.get("lookback", 252)
     synthetic = ivp.get("synthetic", 0)
     observed = ivp.get("observed", 0)
+    today_iv = ivp.get("today_iv")
+    range_min = ivp.get("range_min")
+    range_max = ivp.get("range_max")
 
     def _breakdown() -> str:
         if synthetic > 0:
@@ -109,7 +115,23 @@ def _ivp_value_and_note(ivp: dict[str, Any]) -> tuple[str, str]:
     if state == "partial":
         return _percentile(value), f"partial: {n}/{lookback} days" + _breakdown()
     if state == "insufficient":
-        return "—", f"insufficient history: {n}/{lookback} days" + _breakdown()
+        # Fold the useful context (sample range + today's IV) into the
+        # note instead of printing a misleading percentile.
+        if (
+            range_min is not None
+            and range_max is not None
+            and today_iv is not None
+            and n > 0
+        ):
+            note = (
+                f"{n}-day sample too small for percentile; "
+                f"today {today_iv * 100:.2f}% vs "
+                f"{range_min * 100:.1f}-{range_max * 100:.1f}% range"
+                + _breakdown()
+            )
+        else:
+            note = f"insufficient history: {n}/{lookback} days" + _breakdown()
+        return "—", note
     return "—", "not yet active"
 
 

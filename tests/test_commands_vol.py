@@ -215,9 +215,13 @@ def test_vol_ivp_partial_when_history_between_min_and_lookback(monkeypatch, tmp_
     _prep(monkeypatch, tmp_path)
     NY = ZoneInfo("America/New_York")
     with connect() as conn:
-        for i in range(60):
+        # Need ≥ 90 distinct NY trading days to cross the min-sample
+        # floor for a percentile reading. Seed 120 days that end
+        # before today's trading day so the live run's observation
+        # adds a distinct (N+1)-th day rather than overwriting.
+        for i in range(120):
             ts = int(
-                datetime(2026, 2, 1, 16, 0, tzinfo=NY).timestamp() * 1000
+                datetime(2025, 8, 1, 16, 0, tzinfo=NY).timestamp() * 1000
             ) + i * 86_400_000
             record_snapshot(
                 conn, symbol="NVDA", spot=200.0, atm_iv=0.30 + i * 0.001,
@@ -228,9 +232,11 @@ def test_vol_ivp_partial_when_history_between_min_and_lookback(monkeypatch, tmp_
          patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--json"])
     env = json.loads(result.output)
-    # 60 seeded + 1 from this run = 61 distinct days.
+    # 120 seeded (Aug–Nov 2025) + 1 from today's run (Apr 2026) = 121
+    # distinct days, above the 90-day floor and below the 252-day
+    # lookback → state='partial'.
     assert env["ivp"]["state"] == "partial"
-    assert env["ivp"]["sample_size"] == 61
+    assert env["ivp"]["sample_size"] == 121
     assert env["ivp"]["value"] is not None
     assert 0 <= env["ivp"]["value"] <= 100
 
@@ -494,9 +500,9 @@ def test_vol_backfill_skipped_when_enough_real_observations(monkeypatch, tmp_pat
 
     _prep(monkeypatch, tmp_path)
     NY = ZoneInfo("America/New_York")
-    # Seed 40 distinct observed days — well above the 30-day threshold.
+    # Seed 100 distinct observed days — above the 90-day min threshold.
     with connect() as conn:
-        for i in range(40):
+        for i in range(100):
             ts = int(
                 datetime(2026, 2, 1, 16, 0, tzinfo=NY).timestamp() * 1000
             ) + i * 86_400_000
