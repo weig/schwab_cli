@@ -52,6 +52,7 @@ See [setup](setup.md) and [auth](auth.md) for the detail on each.
 | [`option`](option.md) | Option chain for an underlying at a given expiry + strike window. |
 | [`greeks`](greeks.md) | Detailed greeks for one specific option contract. |
 | [`history`](history.md) | OHLCV candles for a stock or option ticker. |
+| [`vol`](vol.md) | Volatility context for a stock: IV, HV, HVP, P/C Ratio. |
 | [`transactions`](transactions.md) | Account activity (trades, dividends, journals) over a date range. |
 
 Cross-cutting references:

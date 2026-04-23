@@ -8,6 +8,7 @@ from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import transactions as transactions_cmd
+from schwab_cli.commands import vol as vol_cmd
 
 app = typer.Typer(
     name="schwab_cli",
@@ -161,6 +162,37 @@ def history(
         symbol,
         range_str=range_str,
         interval_str=interval_str,
+        as_json=as_json,
+        as_md=as_md,
+    )
+
+
+@app.command(
+    "vol",
+    help=(
+        "Show volatility context for a stock: IV, HV, HVP, P/C Ratio. "
+        "Uses two API calls; no local storage in phase 1."
+    ),
+)
+def vol(
+    symbol: str = typer.Argument(..., help="Stock ticker, e.g. NVDA."),
+    hv_window: int = typer.Option(
+        30,
+        "--hv-window",
+        help="Rolling HV window in trading days (default 30).",
+    ),
+    hv_lookback: int = typer.Option(
+        252,
+        "--hv-lookback",
+        help="HVP percentile lookback in trading days (default 252 ≈ 1 year).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+) -> None:
+    vol_cmd.run(
+        symbol,
+        hv_window=hv_window,
+        hv_lookback=hv_lookback,
         as_json=as_json,
         as_md=as_md,
     )
