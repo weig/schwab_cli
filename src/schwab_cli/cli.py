@@ -3,6 +3,7 @@ import typer
 from schwab_cli._doc import doc_option
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
+from schwab_cli.commands import dividends as dividends_cmd
 from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
@@ -112,6 +113,63 @@ def fundamentals(
     doc: bool = doc_option(),
 ) -> None:
     fundamentals_cmd.run(symbols, as_json=as_json, as_md=as_md)
+
+
+@app.command(
+    "dividends",
+    help=(
+        "Show most-recent + next-upcoming dividend for one or more symbols. "
+        "Schwab's API doesn't expose a historical series — use --upcoming to "
+        "filter rows by next ex-date within a window."
+    ),
+)
+def dividends(
+    symbols: list[str] = typer.Argument(..., help="One or more ticker symbols."),
+    upcoming: bool = typer.Option(
+        False,
+        "--upcoming",
+        help="Keep only rows whose next ex-date is within --within-days.",
+    ),
+    within_days: int = typer.Option(
+        30,
+        "--within-days",
+        help="Window (in days) for --upcoming; ignored otherwise.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
+) -> None:
+    dividends_cmd.run(
+        symbols,
+        upcoming=upcoming,
+        within_days=within_days,
+        as_json=as_json,
+        as_md=as_md,
+    )
+
+
+@app.command("div", hidden=True, help="Alias for `dividends`.")
+def div(
+    symbols: list[str] = typer.Argument(..., help="One or more ticker symbols."),
+    upcoming: bool = typer.Option(
+        False, "--upcoming",
+        help="Keep only rows whose next ex-date is within --within-days.",
+    ),
+    within_days: int = typer.Option(
+        30, "--within-days",
+        help="Window (in days) for --upcoming; ignored otherwise.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
+) -> None:
+    dividends_cmd.run(
+        symbols,
+        upcoming=upcoming,
+        within_days=within_days,
+        as_json=as_json,
+        as_md=as_md,
+    )
 
 
 @app.command(
