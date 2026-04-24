@@ -1,0 +1,437 @@
+"""`mcp` command — MCP server runner + admin subcommands.
+
+Bare ``schwab_cli mcp`` starts the daemon in stdio (default) or SSE
+mode. Subcommands live under the ``mcp`` typer group:
+
+* ``mcp status`` — HTTP client for ``/admin/status``.
+* ``mcp log [-f]`` — read / tail the structured log file.
+* ``mcp logout`` — graceful shutdown via ``/admin/shutdown``.
+* ``mcp restart`` — logout + start again in-place.
+* ``mcp install`` — register the server in
+  ``~/.claude/settings.json``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+import typer
+
+from schwab_cli import config as config_module
+from schwab_cli.api.client import SchwabClient
+from schwab_cli.mcp_server.app import SchwabMcpServer
+from schwab_cli.mcp_server.logbook import LogBook
+from schwab_cli.session import load as load_session
+
+
+DEFAULT_LOG_FILE = Path.home() / ".config" / "schwab_cli" / "mcp.log"
+DEFAULT_SSE_URL = "http://127.0.0.1:7234"
+
+
+# ---- daemon runner ----------------------------------------------------
+
+
+def run(
+    *,
+    stdio: bool,
+    host: str,
+    port: int,
+    log_file: str | None,
+    no_log_file: bool,
+) -> None:
+    """Entry point from :mod:`schwab_cli.cli` for the bare `mcp` call.
+
+    In stdio mode: runs until stdin EOF. In SSE mode: runs until
+    SIGINT or the admin shutdown endpoint is called.
+    """
+    cfg = config_module.load()
+    if cfg is None:
+        typer.secho(
+            "No config found. Run `schwab_cli setup` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    session = load_session()
+    if session is None:
+        typer.secho(
+            "No session found. Run `schwab_cli auth` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    now = int(time.time())
+    if session.refresh_token_expires_at <= now:
+        typer.secho(
+            "Refresh token expired. Run `schwab_cli auth --force` to "
+            "re-authenticate, then restart the MCP server.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    resolved_log_file = _resolve_log_file(log_file, no_log_file)
+    logbook = LogBook(log_file=resolved_log_file)
+    client = SchwabClient(cfg, session)
+    server = SchwabMcpServer(client, logbook)
+
+    logbook.info(
+        "daemon.start",
+        pid=os.getpid(),
+        transport="stdio" if stdio else "sse",
+        bind=f"{host}:{port}" if not stdio else None,
+        log_file=str(resolved_log_file) if resolved_log_file else None,
+    )
+    try:
+        if stdio:
+            asyncio.run(server.run_stdio())
+        else:
+            asyncio.run(server.run_sse(host, port))
+    except KeyboardInterrupt:
+        logbook.info("daemon.stop", reason="SIGINT")
+    except Exception as e:
+        logbook.error("daemon.crash", error=f"{type(e).__name__}: {e}")
+        raise
+
+
+def _resolve_log_file(log_file: str | None, no_log_file: bool) -> Path | None:
+    if no_log_file:
+        return None
+    if log_file:
+        return Path(log_file).expanduser()
+    return DEFAULT_LOG_FILE
+
+
+# ---- mcp status -------------------------------------------------------
+
+
+def run_status(*, url: str | None, token: str | None, as_json: bool) -> None:
+    base = (url or DEFAULT_SSE_URL).rstrip("/")
+    try:
+        r = httpx.get(
+            f"{base}/admin/status",
+            headers=_auth_headers(token),
+            timeout=5.0,
+        )
+    except httpx.RequestError as e:
+        typer.secho(
+            f"Could not reach MCP server at {base}: {type(e).__name__}. "
+            "Is the daemon running?",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if r.status_code == 401:
+        typer.secho(
+            "401 unauthorized — pass --token.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if r.status_code != 200:
+        typer.secho(f"{r.status_code}: {r.text}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    data = r.json()
+    if as_json:
+        typer.echo(json.dumps(data, indent=2, default=str))
+    else:
+        typer.echo(_format_status(data))
+
+
+def _format_status(data: dict[str, Any]) -> str:
+    lines: list[str] = ["=== schwab_cli mcp server ==="]
+    lines.append(f"PID:              {data.get('pid', '—')}")
+    lines.append(f"Uptime:           {_fmt_duration(data.get('uptime_sec'))}")
+    lines.append(f"Transport:        {data.get('transport', '—')}")
+    lines.append("")
+    auth = data.get("auth") or {}
+    lines.append("Auth:")
+    lines.append(f"  Access expires:  {auth.get('access_expires_at', '—')}")
+    lines.append(f"  Refresh expires: {auth.get('refresh_expires_at', '—')}")
+    lines.append("")
+    stream = data.get("streamer") or {}
+    lines.append("Schwab streamer:")
+    lines.append(f"  State:           {stream.get('state', '—')}")
+    lines.append(f"  Reconnects:      {stream.get('reconnects', 0)}")
+    lines.append("")
+    summary = data.get("subscription_summary") or {}
+    lines.append(f"Active sessions:  {summary.get('session_count', 0)}")
+    sessions = summary.get("sessions") or {}
+    for sid, sess in sessions.items():
+        lines.append(
+            f"  {sid}  subs: {', '.join(sess.get('symbols') or []) or '—'}  "
+            f"streams: {sess.get('progress_stream_count', 0)}"
+        )
+    lines.append("")
+    subs = summary.get("subscriptions") or []
+    lines.append(f"Subscriptions (refcounted): {len(subs)}")
+    for s in subs:
+        sessions_str = ", ".join(s.get("sessions") or [])
+        lines.append(
+            f"  {s.get('service', '?'):20} {s.get('symbol', '?'):10} "
+            f"x{s.get('refcount', 0)}   ({sessions_str})"
+        )
+    return "\n".join(lines)
+
+
+def _fmt_duration(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "—"
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    d, rem = divmod(s, 86400)
+    h, rem = divmod(rem, 3600)
+    m, sec = divmod(rem, 60)
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h or d:
+        parts.append(f"{h}h")
+    parts.append(f"{m}m {sec}s")
+    return " ".join(parts)
+
+
+def _auth_headers(token: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+# ---- mcp logout / restart --------------------------------------------
+
+
+def run_logout(*, url: str | None, token: str | None) -> None:
+    base = (url or DEFAULT_SSE_URL).rstrip("/")
+    try:
+        r = httpx.post(
+            f"{base}/admin/shutdown",
+            headers=_auth_headers(token),
+            timeout=5.0,
+        )
+    except httpx.RequestError as e:
+        typer.secho(
+            f"Could not reach MCP server at {base}: {type(e).__name__}.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if r.status_code != 200:
+        typer.secho(f"{r.status_code}: {r.text}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo("shutdown signalled")
+
+
+def run_restart(
+    *, url: str | None, token: str | None,
+    stdio: bool, host: str, port: int,
+) -> None:
+    """Logout + start. Start runs in the foreground in the same terminal."""
+    try:
+        run_logout(url=url, token=token)
+    except typer.Exit:
+        typer.secho(
+            "(no running server to stop, starting fresh)",
+            fg=typer.colors.YELLOW, err=True,
+        )
+    # Give the old server a moment to release the port.
+    time.sleep(1.5)
+    args = [sys.argv[0], "mcp"]
+    if stdio:
+        args.append("--stdio")
+    else:
+        args.extend(["--sse", "--host", host, "--port", str(port)])
+    typer.echo(f"starting: {' '.join(args)}")
+    os.execvp(sys.argv[0], args)
+
+
+# ---- mcp log ----------------------------------------------------------
+
+
+def run_log(
+    *,
+    follow: bool,
+    log_file: str | None,
+    session: str | None,
+    symbol: str | None,
+    level: str | None,
+    as_json: bool,
+    tail: int | None,
+) -> None:
+    """Reader / follower for the daemon's structured log file."""
+    path = Path(log_file).expanduser() if log_file else DEFAULT_LOG_FILE
+    if not path.exists():
+        typer.secho(
+            f"Log file not found: {path}. "
+            "Has the daemon run at least once?",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(code=0)
+
+    # Historical portion.
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if tail is not None and tail > 0:
+        lines = lines[-tail:]
+    for line in lines:
+        rendered = _render_log_line(
+            line, session=session, symbol=symbol, level=level, as_json=as_json,
+        )
+        if rendered is not None:
+            typer.echo(rendered)
+
+    if not follow:
+        return
+
+    # Follow mode — simple seek-to-end + sleep loop. Good enough
+    # without adding an inotify dependency.
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)  # end
+            while True:
+                chunk = f.readline()
+                if not chunk:
+                    time.sleep(0.25)
+                    continue
+                rendered = _render_log_line(
+                    chunk.rstrip("\n"),
+                    session=session, symbol=symbol, level=level, as_json=as_json,
+                )
+                if rendered is not None:
+                    typer.echo(rendered)
+    except KeyboardInterrupt:
+        return
+
+
+_LEVEL_ORDER = {"debug": 0, "info": 1, "warning": 2, "error": 3}
+
+
+def _render_log_line(
+    raw: str,
+    *,
+    session: str | None,
+    symbol: str | None,
+    level: str | None,
+    as_json: bool,
+) -> str | None:
+    """Apply filters; return the rendered line or None to skip."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        entry = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw if as_json else None
+
+    # Level filter (accept threshold and above).
+    if level is not None:
+        threshold = _LEVEL_ORDER.get(level.lower(), 0)
+        cur = _LEVEL_ORDER.get(str(entry.get("level", "info")).lower(), 1)
+        if cur < threshold:
+            return None
+
+    # Session filter.
+    if session is not None:
+        if entry.get("session") != session:
+            return None
+
+    # Symbol filter — matches against either `symbol` key or a list in
+    # `symbols`.
+    if symbol is not None:
+        syms = entry.get("symbols")
+        if isinstance(syms, list):
+            if symbol not in syms:
+                return None
+        elif entry.get("symbol") != symbol:
+            return None
+
+    if as_json:
+        return raw
+
+    # Pretty-print one-line format.
+    ts = entry.get("ts", "")[-12:-1] if isinstance(entry.get("ts"), str) else "?"
+    lvl = str(entry.get("level", "info")).upper()[:4]
+    event = entry.get("event", "?")
+    # Summarize remaining fields.
+    extras = {
+        k: v for k, v in entry.items()
+        if k not in {"ts", "level", "event"}
+    }
+    extra_str = " ".join(f"{k}={_short(v)}" for k, v in extras.items())
+    return f"{ts} {lvl:5} {event:24} {extra_str}"
+
+
+def _short(v: Any) -> str:
+    """Compact repr for log-line extras — avoid huge blobs."""
+    s = json.dumps(v, default=str)
+    if len(s) > 80:
+        return s[:77] + "..."
+    return s
+
+
+# ---- mcp install ------------------------------------------------------
+
+
+def run_install(
+    *, stdio: bool, url: str, token: str | None,
+    settings: str | None, yes: bool, force: bool,
+) -> None:
+    """Merge a `schwab` MCP server entry into ~/.claude/settings.json."""
+    settings_path = (
+        Path(settings).expanduser() if settings
+        else Path.home() / ".claude" / "settings.json"
+    )
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                typer.secho(
+                    f"{settings_path} is not a JSON object; refusing to edit.",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
+        except json.JSONDecodeError as e:
+            typer.secho(
+                f"{settings_path} is not valid JSON: {e}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+    if "schwab" in mcp_servers and not force:
+        typer.secho(
+            f"schwab entry already exists in {settings_path}. "
+            "Pass --force to overwrite.",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if stdio:
+        entry: dict[str, Any] = {
+            "command": "schwab_cli",
+            "args": ["mcp", "--stdio"],
+        }
+    else:
+        sse_url = url.rstrip("/")
+        if not sse_url.endswith("/sse"):
+            sse_url = sse_url + "/sse"
+        entry = {"type": "sse", "url": sse_url}
+        if token:
+            entry["headers"] = {"Authorization": f"Bearer {token}"}
+
+    mcp_servers["schwab"] = entry
+
+    typer.echo("Proposed write:")
+    typer.echo(json.dumps({"mcpServers": {"schwab": entry}}, indent=2))
+    if not yes:
+        if not typer.confirm(f"Apply to {settings_path}?", default=True):
+            typer.echo("aborted")
+            raise typer.Exit(code=0)
+
+    tmp = settings_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, settings_path)
+    typer.echo(f"wrote {settings_path}")

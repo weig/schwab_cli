@@ -11,6 +11,10 @@ dependencies = [
     "seleniumbase>=4.48.2",
     "rich>=13.7",
     "questionary>=2.0",
+    "mcp>=1.0",
+    "websockets>=13.0",
+    "uvicorn>=0.30",
+    "starlette>=0.37",
 ]
 
 [project.scripts]

@@ -7,11 +7,13 @@ from schwab_cli.commands import dividends as dividends_cmd
 from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
+from schwab_cli.commands import mcp as mcp_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import skew as skew_cmd
 from schwab_cli.commands import strategy as strategy_cmd
+from schwab_cli.commands import stream as stream_cmd
 from schwab_cli.commands import transactions as transactions_cmd
 from schwab_cli.commands import vol as vol_cmd
 
@@ -353,6 +355,135 @@ def skew(
     )
 
 
+mcp_app = typer.Typer(
+    help=(
+        "Run and manage the Schwab MCP server. Bare `mcp` starts "
+        "the daemon; use subcommands for status / log / logout / "
+        "install."
+    ),
+    no_args_is_help=False,
+    invoke_without_command=True,
+)
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.callback(invoke_without_command=True)
+def mcp_root(
+    ctx: typer.Context,
+    stdio: bool = typer.Option(
+        True, "--stdio/--sse",
+        help="Transport. --sse runs a long-lived daemon on --host / --port.",
+    ),
+    host: str = typer.Option(
+        "127.0.0.1", "--host",
+        help="SSE bind host. Loopback-only by default.",
+    ),
+    port: int = typer.Option(
+        7234, "--port",
+        help="SSE bind port.",
+    ),
+    log_file: str = typer.Option(
+        None, "--log-file",
+        help="Path to the structured log file. Default: ~/.config/schwab_cli/mcp.log.",
+    ),
+    no_log_file: bool = typer.Option(
+        False, "--no-log-file",
+        help="Disable the disk log; events still go to stderr.",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    """When no subcommand, run the daemon."""
+    if ctx.invoked_subcommand is not None:
+        return
+    mcp_cmd.run(
+        stdio=stdio, host=host, port=port,
+        log_file=log_file, no_log_file=no_log_file,
+    )
+
+
+@mcp_app.command("status", help="Print a snapshot of the running MCP server.")
+def mcp_status(
+    url: str = typer.Option(
+        None, "--url",
+        help="SSE URL of the running server (default: http://127.0.0.1:7234).",
+    ),
+    token: str = typer.Option(None, "--token", help="Bearer token if set at start."),
+    as_json: bool = typer.Option(False, "--json", help="Raw JSON output."),
+) -> None:
+    mcp_cmd.run_status(url=url, token=token, as_json=as_json)
+
+
+@mcp_app.command("log", help="Read or tail the MCP server's structured log.")
+def mcp_log(
+    follow: bool = typer.Option(False, "-f", "--follow", help="Tail the file."),
+    log_file: str = typer.Option(
+        None, "--log-file",
+        help="Log file path (default: ~/.config/schwab_cli/mcp.log).",
+    ),
+    session: str = typer.Option(None, "--session", help="Filter by session id."),
+    symbol: str = typer.Option(None, "--symbol", help="Filter by symbol."),
+    level: str = typer.Option(
+        None, "--level",
+        help="Filter: info | warning | error (shows that level and above).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Raw JSONL pass-through."),
+    tail: int = typer.Option(None, "--tail", help="Show only the last N lines."),
+) -> None:
+    mcp_cmd.run_log(
+        follow=follow, log_file=log_file,
+        session=session, symbol=symbol, level=level,
+        as_json=as_json, tail=tail,
+    )
+
+
+@mcp_app.command("logout", help="Gracefully shut down a running MCP server.")
+def mcp_logout(
+    url: str = typer.Option(None, "--url"),
+    token: str = typer.Option(None, "--token"),
+) -> None:
+    mcp_cmd.run_logout(url=url, token=token)
+
+
+@mcp_app.command("restart", help="Logout + start again in-place.")
+def mcp_restart(
+    url: str = typer.Option(None, "--url"),
+    token: str = typer.Option(None, "--token"),
+    stdio: bool = typer.Option(False, "--stdio/--sse"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(7234, "--port"),
+) -> None:
+    mcp_cmd.run_restart(
+        url=url, token=token, stdio=stdio, host=host, port=port,
+    )
+
+
+@mcp_app.command("install", help="Register this MCP server in ~/.claude/settings.json.")
+def mcp_install(
+    stdio: bool = typer.Option(
+        False, "--stdio/--sse",
+        help="Which entry to install. Default is SSE if a daemon is implied.",
+    ),
+    url: str = typer.Option(
+        "http://127.0.0.1:7234/sse", "--url",
+        help="SSE URL (ignored for --stdio).",
+    ),
+    token: str = typer.Option(
+        None, "--token",
+        help="Bearer token to include in the entry (SSE only).",
+    ),
+    settings: str = typer.Option(
+        None, "--claude-settings",
+        help="Override path (default: ~/.claude/settings.json).",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing entry."),
+) -> None:
+    mcp_cmd.run_install(
+        stdio=stdio, url=url, token=token, settings=settings,
+        yes=yes, force=force,
+    )
+
+
 @app.command(
     "strategy",
     help=(
@@ -384,6 +515,47 @@ def strategy(
         risk_free=risk_free,
         as_json=as_json,
         as_md=as_md,
+    )
+
+
+@app.command(
+    "stream",
+    help=(
+        "Watch live Schwab quotes in the terminal. Connects to a "
+        "running MCP daemon if one is reachable, else opens a direct "
+        "Schwab streamer connection. Ctrl+C to stop cleanly."
+    ),
+)
+def stream(
+    symbols: list[str] = typer.Argument(
+        ..., help="Ticker symbols (e.g. NVDA AAPL).",
+    ),
+    fields: str = typer.Option(
+        None, "--fields",
+        help="Comma-separated field subset (default: bid,ask,last,volume).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="One JSON object per line."),
+    via_mcp: bool = typer.Option(
+        False, "--mcp",
+        help="Force MCP path; exit non-zero if no daemon is reachable.",
+    ),
+    direct: bool = typer.Option(
+        False, "--direct",
+        help="Bypass MCP, connect directly to Schwab streamer.",
+    ),
+    mcp_url: str = typer.Option(
+        "http://127.0.0.1:7234/sse", "--mcp-url",
+        help="SSE URL of the MCP daemon (only used with --mcp).",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    stream_cmd.run(
+        symbols,
+        fields=fields,
+        as_json=as_json,
+        via_mcp=via_mcp,
+        direct=direct,
+        mcp_url=mcp_url,
     )
 
 

@@ -65,6 +65,22 @@ def test_doc_flag_on_strategy_shows_strategy_page():
     assert "OCC-style" in result.output or "±N@YYYYMMDD" in result.output
 
 
+def test_doc_flag_on_mcp_shows_mcp_page():
+    result = runner.invoke(app, ["mcp", "--doc"])
+    assert result.exit_code == 0, result.output
+    # Distinctive phrasing from doc/mcp.md:
+    assert "MCP server" in result.output
+    assert "stdio" in result.output
+
+
+def test_doc_flag_on_stream_shows_stream_page():
+    result = runner.invoke(app, ["stream", "--doc"])
+    assert result.exit_code == 0, result.output
+    # Distinctive phrasing from doc/stream.md:
+    assert "live Schwab quotes" in result.output
+    assert "--fields" in result.output
+
+
 def test_doc_flag_on_auth_shows_auth_page():
     result = runner.invoke(app, ["auth", "--doc"])
     assert result.exit_code == 0, result.output

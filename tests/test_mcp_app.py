@@ -1,0 +1,155 @@
+"""Tests for the SchwabMcpServer tool handlers.
+
+Exercises the tool handlers directly by calling the private
+coroutine methods — avoids needing an actual stdio client for the
+assertions while still walking the same code paths a live MCP
+client would trigger.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+from unittest.mock import patch
+
+from schwab_cli.mcp_server.app import SchwabMcpServer
+from schwab_cli.mcp_server.logbook import LogBook
+
+
+class _FakeSession:
+    access_token = "atok"
+    refresh_token = "rtok"
+    expires_at = 9_000_000_000
+    refresh_token_expires_at = 9_000_000_000
+
+
+class _FakeClient:
+    """Minimal stand-in for SchwabClient — methods override the
+    REST-calling helpers via module-level patch in each test."""
+
+    @property
+    def session(self):
+        return _FakeSession()
+
+
+def _make_server() -> SchwabMcpServer:
+    buf = io.StringIO()
+    logbook = LogBook(stream=buf)
+    return SchwabMcpServer(_FakeClient(), logbook)
+
+
+def _call(coro) -> list:
+    return asyncio.run(coro)
+
+
+# ---- get_quote --------------------------------------------------------
+
+
+def test_get_quote_returns_json_payload():
+    server = _make_server()
+    fake_quotes = {"NVDA": {"symbol": "NVDA", "lastPrice": 250.1}}
+    with patch("schwab_cli.mcp_server.app.get_quotes", return_value=fake_quotes):
+        result = _call(server._tool_get_quote({"symbols": ["NVDA"]}))
+    assert len(result) == 1
+    data = json.loads(result[0].text)
+    assert data["NVDA"]["lastPrice"] == 250.1
+
+
+def test_get_quote_upcases_symbols():
+    server = _make_server()
+    captured = {}
+
+    def fake_quotes(client, symbols):
+        captured["symbols"] = list(symbols)
+        return {}
+
+    with patch("schwab_cli.mcp_server.app.get_quotes", side_effect=fake_quotes):
+        _call(server._tool_get_quote({"symbols": ["nvda", "aapl"]}))
+    assert captured["symbols"] == ["NVDA", "AAPL"]
+
+
+def test_get_quote_empty_symbols_errors():
+    server = _make_server()
+    result = _call(server._tool_get_quote({"symbols": []}))
+    assert "empty" in result[0].text
+
+
+def test_get_quote_rejects_non_list():
+    server = _make_server()
+    result = _call(server._tool_get_quote({"symbols": "NVDA"}))
+    assert "list of strings" in result[0].text
+
+
+# ---- get_chain --------------------------------------------------------
+
+
+def test_get_chain_happy_path():
+    server = _make_server()
+    fake_raw = {
+        "symbol": "AMZN",
+        "underlying": {"last": 255.0, "change": 0, "percentChange": 0},
+        "callExpDateMap": {}, "putExpDateMap": {},
+    }
+    with patch("schwab_cli.mcp_server.app.get_chain", return_value=fake_raw):
+        result = _call(server._tool_get_chain({
+            "symbol": "AMZN",
+            "expiry": "2026-05-01",
+            "strike_count": 10,
+        }))
+    data = json.loads(result[0].text)
+    assert data["symbol"] == "AMZN"
+    assert data["underlying"]["last"] == 255.0
+
+
+def test_get_chain_requires_symbol_and_expiry():
+    server = _make_server()
+    result = _call(server._tool_get_chain({"symbol": "AMZN"}))
+    assert "required" in result[0].text
+
+
+def test_get_chain_rejects_bad_expiry():
+    server = _make_server()
+    result = _call(server._tool_get_chain({
+        "symbol": "AMZN", "expiry": "260501",
+    }))
+    assert "invalid expiry" in result[0].text
+
+
+# ---- server_status ----------------------------------------------------
+
+
+def test_server_status_shape():
+    server = _make_server()
+    result = _call(server._tool_server_status())
+    data = json.loads(result[0].text)
+    assert data["server_name"] == "schwab"
+    assert "subscription_summary" in data
+    # Empty manager → no sessions.
+    assert data["subscription_summary"]["session_count"] == 0
+
+
+def test_server_status_reflects_live_subscription_state():
+    server = _make_server()
+    # Simulate an active subscription.
+    server.subscription_manager.add("s1", "t1", "LEVELONE_EQUITIES", ["NVDA"])
+    result = _call(server._tool_server_status())
+    data = json.loads(result[0].text)
+    summary = data["subscription_summary"]
+    assert summary["session_count"] == 1
+    assert summary["subscription_count"] == 1
+
+
+# ---- list_tools has the expected tools --------------------------------
+
+
+def test_server_exposes_expected_tool_names():
+    server = _make_server()
+    # Server.list_tools() via the decorator registers a handler;
+    # poke at the internal server's registered tool list.
+    from mcp.types import ListToolsRequest
+    handler = server._server.request_handlers.get(ListToolsRequest)
+    assert handler is not None
+    result = _call(handler(ListToolsRequest(method="tools/list")))
+    names = {t.name for t in result.root.tools}
+    assert names == {"get_quote", "get_chain", "stream_quote", "server_status"}
