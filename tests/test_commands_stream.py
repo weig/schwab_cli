@@ -14,7 +14,7 @@ from schwab_cli.cli import app
 from schwab_cli.config import Config, save as save_config
 from schwab_cli.session import Session, save as save_session
 from schwab_cli.api.streamer import StreamerInfo
-from schwab_cli.commands.stream import _resolve_fields
+from schwab_cli.commands.stream import _market_time, _resolve_fields
 
 runner = CliRunner()
 
@@ -110,3 +110,20 @@ def test_stream_expired_refresh_token_fails(monkeypatch, tmp_path):
     ))
     result = runner.invoke(app, ["stream", "NVDA"])
     assert result.exit_code == 1
+
+
+def test_market_time_uses_quote_time_in_eastern():
+    # 1777037749175 ms = 2026-04-24 13:35:49.175 UTC = 09:35:49.175 EDT
+    ts = _market_time({"symbol": "NVDA", "quote_time": 1777037749175})
+    assert ts == "09:35:49.175"
+
+
+def test_market_time_falls_back_to_trade_time():
+    ts = _market_time({"symbol": "NVDA", "trade_time": 1777037749091})
+    assert ts == "09:35:49.091"
+
+
+def test_market_time_ignores_non_numeric_timestamp():
+    # Falls back to now() — just check format.
+    ts = _market_time({"symbol": "NVDA"})
+    assert len(ts) == 12 and ts[2] == ":" and ts[5] == ":" and ts[8] == "."

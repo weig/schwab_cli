@@ -22,9 +22,10 @@ import asyncio
 import json
 import socket
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import typer
 
@@ -41,6 +42,22 @@ from schwab_cli.session import load as load_session
 
 
 _SERVICE = "LEVELONE_EQUITIES"
+_MARKET_TZ = ZoneInfo("America/New_York")
+
+
+def _market_time(decoded: dict[str, Any]) -> str:
+    """Render a market-time stamp.
+
+    Prefers the payload's ``quote_time`` / ``trade_time`` (epoch ms, which
+    are the authoritative market event timestamps) over the local wall clock.
+    Falls back to ``now()`` in Eastern when the payload has no timestamp.
+    """
+    raw = decoded.get("quote_time") or decoded.get("trade_time")
+    if isinstance(raw, (int, float)) and raw > 0:
+        dt = datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc).astimezone(_MARKET_TZ)
+    else:
+        dt = datetime.now(tz=_MARKET_TZ)
+    return dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
 
 
 def run(
@@ -261,9 +278,9 @@ def _render(decoded: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
         typer.echo(json.dumps(decoded, default=str))
         return
-    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    ts = _market_time(decoded)
     sym = decoded.get("symbol", "?")
-    parts = [f"[{ts}] {sym:6}"]
+    parts = [f"[{ts} ET] {sym:6}"]
     # Preferred order if present; other fields appended after.
     preferred_keys = [
         "bid", "ask", "last", "bid_size", "ask_size", "volume",
