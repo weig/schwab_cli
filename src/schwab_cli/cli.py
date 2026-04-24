@@ -3,6 +3,7 @@ import typer
 from schwab_cli._doc import doc_option
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
+from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import option as option_cmd
@@ -95,6 +96,22 @@ def quote(
     doc: bool = doc_option(),
 ) -> None:
     quote_cmd.run(symbols, as_json=as_json, as_md=as_md)
+
+
+@app.command(
+    "fundamentals",
+    help=(
+        "Show company fundamentals (valuation, margins, balance sheet) for "
+        "one or more symbols. One API call (quotes + fundamental fields)."
+    ),
+)
+def fundamentals(
+    symbols: list[str] = typer.Argument(..., help="One or more ticker symbols."),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
+) -> None:
+    fundamentals_cmd.run(symbols, as_json=as_json, as_md=as_md)
 
 
 @app.command(
