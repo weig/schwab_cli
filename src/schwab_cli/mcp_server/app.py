@@ -26,6 +26,7 @@ import time
 from datetime import date, datetime
 from typing import Any
 
+import anyio
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -275,6 +276,7 @@ class SchwabMcpServer:
         )
 
         count = 0
+        error: Exception | None = None
         try:
             while True:
                 try:
@@ -299,19 +301,35 @@ class SchwabMcpServer:
                         message=json.dumps(update, default=str),
                     )
         except asyncio.CancelledError:
-            # Agent cancelled the tool — clean up and propagate so the
-            # SDK emits the correct response.
-            await self._bridge.remove_subscription(session_id, token_key)
+            # Client disconnected / agent cancelled — fall through to the
+            # shielded cleanup in `finally` and re-raise after.
             raise
         except Exception as e:
+            error = e
             self._logbook.error(
                 "stream_quote.error", error=f"{type(e).__name__}: {e}",
             )
-            await self._bridge.remove_subscription(session_id, token_key)
+        finally:
+            # Run cleanup in a shielded scope so the subscription is
+            # released even when the surrounding anyio task group has
+            # been cancelled (which happens the moment the MCP session's
+            # read stream closes — otherwise the next `await` here would
+            # be re-cancelled immediately and the subscription leaks).
+            with anyio.CancelScope(shield=True):
+                await self._bridge.remove_subscription(session_id, token_key)
+
+        if error is not None:
             return [TextContent(
                 type="text",
-                text=f"stream_quote error: {type(e).__name__}: {e}",
+                text=f"stream_quote error: {type(error).__name__}: {error}",
             )]
+        # Normal exit only happens when the client disconnects; the
+        # CancelledError path re-raises above and this return is never
+        # reached in practice. Kept for type-safety.
+        return [TextContent(
+            type="text",
+            text=f"stream_quote ended after {count} updates",
+        )]
 
     async def _tool_server_status(self) -> list[TextContent]:
         session = self._client.session

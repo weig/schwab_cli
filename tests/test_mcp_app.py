@@ -153,3 +153,79 @@ def test_server_exposes_expected_tool_names():
     result = _call(handler(ListToolsRequest(method="tools/list")))
     names = {t.name for t in result.root.tools}
     assert names == {"get_quote", "get_chain", "stream_quote", "server_status"}
+
+
+# ---- stream_quote cleanup on client disconnect ------------------------
+
+
+class _RecordingBridge:
+    """Minimal fake bridge — records add/remove calls and returns a
+    real asyncio.Queue so the stream loop can block on `queue.get()`.
+    """
+
+    def __init__(self) -> None:
+        self.add_calls: list[tuple] = []
+        self.remove_calls: list[tuple] = []
+        self._queue: asyncio.Queue = asyncio.Queue()
+
+    async def add_subscription(self, session, token, service, symbols):
+        self.add_calls.append((session, token, service, tuple(symbols)))
+        return self._queue
+
+    async def remove_subscription(self, session, token):
+        # Real bridge awaits a lock (plus network unsubscribe); mimic
+        # the suspension point so a cancelled cancel-scope has a chance
+        # to inject CancelledError here. Without a real await the bug
+        # wouldn't reproduce.
+        await asyncio.sleep(0)
+        self.remove_calls.append((session, token))
+
+
+def test_stream_quote_cleans_up_when_anyio_scope_cancelled():
+    """Regression: MCP client disconnect triggers an anyio
+    task-group cancel. The tool's cleanup must complete even though
+    every subsequent `await` inside the cancelled scope would
+    otherwise re-raise CancelledError immediately, leaking the
+    subscription.
+    """
+    import anyio
+    from mcp.shared.context import RequestContext
+    from mcp.server.lowlevel.server import request_ctx
+
+    server = _make_server()
+    bridge = _RecordingBridge()
+    server._bridge = bridge  # type: ignore[attr-defined]
+
+    fake_ctx = RequestContext(
+        request_id=1,
+        meta=None,
+        session=None,
+        lifespan_context=None,
+        request=None,
+    )
+
+    async def driver():
+        async with anyio.create_task_group() as tg:
+            async def run_tool():
+                token = request_ctx.set(fake_ctx)
+                try:
+                    await server._tool_stream_quote({"symbols": ["NVDA"]})
+                finally:
+                    request_ctx.reset(token)
+
+            tg.start_soon(run_tool)
+            # Let the tool enter its queue.get() wait.
+            await anyio.sleep(0.05)
+            # Simulate what mcp Server.run does on client disconnect:
+            # cancel the whole task group's scope.
+            tg.cancel_scope.cancel()
+
+    anyio.run(driver)
+
+    assert bridge.add_calls, "add_subscription should have been called"
+    assert bridge.remove_calls, (
+        "remove_subscription must be called even when the surrounding "
+        "anyio scope is cancelled — otherwise the subscription leaks"
+    )
+    session_id, token = bridge.remove_calls[0]
+    assert (session_id, token) == bridge.add_calls[0][:2]
