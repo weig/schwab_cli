@@ -8,6 +8,7 @@ from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import mcp as mcp_cmd
+from schwab_cli.commands import notify as notify_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
@@ -557,6 +558,46 @@ def stream(
         direct=direct,
         mcp_url=mcp_url,
     )
+
+
+notify_app = typer.Typer(
+    help=(
+        "Manage notification channels (Telegram). Config lives in "
+        "~/.config/schwab_cli/notification.json — separate from "
+        "config.json so `setup` doesn't clobber it."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(notify_app, name="notify")
+
+
+@notify_app.command("list", help="Show configured notification channels.")
+def notify_list(
+    path: str = typer.Option(None, "--path", help="Override config path."),
+) -> None:
+    notify_cmd.run_list(path=path)
+
+
+@notify_app.command("test", help="Fire a test notification through configured channels.")
+def notify_test(
+    channel: str = typer.Option(
+        "all", "--channel",
+        help="Channel to test: telegram | all.",
+    ),
+    path: str = typer.Option(None, "--path", help="Override config path."),
+) -> None:
+    notify_cmd.run_test(channel=channel, path=path)
+
+
+@notify_app.command("setup", help="Interactive Telegram setup — writes notification.json.")
+def notify_setup(
+    channel: str = typer.Option(
+        "telegram", "--channel",
+        help="Channel to configure (telegram only for now).",
+    ),
+    path: str = typer.Option(None, "--path", help="Override config path."),
+) -> None:
+    notify_cmd.run_setup(channel=channel, path=path)
 
 
 @app.command(
