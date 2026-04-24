@@ -55,6 +55,7 @@ See [setup](setup.md) and [auth](auth.md) for the detail on each.
 | [`greeks`](greeks.md) | Detailed greeks for one specific option contract. |
 | [`history`](history.md) | OHLCV candles for a stock or option ticker. |
 | [`vol`](vol.md) | Volatility context for a stock: IV, HV, HVP, P/C Ratio. |
+| [`skew`](skew.md) | Option skew / smile (25Δ RR, wing skew, butterfly, ATM slope) — L1 single chain, L2 term structure, L3 cross-ticker. |
 | [`transactions`](transactions.md) | Account activity (trades, dividends, journals) over a date range. |
 
 Cross-cutting references:

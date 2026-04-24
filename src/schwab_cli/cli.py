@@ -10,6 +10,7 @@ from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
+from schwab_cli.commands import skew as skew_cmd
 from schwab_cli.commands import transactions as transactions_cmd
 from schwab_cli.commands import vol as vol_cmd
 
@@ -299,6 +300,53 @@ def vol(
         ivp_lookback=ivp_lookback,
         no_record=no_record,
         snapshot_only=snapshot_only,
+        as_json=as_json,
+        as_md=as_md,
+    )
+
+
+@app.command(
+    "skew",
+    help=(
+        "Option skew / smile metrics at L1 (single chain), L2 (term "
+        "structure via --term or --dtes), or L3 (cross-ticker via "
+        "--cross). See `schwab_cli skew --doc` for full usage."
+    ),
+)
+def skew(
+    args: list[str] = typer.Argument(
+        ...,
+        help=(
+            "L1: SYMBOL YYMMDD  |  L2 --term: SYMBOL YYMMDD [YYMMDD ...]  |  "
+            "L2 --dtes: SYMBOL N [N ...]  |  L3 --cross: YYMMDD SYMBOL [SYMBOL ...]"
+        ),
+    ),
+    term: bool = typer.Option(
+        False, "--term",
+        help="L2 term structure — remaining args are YYMMDD expiries.",
+    ),
+    dtes: bool = typer.Option(
+        False, "--dtes",
+        help="L2 term structure by target DTE — remaining args are integer DTEs.",
+    ),
+    cross: bool = typer.Option(
+        False, "--cross",
+        help="L3 cross-ticker — args[0] is YYMMDD, remaining are symbols.",
+    ),
+    strikes: int = typer.Option(
+        40, "--strikes",
+        help="Chain width per expiry (total strikes around ATM).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
+) -> None:
+    skew_cmd.run(
+        args,
+        term=term,
+        dtes=dtes,
+        cross=cross,
+        strikes=strikes,
         as_json=as_json,
         as_md=as_md,
     )

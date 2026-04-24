@@ -49,6 +49,14 @@ def test_doc_flag_on_greeks_shows_greeks_page():
     assert "Black-Scholes" in result.output or "break-even" in result.output.lower()
 
 
+def test_doc_flag_on_skew_shows_skew_page():
+    result = runner.invoke(app, ["skew", "--doc"])
+    assert result.exit_code == 0, result.output
+    # Distinctive phrasing from doc/skew.md:
+    assert "Risk Reversal" in result.output or "25Δ" in result.output
+    assert "--cross" in result.output
+
+
 def test_doc_flag_on_auth_shows_auth_page():
     result = runner.invoke(app, ["auth", "--doc"])
     assert result.exit_code == 0, result.output
