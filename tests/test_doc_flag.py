@@ -57,6 +57,14 @@ def test_doc_flag_on_skew_shows_skew_page():
     assert "--cross" in result.output
 
 
+def test_doc_flag_on_strategy_shows_strategy_page():
+    result = runner.invoke(app, ["strategy", "--doc"])
+    assert result.exit_code == 0, result.output
+    # Distinctive phrasing from doc/strategy.md:
+    assert "IRON CONDOR" in result.output
+    assert "OCC-style" in result.output or "±N@YYYYMMDD" in result.output
+
+
 def test_doc_flag_on_auth_shows_auth_page():
     result = runner.invoke(app, ["auth", "--doc"])
     assert result.exit_code == 0, result.output

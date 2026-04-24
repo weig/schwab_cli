@@ -11,6 +11,7 @@ from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import skew as skew_cmd
+from schwab_cli.commands import strategy as strategy_cmd
 from schwab_cli.commands import transactions as transactions_cmd
 from schwab_cli.commands import vol as vol_cmd
 
@@ -347,6 +348,40 @@ def skew(
         dtes=dtes,
         cross=cross,
         strikes=strikes,
+        as_json=as_json,
+        as_md=as_md,
+    )
+
+
+@app.command(
+    "strategy",
+    help=(
+        "Option-strategy probability + risk analysis. Pass one or more "
+        "--leg tokens in OCC-style form: ±N@YYYYMMDD{C|P}STRIKE. See "
+        "`schwab_cli strategy --doc` for the full grammar and examples."
+    ),
+)
+def strategy(
+    symbol: str = typer.Argument(..., help="Underlying ticker, e.g. AMZN."),
+    leg: list[str] = typer.Option(
+        ..., "--leg",
+        help=(
+            "Option leg in OCC form: ±N@YYYYMMDD{C|P}STRIKE. Repeat for "
+            "multi-leg positions. Example: --leg +1@20260501C255."
+        ),
+    ),
+    risk_free: float = typer.Option(
+        0.0, "--risk-free",
+        help="Annualised risk-free rate for the log-normal drift (default 0).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    doc: bool = doc_option(),
+) -> None:
+    strategy_cmd.run(
+        symbol,
+        leg,
+        risk_free=risk_free,
         as_json=as_json,
         as_md=as_md,
     )
