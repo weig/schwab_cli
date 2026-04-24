@@ -68,6 +68,7 @@ def run(
     via_mcp: bool,
     direct: bool,
     mcp_url: str,
+    force: bool = False,
 ) -> None:
     """Entry point from :mod:`schwab_cli.cli`."""
     if via_mcp and direct:
@@ -80,6 +81,32 @@ def run(
         typer.secho("stream requires at least one symbol.",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
+
+    # --direct + running daemon ⇒ Schwab's one-streamer-per-account
+    # limit means the direct connection can kick the daemon's session
+    # off. Refuse unless the user explicitly passes --force.
+    if direct and _probe_mcp_daemon(mcp_url):
+        if not force:
+            typer.secho(
+                f"MCP daemon is running at {mcp_url} — refusing to open a "
+                "direct Schwab WebSocket because Schwab only allows one "
+                "streamer session per account and the direct connection "
+                "would disconnect the daemon.",
+                fg=typer.colors.RED, err=True,
+            )
+            typer.secho(
+                "Use --mcp (or drop --direct to auto-select) to stream "
+                "through the daemon, or pass --direct --force to proceed "
+                "anyway.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            raise typer.Exit(code=2)
+        typer.secho(
+            "(--force: opening direct Schwab WebSocket while the MCP "
+            "daemon is running — this may disconnect the daemon's "
+            "streamer session)",
+            fg=typer.colors.YELLOW, err=True,
+        )
 
     # Auto-probe: try MCP first if the daemon is reachable, fall
     # back to direct otherwise. Forced by --mcp / --direct.

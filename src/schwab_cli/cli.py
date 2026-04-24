@@ -600,6 +600,14 @@ def stream(
         False, "--direct",
         help="Bypass MCP, connect directly to Schwab streamer.",
     ),
+    force: bool = typer.Option(
+        False, "--force",
+        help=(
+            "With --direct, proceed even when an MCP daemon is running "
+            "(Schwab allows only one streamer session per account — the "
+            "direct connection may disconnect the daemon's streamer)."
+        ),
+    ),
     mcp_url: str = typer.Option(
         "http://127.0.0.1:7234/sse", "--mcp-url",
         help="SSE URL of the MCP daemon (only used with --mcp).",
@@ -612,6 +620,7 @@ def stream(
         as_json=as_json,
         via_mcp=via_mcp,
         direct=direct,
+        force=force,
         mcp_url=mcp_url,
     )
 

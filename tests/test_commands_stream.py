@@ -127,3 +127,56 @@ def test_market_time_ignores_non_numeric_timestamp():
     # Falls back to now() — just check format.
     ts = _market_time({"symbol": "NVDA"})
     assert len(ts) == 12 and ts[2] == ":" and ts[5] == ":" and ts[8] == "."
+
+
+# ---- --direct guard against running daemon ----------------------------
+
+
+def test_stream_direct_blocked_when_daemon_reachable(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    with patch(
+        "schwab_cli.commands.stream._probe_mcp_daemon", return_value=True
+    ):
+        result = runner.invoke(app, ["stream", "NVDA", "--direct"])
+    assert result.exit_code == 2, result.stderr
+    # Error message should mention both the guidance and the override.
+    assert "--force" in result.stderr
+    assert "only allows one streamer session" in result.stderr
+
+
+def test_stream_direct_force_proceeds_when_daemon_reachable(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    called = {"direct": 0}
+
+    async def fake_direct(symbols, *, fields, as_json):
+        called["direct"] += 1
+
+    with patch(
+        "schwab_cli.commands.stream._probe_mcp_daemon", return_value=True
+    ), patch(
+        "schwab_cli.commands.stream._run_direct", side_effect=fake_direct
+    ):
+        result = runner.invoke(
+            app, ["stream", "NVDA", "--direct", "--force"]
+        )
+    assert result.exit_code == 0, result.output + result.stderr
+    assert called["direct"] == 1
+    # Warning should surface on stderr so the user can see what they opted into.
+    assert "--force" in result.stderr
+
+
+def test_stream_direct_proceeds_when_daemon_unreachable(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    called = {"direct": 0}
+
+    async def fake_direct(symbols, *, fields, as_json):
+        called["direct"] += 1
+
+    with patch(
+        "schwab_cli.commands.stream._probe_mcp_daemon", return_value=False
+    ), patch(
+        "schwab_cli.commands.stream._run_direct", side_effect=fake_direct
+    ):
+        result = runner.invoke(app, ["stream", "NVDA", "--direct"])
+    assert result.exit_code == 0, result.output + result.stderr
+    assert called["direct"] == 1
