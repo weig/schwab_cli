@@ -33,9 +33,11 @@ from mcp.types import TextContent, Tool
 from schwab_cli.api.chains import get_chain
 from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
 from schwab_cli.api.quotes import get_quotes
+from schwab_cli.mcp_server.auth_monitor import AuthMonitor
 from schwab_cli.mcp_server.logbook import LogBook
 from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
+from schwab_cli.notify import Notifier
 from schwab_cli.output.chains import shape_envelope
 
 
@@ -49,17 +51,29 @@ class SchwabMcpServer:
         *,
         server_name: str = "schwab",
         admin_token: str | None = None,
+        notifier: Notifier | None = None,
+        auth_monitor_enabled: bool = True,
     ) -> None:
         self._client = client
         self._logbook = logbook
         self._manager = SubscriptionManager()
-        self._bridge = StreamerBridge(client, logbook, self._manager)
+        # Notifier wired into bridge so a streamer crash fires an
+        # alert even if no other code paths are listening for it.
+        self._notifier = notifier or Notifier.from_file(logbook=logbook)
+        self._bridge = StreamerBridge(
+            client, logbook, self._manager, notifier=self._notifier,
+        )
         self._server = Server(server_name)
         self._started_at = time.time()
         self._admin_token = admin_token
         self._shutdown_event: asyncio.Event | None = None
         self._transport = "idle"
         self._stream_counter = 0
+        # Auth monitor — proactive refresh-token rotation. Shares
+        # the notifier already built above. Disabled by default in
+        # stdio mode (see run_stdio), only started in run_sse.
+        self._auth_monitor_enabled = auth_monitor_enabled
+        self._auth_monitor: AuthMonitor | None = None
         self._register_tools()
 
     def _register_tools(self) -> None:
@@ -356,6 +370,17 @@ class SchwabMcpServer:
         self._shutdown_event = asyncio.Event()
         sse = SseServerTransport("/messages/")
 
+        # Launch the auth monitor — proactive refresh-token rotation
+        # + expiry notifications. Only meaningful in SSE mode
+        # (long-lived); stdio sessions are per-agent and short.
+        if self._auth_monitor_enabled:
+            self._auth_monitor = AuthMonitor(
+                self._logbook,
+                self._notifier,
+                on_rotation_success=self._on_rotation_success,
+            )
+            self._auth_monitor.start()
+
         async def handle_sse(request):
             client_ip = (
                 request.client.host if request.client else "unknown"
@@ -455,7 +480,49 @@ class SchwabMcpServer:
             await uvi.serve()
         finally:
             watcher.cancel()
+            # Stop the auth monitor cleanly on shutdown so the
+            # subprocess (if mid-rotation) can wind down.
+            if self._auth_monitor is not None:
+                await self._auth_monitor.stop()
             self._logbook.info("server.stop", transport="sse")
+
+    async def _on_rotation_success(self) -> None:
+        """Called by the auth monitor after a successful rotation.
+
+        Reloads ``session.json`` from disk (the monitor's subprocess
+        wrote the fresh tokens there) and nudges the streamer bridge
+        to restart its Schwab WebSocket with the new access token.
+        Subscriptions are preserved through the refcount table; the
+        bridge will resubscribe the aggregate symbol set on reconnect.
+        """
+        # Deferred import to avoid an import cycle with cli.py.
+        from schwab_cli.session import load as load_session
+
+        new_session = load_session()
+        if new_session is None:
+            self._logbook.warning(
+                "rotation.reload_missing_session",
+            )
+            return
+        # Mutate the client's session in place so any in-flight REST
+        # calls use the fresh token too. SchwabClient exposes it via
+        # the `session` property but reassignment happens through its
+        # private attr.
+        self._client._session = new_session  # noqa: SLF001
+        self._logbook.info("rotation.session_reloaded")
+
+        # If the streamer is currently connected, reconnect it with
+        # the new access token. The bridge preserves the active
+        # subscription set via the refcount table, so subscribers'
+        # queues keep flowing data after the brief reconnect gap.
+        if self._bridge.streamer_state() == "connected":
+            try:
+                await self._bridge.reconnect_after_rotation()
+            except Exception as e:
+                self._logbook.error(
+                    "rotation.reconnect_failed",
+                    error=f"{type(e).__name__}: {e}",
+                )
 
     def _admin_auth_ok(self, request) -> bool:
         if self._admin_token is None:

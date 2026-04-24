@@ -458,6 +458,52 @@ def mcp_restart(
     )
 
 
+@mcp_app.command(
+    "install-service",
+    help=(
+        "Install a macOS launchd LaunchAgent so the SSE daemon "
+        "starts on login and restarts on exit."
+    ),
+)
+def mcp_install_service(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(7234, "--port"),
+    log_file: str = typer.Option(
+        None, "--log-file",
+        help="Captures stderr+stdout. Default: ~/Library/Logs/schwab_cli-mcp.log",
+    ),
+    admin_token: str = typer.Option(None, "--admin-token"),
+    plist_path: str = typer.Option(None, "--plist-path"),
+    yes: bool = typer.Option(False, "--yes"),
+) -> None:
+    mcp_cmd.run_install_service(
+        host=host, port=port, log_file=log_file,
+        admin_token=admin_token, plist_path=plist_path, yes=yes,
+    )
+
+
+@mcp_app.command("start-service", help="launchctl load the installed plist.")
+def mcp_start_service(
+    plist_path: str = typer.Option(None, "--plist-path"),
+) -> None:
+    mcp_cmd.run_start_service(plist_path=plist_path)
+
+
+@mcp_app.command("stop-service", help="launchctl unload — stops without auto-restart.")
+def mcp_stop_service(
+    plist_path: str = typer.Option(None, "--plist-path"),
+) -> None:
+    mcp_cmd.run_stop_service(plist_path=plist_path)
+
+
+@mcp_app.command("uninstall-service", help="Unload and remove the launchd plist.")
+def mcp_uninstall_service(
+    plist_path: str = typer.Option(None, "--plist-path"),
+    yes: bool = typer.Option(False, "--yes"),
+) -> None:
+    mcp_cmd.run_uninstall_service(plist_path=plist_path, yes=yes)
+
+
 @mcp_app.command("install", help="Register this MCP server in ~/.claude/settings.json.")
 def mcp_install(
     stdio: bool = typer.Option(

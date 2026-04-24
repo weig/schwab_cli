@@ -81,6 +81,14 @@ def test_doc_flag_on_stream_shows_stream_page():
     assert "--fields" in result.output
 
 
+def test_notify_commands_render_help_without_error():
+    result = runner.invoke(app, ["notify", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "setup" in result.output
+    assert "list" in result.output
+    assert "test" in result.output
+
+
 def test_doc_flag_on_auth_shows_auth_page():
     result = runner.invoke(app, ["auth", "--doc"])
     assert result.exit_code == 0, result.output

@@ -40,10 +40,13 @@ class StreamerBridge:
         client: SchwabClient,
         logbook: LogBook,
         manager: SubscriptionManager,
+        *,
+        notifier=None,
     ) -> None:
         self._client = client
         self._logbook = logbook
         self._manager = manager
+        self._notifier = notifier
         self._streamer: Streamer | None = None
         self._reader_task: asyncio.Task | None = None
         self._queues: dict[tuple[str, str], asyncio.Queue] = {}
@@ -163,6 +166,31 @@ class StreamerBridge:
                     service=svc, symbols=syms, error=str(e),
                 )
 
+    # ---- reconnect on token rotation ----------------------------------
+
+    async def reconnect_after_rotation(self) -> None:
+        """Close the current Schwab streamer and re-subscribe every
+        active symbol against a freshly-refreshed access token.
+
+        Called by the auth monitor's rotation-success hook. Existing
+        subscriber queues are preserved — they continue receiving
+        data once the new streamer connection comes back up.
+        """
+        async with self._lock:
+            active = self._manager.active_symbols()
+            await self._close_streamer()
+            if not active:
+                # Nothing to resubscribe; the next add_subscription
+                # call will reopen normally.
+                return
+            await self._ensure_connected()
+            # Send SUBS for everything still in the refcount table.
+            await self._schwab_subscribe(active)
+            self._logbook.info(
+                "streamer.resubscribed_after_rotation",
+                symbol_count=len(active),
+            )
+
     # ---- connection lifecycle -----------------------------------------
 
     async def _ensure_connected(self) -> None:
@@ -224,6 +252,14 @@ class StreamerBridge:
             raise
         except Exception as e:
             self._logbook.error("streamer.reader_error", error=str(e))
+            if self._notifier is not None:
+                try:
+                    self._notifier.emit(
+                        "streamer.crash",
+                        error=f"{type(e).__name__}: {e}",
+                    )
+                except Exception:
+                    pass
 
     def _dispatch(
         self, service: str, symbol: str, update: dict[str, Any]

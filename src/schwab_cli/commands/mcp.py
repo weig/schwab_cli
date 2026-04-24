@@ -372,6 +372,157 @@ def _short(v: Any) -> str:
 # ---- mcp install ------------------------------------------------------
 
 
+def run_install_service(
+    *, host: str, port: int, log_file: str | None,
+    admin_token: str | None, plist_path: str | None, yes: bool,
+) -> None:
+    """Install the launchd LaunchAgent plist for the SSE daemon.
+
+    After writing, runs ``launchctl load`` to start immediately and
+    register for start-at-login. User must have GUI access because
+    the daemon talks to Schwab's OAuth flow on rotation.
+    """
+    import shutil
+    import subprocess
+    from schwab_cli.mcp_server.launchd import (
+        DEFAULT_PLIST_PATH,
+        LaunchdPlistSpec,
+        write_plist,
+    )
+
+    # Resolve the absolute path to schwab_cli so launchd doesn't
+    # depend on $PATH at login time.
+    binary = shutil.which("schwab_cli")
+    if not binary:
+        typer.secho(
+            "schwab_cli not found on PATH; install it with "
+            "`uv tool install --from . schwab_cli` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    target = (
+        Path(plist_path).expanduser() if plist_path else DEFAULT_PLIST_PATH
+    )
+    spec = LaunchdPlistSpec(
+        binary_path=binary,
+        host=host,
+        port=port,
+        log_file=log_file,
+        admin_token=admin_token,
+    )
+    typer.echo("Proposed LaunchAgent:")
+    typer.echo(f"  Label:     com.schwab-cli.mcp")
+    typer.echo(f"  Binary:    {binary}")
+    typer.echo(f"  Bind:      {host}:{port}")
+    typer.echo(f"  Plist:     {target}")
+    typer.echo(f"  KeepAlive: true  (exits → auto-restart)")
+    if not yes:
+        if not typer.confirm("Install and load now?", default=True):
+            typer.echo("aborted")
+            raise typer.Exit(code=0)
+
+    write_plist(spec, target)
+    # `launchctl load` is the canonical way to enable an Agent plist.
+    # Success is quiet; failure surfaces on stderr with a non-zero
+    # exit code that we propagate.
+    result = subprocess.run(
+        ["launchctl", "load", "-w", str(target)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        typer.secho(
+            f"launchctl load failed: {result.stderr.strip() or result.stdout.strip()}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"installed + loaded: {target}")
+    typer.echo(
+        "Daemon is now running and will restart on exit. "
+        "Use `schwab_cli mcp status` to verify, "
+        "`schwab_cli mcp uninstall-service` to remove."
+    )
+
+
+def run_start_service(*, plist_path: str | None) -> None:
+    import subprocess
+    from schwab_cli.mcp_server.launchd import DEFAULT_PLIST_PATH
+
+    target = (
+        Path(plist_path).expanduser() if plist_path else DEFAULT_PLIST_PATH
+    )
+    if not target.exists():
+        typer.secho(
+            f"{target} not found. Run `schwab_cli mcp install-service` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    result = subprocess.run(
+        ["launchctl", "load", "-w", str(target)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        # "service already loaded" is not a failure we should escalate.
+        if "already loaded" in err.lower():
+            typer.echo(f"already loaded: {target}")
+            return
+        typer.secho(f"launchctl load failed: {err}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"loaded: {target}")
+
+
+def run_stop_service(*, plist_path: str | None) -> None:
+    import subprocess
+    from schwab_cli.mcp_server.launchd import DEFAULT_PLIST_PATH
+
+    target = (
+        Path(plist_path).expanduser() if plist_path else DEFAULT_PLIST_PATH
+    )
+    if not target.exists():
+        typer.secho(
+            f"{target} not found (nothing to stop).",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(code=0)
+    result = subprocess.run(
+        ["launchctl", "unload", "-w", str(target)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        typer.secho(f"launchctl unload failed: {err}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"unloaded: {target}")
+
+
+def run_uninstall_service(*, plist_path: str | None, yes: bool) -> None:
+    import subprocess
+    from schwab_cli.mcp_server.launchd import DEFAULT_PLIST_PATH
+
+    target = (
+        Path(plist_path).expanduser() if plist_path else DEFAULT_PLIST_PATH
+    )
+    if not target.exists():
+        typer.echo(f"{target} not found — nothing to uninstall.")
+        return
+    if not yes:
+        if not typer.confirm(
+            f"Unload and remove {target}?", default=True,
+        ):
+            typer.echo("aborted")
+            raise typer.Exit(code=0)
+    # Best-effort unload (might not be loaded if user already ran stop).
+    subprocess.run(
+        ["launchctl", "unload", "-w", str(target)],
+        capture_output=True, text=True,
+    )
+    target.unlink(missing_ok=True)
+    typer.echo(f"removed: {target}")
+
+
 def run_install(
     *, stdio: bool, url: str, token: str | None,
     settings: str | None, yes: bool, force: bool,

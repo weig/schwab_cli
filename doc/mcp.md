@@ -14,9 +14,12 @@ Desktop, custom tools) can call Schwab operations as tools.
 | Structured JSONL logbook (stderr + file) with session / subscribe / unsubscribe / streamer events | ✅ shipped |
 | `mcp status` / `mcp log` / `mcp logout` / `mcp restart` / `mcp install` | ✅ shipped |
 | `schwab_cli stream` with auto-routing (MCP when daemon up, else direct) | ✅ shipped |
+| Proactive browser auto-login at 1h expiry threshold | ✅ shipped |
+| Telegram notifications for auth / streamer lifecycle events | ✅ shipped |
+| launchd LaunchAgent install + start/stop/uninstall subcommands | ✅ shipped |
 | `stream_option_quote` tool | 🚧 next |
-| Proactive browser auto-login at 1h expiry threshold | 🚧 next |
 | `reauth` tool | 🚧 next |
+| Slack notification channel | 🚧 Phase 2b |
 
 ## Usage
 
@@ -176,6 +179,71 @@ schwab_cli mcp log -f --json | jq '.'           # raw for jq pipelines
 
 Default log path: `~/.config/schwab_cli/mcp.log`. Append-mode, no
 rotation in MVP — truncate manually if it grows large.
+
+## Running as a macOS service (launchd)
+
+For a set-and-forget daemon that starts on login and auto-restarts
+on exit:
+
+```bash
+# Install + start:
+schwab_cli mcp install-service
+
+# Verify:
+schwab_cli mcp status
+
+# Stop without uninstalling (auto-restart pauses until next start):
+schwab_cli mcp stop-service
+
+# Fully remove the service:
+schwab_cli mcp uninstall-service
+```
+
+The installed plist lives at
+`~/Library/LaunchAgents/com.schwab-cli.mcp.plist` and uses
+`KeepAlive=true` so any exit triggers a relaunch — which makes
+`schwab_cli mcp restart` a no-op apart from calling `mcp logout`;
+launchd takes it from there.
+
+**Why LaunchAgent, not LaunchDaemon**: Agents run under your user,
+so they can read `~/.config/schwab_cli/session.json` natively.
+Daemons would need root + user-switching gymnastics.
+
+## Proactive auto-login
+
+With the daemon running as a service (or in SSE mode generally), a
+background task monitors the refresh-token expiry and proactively
+rotates the 7-day token via `schwab_cli auth --force` at the 1h
+threshold. Headless Chromium + saved credentials make it silent
+in the common case.
+
+- Default threshold: **1h** before `refresh_token_expires_at`.
+- Anti-thrash: at most **one attempt per hour** on repeated
+  failures.
+- At **15m remaining**, an `auth.refresh_expiring` warning fires
+  if rotation still hasn't succeeded — shown via
+  `notifications/message` to all connected MCP sessions and
+  pushed to any subscribed notification channels (see
+  `doc/notify.md`).
+- On success: bridge reconnects the Schwab streamer with the
+  fresh access token; active subscriptions resume automatically.
+- On failure: `auth.auto_login.failed` notification with the
+  subprocess stderr tail so you know what to fix.
+
+Opt out with a future `--no-auto-login` flag (the code already
+scaffolds it); for now the monitor runs whenever the daemon is
+in SSE mode.
+
+## Notifications
+
+Configure Telegram to receive alerts on auth / streamer events:
+
+```bash
+schwab_cli notify setup --channel telegram
+schwab_cli notify test  --channel telegram
+```
+
+Details in [`doc/notify.md`](notify.md).
 
 ## Code-update workflow
 
