@@ -57,3 +57,23 @@ def test_get_quotes_unknown_symbol_passthrough():
 def test_get_quotes_empty_list_noop():
     result = get_quotes(_client(), [])
     assert result == {}
+
+
+@respx.mock
+def test_get_quotes_with_fields():
+    route = respx.get("https://api.schwabapi.com/marketdata/v1/quotes").mock(
+        return_value=httpx.Response(200, json={"AAPL": {"symbol": "AAPL"}}),
+    )
+    get_quotes(_client(), ["AAPL"], fields="all")
+    params = route.calls.last.request.url.params
+    assert params["symbols"] == "AAPL"
+    assert params["fields"] == "all"
+
+
+@respx.mock
+def test_get_quotes_no_fields_omits_param():
+    route = respx.get("https://api.schwabapi.com/marketdata/v1/quotes").mock(
+        return_value=httpx.Response(200, json={"AAPL": {"symbol": "AAPL"}}),
+    )
+    get_quotes(_client(), ["AAPL"])
+    assert "fields" not in route.calls.last.request.url.params
