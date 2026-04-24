@@ -46,11 +46,20 @@ def run(
     port: int,
     log_file: str | None,
     no_log_file: bool,
+    no_auto_login: bool = False,
 ) -> None:
     """Entry point from :mod:`schwab_cli.cli` for the bare `mcp` call.
 
     In stdio mode: runs until stdin EOF. In SSE mode: runs until
     SIGINT or the admin shutdown endpoint is called.
+
+    Startup sequence (before the server runs):
+
+    1. Config + session present on disk.
+    2. Refresh token still valid OR ``--no-auto-login`` absent AND
+       startup auto-login (browser subprocess) succeeds.
+    3. Logbook + notifier built so auto-login events have a
+       destination.
     """
     cfg = config_module.load()
     if cfg is None:
@@ -66,19 +75,48 @@ def run(
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=1)
-    now = int(time.time())
-    if session.refresh_token_expires_at <= now:
-        typer.secho(
-            "Refresh token expired. Run `schwab_cli auth --force` to "
-            "re-authenticate, then restart the MCP server.",
-            fg=typer.colors.RED, err=True,
-        )
-        raise typer.Exit(code=1)
 
+    # Logbook + notifier built here (before the refresh-expiry check)
+    # so the startup auto-login path has both available. Passing the
+    # notifier into the server afterwards avoids double-loading
+    # notification.json.
     resolved_log_file = _resolve_log_file(log_file, no_log_file)
     logbook = LogBook(log_file=resolved_log_file)
+    from schwab_cli.notify import Notifier
+    notifier = Notifier.from_file(logbook=logbook)
+
+    now = int(time.time())
+    if session.refresh_token_expires_at <= now:
+        if no_auto_login:
+            typer.secho(
+                "Refresh token expired and --no-auto-login is set. "
+                "Run `schwab_cli auth --force` to re-authenticate, "
+                "then restart the MCP server.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+        logbook.warning(
+            "daemon.startup_refresh_expired",
+            attempting_autologin=True,
+        )
+        fresh = _attempt_startup_autologin(logbook, notifier)
+        if fresh is None:
+            typer.secho(
+                "Startup auto-login failed. Check "
+                "~/.config/schwab_cli/mcp.log for details, then run "
+                "`schwab_cli auth --force` manually before restarting.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+        session = fresh
+        logbook.info("daemon.startup_refresh_recovered")
+
     client = SchwabClient(cfg, session)
-    server = SchwabMcpServer(client, logbook)
+    server = SchwabMcpServer(
+        client, logbook,
+        notifier=notifier,
+        auth_monitor_enabled=not no_auto_login,
+    )
 
     logbook.info(
         "daemon.start",
@@ -97,6 +135,40 @@ def run(
     except Exception as e:
         logbook.error("daemon.crash", error=f"{type(e).__name__}: {e}")
         raise
+
+
+def _attempt_startup_autologin(
+    logbook,
+    notifier,
+    *,
+    monitor_cls=None,
+    session_loader=None,
+):
+    """One-shot rotation at daemon startup when the refresh token
+    is already dead. Returns the freshly-loaded Session on success,
+    ``None`` on failure.
+
+    Reuses ``AuthMonitor.run_once`` so the subprocess, env,
+    anti-thrash, and notification code is identical to the
+    steady-state rotation path. Runs synchronously via ``asyncio.run``
+    because we're still in the setup phase — the server event loop
+    hasn't started yet.
+
+    Accepts ``monitor_cls`` / ``session_loader`` overrides for tests
+    — the defaults import the real AuthMonitor and session loader.
+    """
+    if monitor_cls is None:
+        from schwab_cli.mcp_server.auth_monitor import AuthMonitor
+        monitor_cls = AuthMonitor
+    if session_loader is None:
+        from schwab_cli.session import load as load_session
+        session_loader = load_session
+
+    monitor = monitor_cls(logbook, notifier)
+    result = asyncio.run(monitor.run_once(reason="startup"))
+    if not result.ok:
+        return None
+    return session_loader()
 
 
 def _resolve_log_file(log_file: str | None, no_log_file: bool) -> Path | None:

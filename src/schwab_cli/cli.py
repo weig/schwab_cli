@@ -391,6 +391,15 @@ def mcp_root(
         False, "--no-log-file",
         help="Disable the disk log; events still go to stderr.",
     ),
+    no_auto_login: bool = typer.Option(
+        False, "--no-auto-login",
+        help=(
+            "Disable browser auto-login. If the refresh token has "
+            "expired at startup, exit 1 instead of spawning "
+            "`schwab_cli auth --force`. Also disables the proactive "
+            "rotation task that runs at the 1h expiry threshold."
+        ),
+    ),
     doc: bool = doc_option(),
 ) -> None:
     """When no subcommand, run the daemon."""
@@ -399,6 +408,7 @@ def mcp_root(
     mcp_cmd.run(
         stdio=stdio, host=host, port=port,
         log_file=log_file, no_log_file=no_log_file,
+        no_auto_login=no_auto_login,
     )
 
 
