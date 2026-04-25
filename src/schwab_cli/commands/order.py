@@ -79,6 +79,15 @@ EXIT_NETWORK = 1
 EXIT_REJECTED = 3
 EXIT_POLICY_REJECTED = 4
 
+# Schwab-accepted ``orderType`` values (Trader API §placeOrder).
+_VALID_ORDER_TYPES: frozenset[str] = frozenset({
+    "MARKET", "LIMIT", "STOP", "STOP_LIMIT",
+    "TRAILING_STOP", "TRAILING_STOP_LIMIT",
+    "MARKET_ON_CLOSE", "LIMIT_ON_CLOSE",
+    "EXERCISE",
+    "NET_DEBIT", "NET_CREDIT", "NET_ZERO",
+})
+
 # Synthetic --status categories → list of Schwab status enums.
 STATUS_CATEGORIES: dict[str, tuple[str, ...]] = {
     "ACTIVE": (
@@ -707,6 +716,26 @@ def run_place(
     _validate_session_combo(
         session=spec.session, order_type=spec.order_type, duration=spec.duration,
     )
+
+    # Validate --type value: only Schwab-accepted orderType strings
+    # pass through. Catches the common mistake of passing a side word
+    # ("BUY"/"SELL") to --type before we hit the wire.
+    if spec.order_type not in _VALID_ORDER_TYPES:
+        typer.secho(
+            f"--type={spec.order_type!r} is not a valid order type. "
+            f"Allowed: {', '.join(sorted(_VALID_ORDER_TYPES))}.",
+            fg=typer.colors.RED, err=True,
+        )
+        if spec.order_type.upper() in {
+            "BUY", "SELL", "BUY_TO_OPEN", "BUY_TO_CLOSE",
+            "SELL_TO_OPEN", "SELL_TO_CLOSE", "SELL_SHORT",
+        }:
+            typer.secho(
+                "  hint: use --side for the buy/sell instruction "
+                "(e.g. `--side SELL`); --type is the order type.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        raise typer.Exit(code=EXIT_USAGE)
 
     # Validate price requirement for non-MARKET orders.
     if spec.order_type in ("LIMIT", "NET_DEBIT", "NET_CREDIT") and spec.price is None:

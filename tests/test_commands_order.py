@@ -1055,3 +1055,39 @@ def test_place_with_yes_skips_quote_fetch(monkeypatch, tmp_path):
     # And the panel must not show the Underlying section.
     assert "Underlying" not in result.stderr
     assert len(place_calls) == 1
+
+
+# ---- --type value validation --------------------------------------------
+
+
+def test_type_rejects_side_word_with_helpful_hint(monkeypatch, tmp_path):
+    """`--type SELL` is the user mixing --type with --side. Catch it
+    before we hit Schwab."""
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "AXP", "--account", "5678",
+            "--type", "SELL", "--price", "312",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 2
+    assert "not a valid order type" in result.stderr
+    assert "use --side" in result.stderr
+
+
+def test_type_rejects_garbage_value(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "AXP", "--account", "5678",
+            "--type", "BOGUS", "--price", "312", "--side", "BUY",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 2
+    assert "not a valid order type" in result.stderr
