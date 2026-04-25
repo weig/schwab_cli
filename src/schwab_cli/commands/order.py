@@ -56,6 +56,7 @@ from schwab_cli.order_policy import (
 from schwab_cli.order_policy.decision import Decision
 from schwab_cli.order_policy.fields import OrderContext
 from schwab_cli.order_policy.loader import select_profile_name
+from schwab_cli.order_policy.sources import referenced_fields, required_sources
 from schwab_cli.order_ticket import (
     ParsedLeg,
     ParsedTicket,
@@ -607,7 +608,9 @@ def run_place(
         raise typer.Exit(code=EXIT_USAGE)
 
     # Always preview first to fetch BP / commission for the panel.
-    preview_summary, preview_unavailable = _fetch_preview(client, acct.hash_value, body)
+    preview_summary, preview_unavailable, _raw_preview = _fetch_preview(
+        client, acct.hash_value, body,
+    )
     _audit(
         sub,
         "preview_unavailable" if preview_unavailable else "preview_ok",
@@ -634,12 +637,19 @@ def run_place(
         )
         raise typer.Exit(code=EXIT_USAGE)
 
-    decision = policy_evaluate(
-        prof,
-        OrderContext(
-            body=body, account_number=acct.account_number, today=date.today(),
-        ),
+    # Build the order context. Phase 2b lazily fetches chain / quote /
+    # account / dividends only when policies in this profile reference
+    # fields that need them. preview_data is always available since
+    # we already ran previewOrder above.
+    order_ctx = _build_policy_context(
+        client=client,
+        body=body,
+        account=acct,
+        prof=prof,
+        preview_raw=_raw_preview if not preview_unavailable else None,
+        sub=sub,
     )
+    decision = policy_evaluate(prof, order_ctx)
     _audit(
         sub,
         "policy_evaluated" if decision.approved else "policy_rejected",
@@ -990,8 +1000,12 @@ def _is_definitive_rejection(e: BaseException) -> bool:
 
 def _fetch_preview(
     client: SchwabClient, account_hash: str, body: dict,
-) -> tuple[PreviewSummary, bool]:
-    """Call previewOrder; return (summary, unavailable_flag).
+) -> tuple[PreviewSummary, bool, dict | None]:
+    """Call previewOrder; return ``(summary, unavailable_flag, raw)``.
+
+    The raw response is also returned so the policy engine's
+    field provider can read fields like ``buyingPowerEffect`` /
+    ``commission`` directly without re-summarising.
 
     If Schwab's preview endpoint 4xx/5xx's, fall back to an empty
     summary with the unavailable flag set so the panel can render
@@ -999,14 +1013,138 @@ def _fetch_preview(
     """
     try:
         raw = preview_order(client, account_hash, body)
-        return summarise_preview(raw), False
+        return summarise_preview(raw), False, raw
     except ApiError as e:
         msg = str(e)
         if msg.startswith(("404", "405", "501")):
-            return summarise_preview(None), True
+            return summarise_preview(None), True, None
         # Other errors (500, network, auth) propagate so we don't silently
         # send an order without a true validation pass.
         raise
+
+
+def _build_policy_context(
+    *,
+    client: SchwabClient,
+    body: dict,
+    account: AccountIds,
+    prof,
+    preview_raw: dict | None,
+    sub: str,
+) -> OrderContext:
+    """Assemble an :class:`OrderContext` for the policy engine.
+
+    Walks the active profile's enabled policies, computes the minimum
+    set of data sources actually needed, and fetches each. Failures on
+    optional fetches degrade to ``UnevaluatableField`` at policy-eval
+    time; we don't propagate them out of here so a network glitch on
+    a chain fetch can't take the whole place down.
+    """
+    needed = required_sources(referenced_fields(prof))
+
+    chain_data: dict | None = None
+    quote_data: dict | None = None
+    account_data: dict | None = None
+    dividend_data: dict | None = None
+
+    cats_underlying = _underlying_from_body(body)
+    is_option = _is_option_order(body)
+
+    if "chain" in needed:
+        try:
+            if is_option and cats_underlying:
+                # Wide enough that the matched contract is in the response.
+                chain_data = _fetch_chain_safe(client, cats_underlying)
+            elif cats_underlying:
+                quote_data = _fetch_quote_safe(client, cats_underlying)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            _audit(sub, "policy_chain_fetch_failed",
+                   account=account.account_number,
+                   error=f"{type(e).__name__}: {e}")
+    if "account" in needed:
+        try:
+            account_data = _fetch_account_safe(client, account.account_number)
+        except Exception as e:  # noqa: BLE001
+            _audit(sub, "policy_account_fetch_failed",
+                   account=account.account_number,
+                   error=f"{type(e).__name__}: {e}")
+    if "dividends" in needed and cats_underlying:
+        try:
+            dividend_data = _fetch_dividend_safe(client, cats_underlying)
+        except Exception as e:  # noqa: BLE001
+            _audit(sub, "policy_dividend_fetch_failed",
+                   account=account.account_number,
+                   error=f"{type(e).__name__}: {e}")
+
+    return OrderContext(
+        body=body,
+        account_number=account.account_number,
+        today=date.today(),
+        chain_data=chain_data,
+        quote_data=quote_data,
+        account_data=account_data,
+        preview_data=preview_raw,
+        dividend_data=dividend_data,
+    )
+
+
+def _underlying_from_body(body: dict) -> str | None:
+    legs = body.get("orderLegCollection") or []
+    if not legs:
+        return None
+    inst = (legs[0].get("instrument") or {})
+    sym = inst.get("symbol", "")
+    if (inst.get("assetType") or "").upper() == "OPTION":
+        if len(sym) >= 21:
+            return sym[:6].strip().upper() or None
+        return sym.upper() or None
+    return (sym or "").upper() or None
+
+
+def _is_option_order(body: dict) -> bool:
+    legs = body.get("orderLegCollection") or []
+    if not legs:
+        return False
+    return (
+        ((legs[0].get("instrument") or {}).get("assetType") or "").upper()
+        == "OPTION"
+    )
+
+
+def _fetch_chain_safe(client: SchwabClient, symbol: str) -> dict:
+    from schwab_cli.api.chains import get_chain
+    return get_chain(client, symbol, contract_type="ALL", strike_count=20)
+
+
+def _fetch_quote_safe(client: SchwabClient, symbol: str) -> dict:
+    from schwab_cli.api.quotes import get_quotes
+    return get_quotes(client, [symbol])
+
+
+def _fetch_account_safe(client: SchwabClient, account_number: str) -> dict:
+    from schwab_cli.api.accounts import get_account
+    return get_account(client, account_number)
+
+
+def _fetch_dividend_safe(client: SchwabClient, symbol: str) -> dict:
+    """Fetch the fundamental block (carries ``nextDividendDate``)
+    via the quotes endpoint with ``fields=all``."""
+    from schwab_cli.api.quotes import get_quotes
+    raw = get_quotes(client, [symbol], fields="all")
+    if not isinstance(raw, dict):
+        return {}
+    # Re-shape into the {symbol: {nextDividendDate: ...}} form the
+    # field provider expects. Schwab nests the dividend date inside
+    # the per-symbol "fundamental" block.
+    out: dict[str, dict] = {}
+    for sym, payload in raw.items():
+        if not isinstance(payload, dict):
+            continue
+        fund = payload.get("fundamental") or {}
+        next_div = fund.get("nextDividendDate")
+        if next_div:
+            out[sym] = {"nextDividendDate": next_div}
+    return out
 
 
 # ---- run_get -------------------------------------------------------------
