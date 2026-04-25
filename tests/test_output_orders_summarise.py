@@ -206,9 +206,17 @@ def test_render_confirmation_computes_bp_effect_deltas():
             "optionBuyingPower": 26337.05,
         },
     )
-    # The naked short ties up margin: projected - current is the real delta.
-    assert "Buying Power Effect (Stock):    -$25,400.00" in out
-    assert "Buying Power Effect (Option):   -$12,700.00" in out
+    # Single-line per BP bucket: current → effect → result.
+    # Naked short ties up margin: effect = projected - current.
+    assert "Buying Power (Stock)" in out
+    assert "$52,674.10" in out and "-$25,400.00" in out and "$27,274.10" in out
+    assert "Buying Power (Option)" in out
+    assert "$26,337.05" in out and "-$12,700.00" in out and "$13,637.05" in out
+    # Each row should contain two arrow separators.
+    stock_line = next(ln for ln in out.splitlines() if "Buying Power (Stock)" in ln)
+    option_line = next(ln for ln in out.splitlines() if "Buying Power (Option)" in ln)
+    assert stock_line.count("→") == 2
+    assert option_line.count("→") == 2
 
 
 def test_render_confirmation_falls_back_to_n_a_without_balances():
@@ -233,8 +241,14 @@ def test_render_confirmation_falls_back_to_n_a_without_balances():
         preview=preview,
         current_balances=None,
     )
-    assert "Buying Power Effect (Stock):    n/a" in out
-    assert "Buying Power Effect (Option):   n/a" in out
+    # No current balances: current/effect cells fall back to "n/a",
+    # but the result column still shows projected values from preview.
+    stock_line = next(ln for ln in out.splitlines() if "Buying Power (Stock)" in ln)
+    option_line = next(ln for ln in out.splitlines() if "Buying Power (Option)" in ln)
+    assert stock_line.count("n/a") == 2  # current + effect cells
+    assert "$14,213.65" in stock_line     # result still rendered
+    assert option_line.count("n/a") == 2
+    assert "$7,106.83" in option_line
 
 
 # ---- helpers ------------------------------------------------------------

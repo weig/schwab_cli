@@ -378,25 +378,26 @@ def render_confirmation(
     if preview_unavailable:
         lines.append(_row("Est. Commission", "unavailable (preview endpoint not enabled)"))
         lines.append(_row("Est. Fees", "unavailable"))
-        lines.append(_row("Buying Power Effect (Stock)", "unavailable"))
-        lines.append(_row("Buying Power Effect (Option)", "unavailable"))
-        lines.append(_row("Result Buying Power (Stock)", "unavailable"))
-        lines.append(_row("Result Buying Power (Option)", "unavailable"))
+        lines.append(_row("Buying Power (Stock)", "unavailable"))
+        lines.append(_row("Buying Power (Option)", "unavailable"))
     else:
-        # Effect = projected (after order) - current. Schwab's preview
-        # returns only the projected side, so we pair it with a fresh
-        # account fetch upstream. When current_balances is missing
-        # (network failure, --yes path), fall back to "n/a".
+        # Schwab's preview returns only the post-order values; we pair
+        # them with a current-balance fetch upstream and render each BP
+        # bucket as ``current → effect → result`` on one column-aligned
+        # line. Missing balances (e.g. ``--yes`` skip path) render as
+        # "n/a" cells so columns stay aligned.
         cur_stock = (current_balances or {}).get("stockBuyingPower") if current_balances else None
         cur_option = (current_balances or {}).get("optionBuyingPower") if current_balances else None
-        eff_stock = _delta(preview.bp_after_stock, cur_stock)
-        eff_option = _delta(preview.bp_after_option, cur_option)
         lines.append(_row("Est. Commission", _fmt_money(preview.commission, unlimited='n/a')))
         lines.append(_row("Est. Fees", _fmt_money(preview.fees, unlimited='n/a')))
-        lines.append(_row("Buying Power Effect (Stock)", _fmt_money(eff_stock, plus=True, unlimited='n/a')))
-        lines.append(_row("Buying Power Effect (Option)", _fmt_money(eff_option, plus=True, unlimited='n/a')))
-        lines.append(_row("Result Buying Power (Stock)", _fmt_money(preview.bp_after_stock, unlimited='n/a')))
-        lines.append(_row("Result Buying Power (Option)", _fmt_money(preview.bp_after_option, unlimited='n/a')))
+        lines.append(_row(
+            "Buying Power (Stock)",
+            _bp_triple(cur_stock, preview.bp_after_stock),
+        ))
+        lines.append(_row(
+            "Buying Power (Option)",
+            _bp_triple(cur_option, preview.bp_after_option),
+        ))
 
     # Validation
     lines.append("")
@@ -451,6 +452,27 @@ def _format_leg_line(leg: dict) -> str:
     if asset == "OPTION":
         return f"  {sign}{qty}  {short_instr}  {sym}"
     return f"  {sign}{qty}  {short_instr}  {sym}  ({asset})"
+
+
+_BP_COL_WIDTH = 14
+
+
+def _bp_triple(current: float | None, after: float | None) -> str:
+    """Format a ``current → effect → result`` row, column-aligned.
+
+    Each cell is right-padded to ``_BP_COL_WIDTH`` so the ``→`` arrows
+    line up across the Stock and Option rows. Missing values render as
+    ``n/a`` rather than disappearing — keeps the columns honest.
+    """
+    effect = _delta(after, current)
+    cur_s = _fmt_money(current, unlimited="n/a")
+    eff_s = _fmt_money(effect, plus=True, unlimited="n/a")
+    res_s = _fmt_money(after, unlimited="n/a")
+    return (
+        f"{cur_s.rjust(_BP_COL_WIDTH)}  →  "
+        f"{eff_s.rjust(_BP_COL_WIDTH)}  →  "
+        f"{res_s.rjust(_BP_COL_WIDTH)}"
+    )
 
 
 def _delta(after: float | None, before: float | None) -> float | None:

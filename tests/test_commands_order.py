@@ -933,7 +933,7 @@ def test_preview_renders_panel_when_no_profile_resolves(monkeypatch, tmp_path):
     assert "no policy profile resolved" in result.stderr or \
            "no profile loaded" in result.stderr
     # Should still surface BP impact (Schwab preview ran).
-    assert "Buying Power Effect" in result.stderr
+    assert "Buying Power (Stock)" in result.stderr
 
 
 def test_real_place_still_errors_when_no_profile_resolves(monkeypatch, tmp_path):
