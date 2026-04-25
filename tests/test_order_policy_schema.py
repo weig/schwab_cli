@@ -196,19 +196,47 @@ def test_match_cannot_mix_field_and_any_of():
         }, name="x")
 
 
-def test_override_confirmation_validation():
-    with pytest.raises(SchemaError, match="override_confirmation"):
+def test_phase_2f_dropped_fields_rejected():
+    """Phase 2f dropped per-profile override gating + inheritance."""
+    for dropped, snippet in [
+        ("inherit", "base"),
+        ("overrides", {"default_action": "allow"}),
+        ("allow_override", True),
+        ("override_confirmation", "cli"),
+        ("override_max_per_day", 3),
+    ]:
+        with pytest.raises(SchemaError, match=f"unknown profile field {dropped!r}"):
+            parse_profile({
+                "default_action": "allow",
+                dropped: snippet,
+                "policies": [],
+            }, name="x")
+
+
+def test_unknown_top_level_key_rejected():
+    with pytest.raises(SchemaError, match="unknown profile field 'spurious'"):
         parse_profile({
-            "default_action": "allow",
-            "override_confirmation": "telegram",  # not in allowed list
+            "default_action": "deny",
+            "spurious": True,
             "policies": [],
         }, name="x")
 
 
-def test_override_max_per_day_validation():
-    with pytest.raises(SchemaError, match="override_max_per_day"):
+def test_unknown_policy_field_rejected():
+    with pytest.raises(SchemaError, match="unknown policy field"):
         parse_profile({
-            "default_action": "allow",
-            "override_max_per_day": -1,
-            "policies": [],
+            "default_action": "deny",
+            "policies": [{
+                "name": "p", "effect": "allow",
+                "spurious_policy_field": True,
+            }],
         }, name="x")
+
+
+def test_notify_on_override_kept():
+    p = parse_profile({
+        "default_action": "deny",
+        "notify_on_override": False,
+        "policies": [],
+    }, name="x")
+    assert p.notify_on_override is False

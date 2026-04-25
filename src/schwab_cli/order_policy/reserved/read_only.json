@@ -1,8 +1,0 @@
-{
-  "description": "Read-only profile — denies every place / preview, but allows cancel / get / list (which never hit the gate).",
-  "default_action": "deny",
-  "allow_override": false,
-  "override_confirmation": "deny",
-  "notify_on_override": true,
-  "policies": []
-}

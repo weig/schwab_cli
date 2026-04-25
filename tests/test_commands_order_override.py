@@ -1,16 +1,18 @@
-"""Phase 2e end-to-end tests — override flow.
+"""Phase 2e/2f end-to-end tests — override flow.
+
+After Phase 2f-1 the per-profile override gating, override-tier enum,
+and override_max_per_day cap are all gone. Every profile accepts an
+override via the single CLI ceremony.
 
 Coverage:
-- flag validation (mutex with --yes, both required, reason length)
-- profile-level deny
-- override_max_per_day cap
-- cli tier (typed OVERRIDE → yea → place)
-- telegram_notify_then_cli (notification fired)
-- telegram_inbound (CONFIRM_OVERRIDE matched / timed out)
-- audit row contents (override_invoked + override_reason / tier / count)
-- counter increment after place
+- flag validation (mutex with --yes / --dry-run, both required, length)
+- happy path: typed OVERRIDE → yea → place
+- abort when typed OVERRIDE not entered
+- audit row carries reason + tier="cli"
 
-All Schwab + Telegram calls mocked.
+Tier-specific tests (telegram_notify_then_cli, telegram_inbound) and
+the override_max_per_day cap test were dropped along with the schema
+fields.
 """
 
 from __future__ import annotations
@@ -64,8 +66,7 @@ def _write_profile(profiles_dir: Path, name: str, body: dict) -> None:
     (profiles_dir / f"{name}.json").write_text(json.dumps(body))
 
 
-def _patches(*, place_calls=None, telegram_send_log=None,
-             telegram_wait_result="CONFIRM_OVERRIDE"):
+def _patches(*, place_calls=None, telegram_send_log=None):
     pc = place_calls
     tg_log = telegram_send_log
 
@@ -81,10 +82,6 @@ def _patches(*, place_calls=None, telegram_send_log=None,
             tg_log.append({"chat_id": chat_id, "text": text})
         return (True, "ok")
 
-    def _wait(*, bot_token, chat_id, expected_text, timeout_seconds=300,
-              case_sensitive=True, allowed_user_ids=frozenset()):
-        return telegram_wait_result
-
     return [
         patch("schwab_cli.commands.order.SchwabClient.resolve_account",
               return_value=_ACCT),
@@ -96,8 +93,6 @@ def _patches(*, place_calls=None, telegram_send_log=None,
               side_effect=_record_place),
         patch("schwab_cli.notify.telegram.send",
               side_effect=_send),
-        patch("schwab_cli.notify.telegram_poll.wait_for_text_reply",
-              side_effect=_wait),
     ]
 
 
@@ -107,8 +102,6 @@ def _exit(patches):
         p.__exit__(None, None, None)
 
 
-# Configure Telegram in the notify config so the override flow can
-# proceed (otherwise telegram_inbound exits early).
 def _enable_telegram(monkeypatch, tmp_path):
     cfg_dir = tmp_path / ".config" / "schwab_cli"
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -196,78 +189,15 @@ def test_override_with_dry_run_rejected(monkeypatch, tmp_path):
     assert "meaningless with --dry-run" in result.stderr
 
 
-# ---- profile gate / counter cap -----------------------------------------
+# ---- happy path ----------------------------------------------------------
 
 
-def test_override_blocked_when_profile_disallows(monkeypatch, tmp_path):
-    profiles = _prep(monkeypatch, tmp_path)
-    _write_profile(profiles, "default", {
-        "default_action": "deny",
-        "allow_override": False,
-        "override_confirmation": "deny",
-        "policies": [],
-    })
-    place_calls: list = []
-    patches = _patches(place_calls=place_calls)
-    _enter(patches)
-    try:
-        result = runner.invoke(app, [
-            "order", "place", "AAPL", "--account", "5678",
-            "--type", "LIMIT", "--price", "150", "--side", "BUY",
-            "--override", _REASON, "--override-confirm",
-        ])
-    finally:
-        _exit(patches)
-    assert result.exit_code == 2
-    assert place_calls == []
-    assert "not permitted by profile" in result.stderr
-
-
-def test_override_max_per_day_blocks_after_cap(monkeypatch, tmp_path):
-    profiles = _prep(monkeypatch, tmp_path)
-    _write_profile(profiles, "default", {
-        "default_action": "deny",
-        "override_confirmation": "cli",
-        "override_max_per_day": 1,
-        "policies": [],
-    })
-    # Pre-seed the counter file so we're already at the cap.
-    (tmp_path / "order_counters.json").write_text(json.dumps({
-        "date": "2026-04-25",
-        "counters": {
-            "daily_order_count_total": {},
-            "daily_order_count_per_ticker": {},
-            "minutely_buckets": {},
-            "replace_count_per_order": {},
-            "override_count_per_day": {"12345678": 1},
-        },
-    }))
-    place_calls: list = []
-    patches = _patches(place_calls=place_calls)
-    _enter(patches)
-    try:
-        result = runner.invoke(app, [
-            "order", "place", "AAPL", "--account", "5678",
-            "--type", "LIMIT", "--price", "150", "--side", "BUY",
-            "--override", _REASON, "--override-confirm",
-        ])
-    finally:
-        _exit(patches)
-    # Cap triggers either today (date matches) or after rotation
-    # (depends on timezone). Cleanest: just check no place fired.
-    assert place_calls == []
-
-
-# ---- cli tier happy path -------------------------------------------------
-
-
-def test_override_cli_tier_happy_path_typed_override_then_yea(
+def test_override_happy_path_typed_override_then_yea(
     monkeypatch, tmp_path,
 ):
     profiles = _prep(monkeypatch, tmp_path)
     _write_profile(profiles, "default", {
         "default_action": "deny",                       # would normally reject
-        "override_confirmation": "cli",
         "notify_on_override": False,
         "policies": [],
     })
@@ -288,13 +218,12 @@ def test_override_cli_tier_happy_path_typed_override_then_yea(
     assert len(place_calls) == 1
 
 
-def test_override_cli_tier_aborts_when_user_does_not_type_override(
+def test_override_aborts_when_user_does_not_type_override(
     monkeypatch, tmp_path,
 ):
     profiles = _prep(monkeypatch, tmp_path)
     _write_profile(profiles, "default", {
         "default_action": "deny",
-        "override_confirmation": "cli",
         "notify_on_override": False,
         "policies": [],
     })
@@ -315,17 +244,11 @@ def test_override_cli_tier_aborts_when_user_does_not_type_override(
     assert place_calls == []
 
 
-# ---- telegram_notify_then_cli tier --------------------------------------
-
-
-def test_override_telegram_notify_tier_fires_notification(
-    monkeypatch, tmp_path,
-):
+def test_override_notify_on_override_fires_telegram(monkeypatch, tmp_path):
     profiles = _prep(monkeypatch, tmp_path)
     _enable_telegram(monkeypatch, tmp_path)
     _write_profile(profiles, "default", {
         "default_action": "deny",
-        "override_confirmation": "telegram_notify_then_cli",
         "notify_on_override": True,
         "policies": [],
     })
@@ -345,78 +268,16 @@ def test_override_telegram_notify_tier_fires_notification(
         _exit(patches)
     assert result.exit_code == 0, (result.stdout, result.stderr)
     assert len(place_calls) == 1
-    # The notify fires once with the OVERRIDE INVOKED banner.
     assert any("OVERRIDE INVOKED" in m["text"] for m in tg_log)
 
 
-# ---- telegram_inbound tier ----------------------------------------------
+# ---- audit row ----------------------------------------------------------
 
 
-def test_override_telegram_inbound_tier_proceeds_when_confirmed(
-    monkeypatch, tmp_path,
-):
-    profiles = _prep(monkeypatch, tmp_path)
-    _enable_telegram(monkeypatch, tmp_path)
-    _write_profile(profiles, "default", {
-        "default_action": "deny",
-        "override_confirmation": "telegram_inbound",
-        "notify_on_override": False,
-        "policies": [],
-    })
-    place_calls: list = []
-    patches = _patches(
-        place_calls=place_calls, telegram_wait_result="CONFIRM_OVERRIDE",
-    )
-    _enter(patches)
-    try:
-        result = runner.invoke(
-            app,
-            ["order", "place", "AAPL", "--account", "5678",
-             "--type", "LIMIT", "--price", "150", "--side", "BUY",
-             "--override", _REASON, "--override-confirm"],
-            input="OVERRIDE\nyea\n",
-        )
-    finally:
-        _exit(patches)
-    assert result.exit_code == 0, (result.stdout, result.stderr)
-    assert len(place_calls) == 1
-
-
-def test_override_telegram_inbound_tier_aborts_on_timeout(
-    monkeypatch, tmp_path,
-):
-    profiles = _prep(monkeypatch, tmp_path)
-    _enable_telegram(monkeypatch, tmp_path)
-    _write_profile(profiles, "default", {
-        "default_action": "deny",
-        "override_confirmation": "telegram_inbound",
-        "notify_on_override": False,
-        "policies": [],
-    })
-    place_calls: list = []
-    patches = _patches(place_calls=place_calls, telegram_wait_result=None)
-    _enter(patches)
-    try:
-        result = runner.invoke(app, [
-            "order", "place", "AAPL", "--account", "5678",
-            "--type", "LIMIT", "--price", "150", "--side", "BUY",
-            "--override", _REASON, "--override-confirm",
-        ])
-    finally:
-        _exit(patches)
-    assert result.exit_code == 2
-    assert place_calls == []
-    assert "timed out" in result.stderr.lower()
-
-
-# ---- audit row contents -------------------------------------------------
-
-
-def test_override_audit_row_contains_reason_tier_count(monkeypatch, tmp_path):
+def test_override_audit_row_contains_reason_and_tier(monkeypatch, tmp_path):
     profiles = _prep(monkeypatch, tmp_path)
     _write_profile(profiles, "default", {
         "default_action": "deny",
-        "override_confirmation": "cli",
         "notify_on_override": False,
         "policies": [],
     })
@@ -438,19 +299,17 @@ def test_override_audit_row_contains_reason_tier_count(monkeypatch, tmp_path):
     invoked = next(r for r in rows if r["stage"] == "override_invoked")
     assert invoked["override_reason"] == _REASON
     assert invoked["override_tier"] == "cli"
-    assert invoked["override_count_today"] == 1
     # And the placed row carries an order_id (placement actually happened).
     placed = next(r for r in rows if r["stage"] == "placed")
     assert placed["order_id"] == "987654"
 
 
-def test_override_counter_incremented_after_successful_place(
-    monkeypatch, tmp_path,
-):
+def test_override_does_not_increment_override_counter(monkeypatch, tmp_path):
+    """Phase 2f-1 dropped record_override on the place path. Counter
+    file may not even exist after a successful override place."""
     profiles = _prep(monkeypatch, tmp_path)
     _write_profile(profiles, "default", {
         "default_action": "deny",
-        "override_confirmation": "cli",
         "notify_on_override": False,
         "policies": [],
     })
@@ -467,4 +326,7 @@ def test_override_counter_incremented_after_successful_place(
     finally:
         _exit(patches)
     state = json.loads((tmp_path / "order_counters.json").read_text())
-    assert state["counters"]["override_count_per_day"]["12345678"] == 1
+    # daily_order_count_total still bumps on place.
+    assert state["counters"]["daily_order_count_total"]["12345678"] == 1
+    # override counter is NOT bumped.
+    assert state["counters"].get("override_count_per_day", {}) == {}

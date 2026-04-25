@@ -1,4 +1,8 @@
-"""Loader tests — per-file profiles, inheritance, reserved fallback."""
+"""Loader tests — per-file profiles.
+
+Phase 2f drops inheritance + the bundled reserved-profile fallback.
+The loader is now: read JSON → parse → return.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ from schwab_cli.order_policy import (
     list_profiles,
     load_profile,
 )
-from schwab_cli.order_policy.loader import RESERVED_PROFILES, select_profile_name
+from schwab_cli.order_policy.loader import select_profile_name
 
 
 def _write(base, name, body):
@@ -29,48 +33,45 @@ def test_loads_simple_profile_from_disk(tmp_path):
     assert len(p.policies) == 1
 
 
-def test_inherit_chain_two_levels(tmp_path):
-    _write(tmp_path, "base", {
-        "default_action": "deny",
-        "policies": [{"name": "base_rule", "effect": "deny", "match": "*"}],
-    })
-    _write(tmp_path, "child", {
+def test_inherit_field_in_legacy_profile_is_rejected(tmp_path):
+    _write(tmp_path, "x", {
         "inherit": "base",
-        "overrides": {"default_action": "allow"},
-        "policies": [{"name": "child_rule", "effect": "allow", "match": "*"}],
+        "default_action": "allow",
     })
-    p = load_profile("child", base_dir=tmp_path)
-    assert p.default_action == "allow"
-    # Child policies are appended after parent's.
-    assert [pp.name for pp in p.policies] == ["base_rule", "child_rule"]
+    with pytest.raises(PolicyConfigError, match="inheritance was dropped"):
+        load_profile("x", base_dir=tmp_path)
 
 
-def test_inherit_cycle_detected(tmp_path):
-    _write(tmp_path, "a", {"inherit": "b", "default_action": "allow"})
-    _write(tmp_path, "b", {"inherit": "a", "default_action": "allow"})
-    with pytest.raises(PolicyConfigError, match="cycle"):
-        load_profile("a", base_dir=tmp_path)
-
-
-def test_reserved_profile_falls_back_to_bundled_when_no_user_file(tmp_path):
-    p = load_profile("emergency_stop", base_dir=tmp_path)
-    assert p.name == "emergency_stop"
-    assert p.default_action == "deny"
-    assert p.allow_override is False
-
-
-def test_user_file_overrides_bundled_reserved(tmp_path):
-    _write(tmp_path, "default", {
-        "description": "user-customised default",
+def test_legacy_override_fields_rejected_with_pointer(tmp_path):
+    _write(tmp_path, "x", {
         "default_action": "deny",
+        "allow_override": True,
         "policies": [],
     })
-    p = load_profile("default", base_dir=tmp_path)
-    assert "user-customised" in p.description
-    assert p.default_action == "deny"
+    with pytest.raises(PolicyConfigError, match="per-profile override gating"):
+        load_profile("x", base_dir=tmp_path)
 
 
-def test_missing_profile_raises_with_helpful_listing(tmp_path):
+def test_unknown_top_level_key_rejected(tmp_path):
+    _write(tmp_path, "x", {
+        "default_action": "deny",
+        "spurious_field": True,
+        "policies": [],
+    })
+    with pytest.raises(PolicyConfigError, match="unknown profile field"):
+        load_profile("x", base_dir=tmp_path)
+
+
+def test_missing_default_helpful_error(tmp_path):
+    """First-run UX: no profiles dir, no flag, no env → helpful pointer."""
+    with pytest.raises(PolicyConfigError, match="profile new"):
+        load_profile("default", base_dir=tmp_path)
+
+
+def test_missing_named_profile_lists_available(tmp_path):
+    _write(tmp_path, "wheel_prod", {
+        "default_action": "deny", "policies": [],
+    })
     with pytest.raises(PolicyConfigError, match="not found"):
         load_profile("does_not_exist", base_dir=tmp_path)
 
@@ -80,19 +81,15 @@ def test_invalid_profile_name_rejected(tmp_path):
         load_profile("../escape", base_dir=tmp_path)
 
 
-def test_list_profiles_includes_reserved_even_when_empty(tmp_path):
-    names = list_profiles(base_dir=tmp_path)
-    assert set(RESERVED_PROFILES).issubset(set(names))
+def test_list_profiles_empty_when_no_files(tmp_path):
+    assert list_profiles(base_dir=tmp_path) == []
 
 
-def test_list_profiles_merges_user_and_reserved(tmp_path):
-    _write(tmp_path, "wheel_prod", {
-        "default_action": "deny", "policies": [],
-    })
+def test_list_profiles_returns_user_files_sorted(tmp_path):
+    _write(tmp_path, "wheel_prod", {"default_action": "deny", "policies": []})
+    _write(tmp_path, "ko_test", {"default_action": "deny", "policies": []})
     names = list_profiles(base_dir=tmp_path)
-    assert "wheel_prod" in names
-    assert "default" in names      # reserved fallback
-    assert "emergency_stop" in names
+    assert names == ["ko_test", "wheel_prod"]
 
 
 def test_select_profile_name_priority_flag_first():

@@ -297,9 +297,6 @@ def _profile_to_json(p) -> dict:
         "name": p.name,
         "description": p.description,
         "default_action": p.default_action,
-        "allow_override": p.allow_override,
-        "override_confirmation": p.override_confirmation,
-        "override_max_per_day": p.override_max_per_day,
         "notify_on_override": p.notify_on_override,
         "policies": [
             {

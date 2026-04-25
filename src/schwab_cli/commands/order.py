@@ -213,43 +213,11 @@ def _run_override_path(
     ``OVERRIDE`` prompt; ``typer.Exit(EXIT_USAGE)`` if the inbound
     Telegram wait times out.
     """
-    from schwab_cli.order_policy import counters as _counters_mod
-
-    tier = prof.override_confirmation
-    if not prof.allow_override or tier == "deny":
-        typer.secho(
-            f"override is not permitted by profile {prof.name!r} "
-            f"(allow_override={prof.allow_override}, "
-            f"override_confirmation={tier!r}).",
-            fg=typer.colors.RED, err=True,
-        )
-        _audit(
-            sub, "override_blocked_by_profile",
-            account=account.account_number,
-            profile_name=prof.name,
-            override_confirmation=tier,
-        )
-        raise typer.Exit(code=EXIT_USAGE)
-
-    # Per-day cap.
-    state = _counters_mod.load()
-    today_count = _counters_mod.get_override_count_today(
-        state, account.account_number,
-    )
-    cap = prof.override_max_per_day
-    if cap is not None and today_count >= cap:
-        typer.secho(
-            f"override cap reached: {today_count}/{cap} today on "
-            f"account ********{account.account_number[-4:]}",
-            fg=typer.colors.RED, err=True,
-        )
-        _audit(
-            sub, "override_cap_exceeded",
-            account=account.account_number,
-            profile_name=prof.name,
-            count_today=today_count, cap=cap,
-        )
-        raise typer.Exit(code=EXIT_USAGE)
+    # Phase 2f-1: per-profile override gating + per-day cap dropped.
+    # Every profile accepts override via the single CLI ceremony.
+    # The tier enum is gone too; we hardcode "cli" until 2f-2
+    # finishes the deeper refactor that drops tier-driven branching.
+    tier = "cli"
 
     typer.secho(
         f"\n!! OVERRIDE PATH — bypassing policy {prof.name!r}",
@@ -258,11 +226,6 @@ def _run_override_path(
     typer.secho(f"   tier:    {tier}", fg=typer.colors.RED, err=True)
     typer.secho(f"   reason:  {override_reason}",
                 fg=typer.colors.RED, err=True)
-    if cap is not None:
-        typer.secho(
-            f"   today:   {today_count + 1}/{cap}",
-            fg=typer.colors.RED, err=True,
-        )
 
     # Notify (always, when notify_on_override).
     if prof.notify_on_override:
@@ -300,7 +263,6 @@ def _run_override_path(
         profile_name=prof.name,
         override_reason=override_reason,
         override_tier=tier,
-        override_count_today=today_count + 1,
     )
 
 
@@ -1077,11 +1039,10 @@ def run_place(
             account_number=acct.account_number,
             underlying=_underlying_from_body(body),
         )
-        # Phase 2e: also bump the override counter for the per-day cap.
-        if overriding:
-            _counters_mod.record_override(
-                account_number=acct.account_number,
-            )
+        # Phase 2f-1 dropped the per-profile override cap, so we no
+        # longer bump record_override on a successful override place.
+        # The counter file's override_count_per_day field is left in
+        # place (harmless) for a future re-add.
     except Exception as e:  # noqa: BLE001
         _audit(
             sub, "counter_increment_failed",

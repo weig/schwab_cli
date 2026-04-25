@@ -28,9 +28,6 @@ class SchemaError(ValueError):
 
 Effect = Literal["allow", "deny"]
 DefaultAction = Literal["allow", "deny"]
-OverrideTier = Literal[
-    "cli", "telegram_notify_then_cli", "telegram_inbound", "deny",
-]
 
 
 # ---- match clauses --------------------------------------------------------
@@ -143,45 +140,46 @@ class Policy:
 
 @dataclass(frozen=True)
 class Profile:
-    """Resolved profile (post-inheritance). The on-disk file may carry
-    ``inherit`` / ``overrides`` — the loader resolves those into a
-    final :class:`Profile`."""
+    """A profile is a flat JSON file. Phase 2f dropped the per-profile
+    inheritance + override-gating fields — there are no resolved-vs-raw
+    forms anymore. What you see in :class:`Profile` is what's on disk
+    plus the filename (``name``)."""
 
     name: str
     description: str = ""
     default_action: DefaultAction = "deny"
     policies: tuple[Policy, ...] = ()
-    allow_override: bool = True
-    override_confirmation: OverrideTier = "cli"
-    override_max_per_day: int | None = None
     notify_on_override: bool = True
 
 
 # ---- parsing --------------------------------------------------------------
 
 
+_PROFILE_KEYS: frozenset[str] = frozenset({
+    "description", "default_action", "policies", "notify_on_override",
+})
+
+
 def parse_profile(data: dict[str, Any], *, name: str) -> Profile:
-    """Validate + parse a single profile dict (post-inherit-resolution).
+    """Validate + parse a single profile dict.
 
     ``name`` is the profile's filename stem (e.g. ``"default"``) — used
     purely for error messages.
+
+    Phase 2f rejects any unknown top-level key so legacy profiles
+    that carry ``inherit`` / ``overrides`` / ``allow_override`` /
+    ``override_confirmation`` / ``override_max_per_day`` fail loud
+    with a pointer at the dropped feature.
     """
     if not isinstance(data, dict):
         raise SchemaError(f"profile must be a JSON object, got {type(data).__name__}",
                           path=name)
 
+    _reject_unknown_keys(data, _PROFILE_KEYS, where="profile", path=name)
+
     description = _opt_str(data, "description", "", path=name)
     default_action = _enum(data, "default_action", ("allow", "deny"),
                            required=True, path=name)
-    allow_override = _opt_bool(data, "allow_override", True, path=name)
-    override_confirmation = _enum(
-        data, "override_confirmation",
-        ("cli", "telegram_notify_then_cli", "telegram_inbound", "deny"),
-        default="cli", path=name,
-    )
-    override_max_per_day = _opt_int_or_null(
-        data, "override_max_per_day", path=name,
-    )
     notify_on_override = _opt_bool(data, "notify_on_override", True, path=name)
 
     policies_raw = data.get("policies", [])
@@ -205,17 +203,53 @@ def parse_profile(data: dict[str, Any], *, name: str) -> Profile:
         description=description,
         default_action=default_action,  # type: ignore[arg-type]
         policies=tuple(policies),
-        allow_override=allow_override,
-        override_confirmation=override_confirmation,  # type: ignore[arg-type]
-        override_max_per_day=override_max_per_day,
         notify_on_override=notify_on_override,
     )
+
+
+# Dropped fields — listed so the unknown-key rejector can produce a
+# pointed migration message instead of the generic "unknown key".
+_PROFILE_DROPPED: dict[str, str] = {
+    "inherit": "profile inheritance was dropped in Phase 2f — flatten the file",
+    "overrides": "the `overrides` companion to `inherit` was dropped",
+    "allow_override": "per-profile override gating was dropped — use the CLI ceremony",
+    "override_confirmation": "the override-tier enum was dropped — single CLI ceremony for all",
+    "override_max_per_day": "the per-profile override cap was dropped",
+}
+
+
+def _reject_unknown_keys(
+    data: dict[str, Any], allowed: frozenset[str], *,
+    where: str, path: str,
+) -> None:
+    """Raise :class:`SchemaError` if ``data`` contains a key outside
+    ``allowed``. Dropped Phase 2e fields get a tailored message."""
+    for key in data:
+        if key in allowed:
+            continue
+        if where == "profile" and key in _PROFILE_DROPPED:
+            raise SchemaError(
+                f"unknown {where} field {key!r}: {_PROFILE_DROPPED[key]}",
+                path=path,
+            )
+        raise SchemaError(
+            f"unknown {where} field {key!r}; allowed: "
+            f"{', '.join(sorted(allowed))}",
+            path=path,
+        )
+
+
+_POLICY_KEYS: frozenset[str] = frozenset({
+    "name", "description", "enabled", "match", "conditions",
+    "effect", "reason", "tags",
+})
 
 
 def _parse_policy(d: Any, *, path: str) -> Policy:
     if not isinstance(d, dict):
         raise SchemaError(f"policy must be an object, got {type(d).__name__}",
                           path=path)
+    _reject_unknown_keys(d, _POLICY_KEYS, where="policy", path=path)
     name = _req_str(d, "name", path=path)
     description = _opt_str(d, "description", "", path=path)
     enabled = _opt_bool(d, "enabled", True, path=path)

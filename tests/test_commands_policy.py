@@ -94,13 +94,14 @@ def _exit(patches):
 # ---- `policy show / lint / test` -----------------------------------------
 
 
-def test_policy_show_default_falls_back_to_bundled(monkeypatch, tmp_path):
+def test_policy_show_missing_default_returns_helpful_error(monkeypatch, tmp_path):
+    """Phase 2f dropped bundled reserved profiles. Without a user
+    file, `default` resolves to nothing and the loader points at
+    `profile new`."""
     _prep(monkeypatch, tmp_path)
     result = runner.invoke(app, ["policy", "show", "--profile", "default"])
-    assert result.exit_code == 0
-    data = json.loads(result.stdout)
-    assert data["name"] == "default"
-    assert data["default_action"] == "allow"
+    assert result.exit_code == 2
+    assert "profile new" in result.stderr
 
 
 def test_policy_show_user_profile_wins(monkeypatch, tmp_path):
@@ -117,11 +118,15 @@ def test_policy_show_user_profile_wins(monkeypatch, tmp_path):
     assert data["default_action"] == "deny"
 
 
-def test_policy_lint_all_passes_for_bundled_reserved(monkeypatch, tmp_path):
+def test_policy_lint_all_with_no_profiles_says_no_profiles_found(
+    monkeypatch, tmp_path,
+):
+    """No reserved profiles ship anymore; an empty dir → 'no profiles
+    found' rather than a wall of bundled-default validations."""
     _prep(monkeypatch, tmp_path)
     result = runner.invoke(app, ["policy", "lint", "--all"])
     assert result.exit_code == 0
-    assert "ok" in result.stdout
+    assert "no profiles found" in result.stderr or "no profiles found" in result.stdout
 
 
 def test_policy_lint_reports_bad_profile(monkeypatch, tmp_path):

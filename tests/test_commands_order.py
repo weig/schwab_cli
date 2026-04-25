@@ -40,12 +40,25 @@ def _prep(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("SCHWAB_CLI_CONFIG", raising=False)
+    monkeypatch.delenv("SCHWAB_CLI_PROFILE", raising=False)
     # Redirect the audit log to tmp_path so tests don't write into
     # the real ~/.config/schwab_cli/audit/ directory.
     from schwab_cli import audit as audit_mod
     monkeypatch.setattr(
         audit_mod, "DEFAULT_AUDIT_DIR", tmp_path / "audit",
     )
+    # Phase 2f: reserved profiles are gone. Tests that exercise the
+    # policy gate (or any path that runs through it) need an explicit
+    # default.json on disk. Use a permissive baseline so existing
+    # tests still see "approve" by default.
+    profiles_dir = tmp_path / "profiles" / "order"
+    monkeypatch.setenv("SCHWAB_CLI_POLICY_DIR", str(profiles_dir))
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    (profiles_dir / "default.json").write_text(_json.dumps({
+        "default_action": "allow",
+        "policies": [],
+    }))
     save_config(Config(
         client_id="cid", client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",

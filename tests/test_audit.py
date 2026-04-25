@@ -111,9 +111,18 @@ def _prep(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("SCHWAB_CLI_CONFIG", raising=False)
+    monkeypatch.delenv("SCHWAB_CLI_PROFILE", raising=False)
     monkeypatch.setattr(
         audit, "DEFAULT_AUDIT_DIR", tmp_path / "audit",
     )
+    # Phase 2f: place runs through the policy gate, which needs an
+    # explicit default.json on disk — no bundled fallback.
+    profiles_dir = tmp_path / "profiles" / "order"
+    monkeypatch.setenv("SCHWAB_CLI_POLICY_DIR", str(profiles_dir))
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / "default.json").write_text(json.dumps({
+        "default_action": "allow", "policies": [],
+    }))
     save_config(Config(
         client_id="cid", client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",

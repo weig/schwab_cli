@@ -1,8 +1,0 @@
-{
-  "description": "Permissive default profile — every order allowed. Use as a starting point; tighten with deny rules or replace with a strategy-specific profile.",
-  "default_action": "allow",
-  "allow_override": true,
-  "override_confirmation": "cli",
-  "notify_on_override": true,
-  "policies": []
-}
