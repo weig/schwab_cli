@@ -13,6 +13,7 @@ from pathlib import Path
 
 import typer
 from prompt_toolkit import Application, prompt
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout, Window
@@ -188,7 +189,7 @@ def _list_editor_loop(
                     f"  error creating policy: {e}",
                     fg=typer.colors.RED, err=True,
                 )
-        event.app.run_in_terminal(runner)
+        run_in_terminal(runner)
 
     @bindings.add("s")
     def _(event):
@@ -216,7 +217,7 @@ def _list_editor_loop(
             mark_saved(state, str(p))
             result["saved_path"] = p
             event.app.exit()
-        event.app.run_in_terminal(runner)
+        run_in_terminal(runner)
 
     @bindings.add("q")
     def _(event):
@@ -230,7 +231,7 @@ def _list_editor_loop(
             if ans in ("y", "yes"):
                 result["quit"] = True
                 event.app.exit()
-        event.app.run_in_terminal(runner)
+        run_in_terminal(runner)
 
     @bindings.add("c-c")
     def _(event):
