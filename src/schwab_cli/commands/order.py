@@ -779,6 +779,22 @@ def run_place(
         warnings=list(preview_summary.warnings),
         rejects=list(preview_summary.rejects),
     )
+    # Narrow diagnostic: capture the full orderValidationResult shape on
+    # any reject so we can later distinguish hard rejects (e.g. account
+    # not approved, BP would render bogus) from soft / bypassable ones
+    # (e.g. limit too far). Includes orderBalance + status fields so we
+    # can correlate; no PII (no positions, no auth).
+    if (not preview_unavailable
+            and _raw_preview is not None
+            and preview_summary.rejects):
+        _audit(
+            sub,
+            "preview_reject_shape",
+            account=acct.account_number,
+            validation=_raw_preview.get("orderValidationResult"),
+            order_status=(_raw_preview.get("orderStrategy") or {}).get("status"),
+            order_balance=(_raw_preview.get("orderStrategy") or {}).get("orderBalance"),
+        )
 
     # ---- profile load (used by both policy and override paths) ---------
     # `dry_run` is permissive about a missing profile — it's a read-only

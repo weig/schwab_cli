@@ -219,44 +219,6 @@ def test_render_confirmation_computes_bp_effect_deltas():
     assert option_line.count("→") == 2
 
 
-def test_render_confirmation_marks_bp_as_rejected_when_preview_rejects():
-    """Schwab still returns ``projectedBuyingPower`` for a rejected
-    preview, but the value is meaningless because the order won't fill.
-    The panel should drop the projection and label both BP rows as
-    rejected — matches TOS's "Illegal" treatment."""
-    from schwab_cli.output.orders import render_confirmation, summarise_preview
-    preview = summarise_preview({
-        "orderStrategy": {
-            "orderBalance": {
-                "projectedBuyingPower": 47557.58,
-                "projectedAvailableFund": 23778.79,
-            },
-        },
-        "orderValidationResult": {
-            "rejects": [{"activityMessage": "Account not approved."}],
-        },
-    })
-    out = render_confirmation(
-        body={"orderType": "LIMIT", "duration": "DAY", "session": "NORMAL",
-              "orderLegCollection": []},
-        account_tail="0756",
-        strategy_label="t",
-        is_naked_short=False,
-        analytics=None,
-        preview=preview,
-        current_balances={
-            "stockBuyingPower": 52674.10,
-            "optionBuyingPower": 26337.05,
-        },
-    )
-    # Misleading projected values must NOT appear.
-    assert "47,557" not in out
-    assert "23,778" not in out
-    # Both rows show current BP + "rejected" suffix.
-    assert "$52,674.10  (rejected" in out
-    assert "$26,337.05  (rejected" in out
-
-
 def test_render_confirmation_falls_back_to_n_a_without_balances():
     """When account-fetch is skipped (e.g. ``place --yes`` path), the
     delta lines collapse to ``n/a`` rather than guessing."""

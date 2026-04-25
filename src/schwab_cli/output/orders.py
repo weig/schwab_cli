@@ -381,25 +381,25 @@ def render_confirmation(
         lines.append(_row("Buying Power (Stock)", "unavailable"))
         lines.append(_row("Buying Power (Option)", "unavailable"))
     else:
-        # Schwab's preview returns only the post-order values; we pair
-        # them with a current-balance fetch upstream and render each BP
+        # Schwab's preview returns only post-order values; we pair them
+        # with a current-balance fetch upstream and render each BP
         # bucket as ``current → effect → result`` on one column-aligned
         # line. Missing balances (e.g. ``--yes`` skip path) render as
         # "n/a" cells so columns stay aligned.
         #
-        # Important: when Schwab rejects the order (account not approved,
-        # invalid limit, etc.) it still returns ``projectedBuyingPower``
-        # and ``projectedAvailableFund`` as if the order would fill —
-        # those values are meaningless because the order won't execute.
-        # Suppress the projection columns and label the row "rejected"
-        # to match TOS's "Illegal" treatment.
+        # Note: rejected previews still return projected BP values.
+        # For *soft* rejects (e.g. "limit far from last price") the
+        # projection is real because the operator can override. For
+        # *hard* rejects (e.g. unapproved options level) the projection
+        # is bogus. We don't yet have a way to tell them apart from
+        # the response shape, so we always render — the operator reads
+        # the Validation section to decide whether the BP impact is
+        # actionable.
         cur_stock = (current_balances or {}).get("stockBuyingPower") if current_balances else None
         cur_option = (current_balances or {}).get("optionBuyingPower") if current_balances else None
-        rejected = bool(preview.rejects)
         stock_row, option_row = _bp_triples(
             cur_stock, preview.bp_after_stock,
             cur_option, preview.bp_after_option,
-            rejected=rejected,
         )
         lines.append(_row("Est. Commission", _fmt_money(preview.commission, unlimited='n/a')))
         lines.append(_row("Est. Fees", _fmt_money(preview.fees, unlimited='n/a')))
@@ -464,27 +464,15 @@ def _format_leg_line(leg: dict) -> str:
 def _bp_triples(
     cur_stock: float | None, after_stock: float | None,
     cur_option: float | None, after_option: float | None,
-    *, rejected: bool = False,
 ) -> tuple[str, str]:
     """Format Stock + Option BP rows as ``current → effect → result``.
 
     Each of the three money columns is sized to the wider of the Stock
     or Option cell so the arrows line up between the two rows without
     wasting space. Missing values render as ``n/a``.
-
-    When ``rejected`` is True, Schwab's projected values are dropped
-    (they're computed as if the order would fill, but it won't) and
-    each row collapses to ``current  (rejected — no impact)``.
     """
     cur_s_str = _fmt_money(cur_stock, unlimited="n/a")
     cur_o_str = _fmt_money(cur_option, unlimited="n/a")
-    if rejected:
-        cur_w = max(len(cur_s_str), len(cur_o_str))
-        suffix = "  (rejected — no BP impact)"
-        return (
-            f"{cur_s_str.rjust(cur_w)}{suffix}",
-            f"{cur_o_str.rjust(cur_w)}{suffix}",
-        )
     eff_stock = _delta(after_stock, cur_stock)
     eff_option = _delta(after_option, cur_option)
     s = (
