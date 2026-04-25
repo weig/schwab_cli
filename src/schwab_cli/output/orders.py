@@ -388,16 +388,14 @@ def render_confirmation(
         # "n/a" cells so columns stay aligned.
         cur_stock = (current_balances or {}).get("stockBuyingPower") if current_balances else None
         cur_option = (current_balances or {}).get("optionBuyingPower") if current_balances else None
+        stock_row, option_row = _bp_triples(
+            cur_stock, preview.bp_after_stock,
+            cur_option, preview.bp_after_option,
+        )
         lines.append(_row("Est. Commission", _fmt_money(preview.commission, unlimited='n/a')))
         lines.append(_row("Est. Fees", _fmt_money(preview.fees, unlimited='n/a')))
-        lines.append(_row(
-            "Buying Power (Stock)",
-            _bp_triple(cur_stock, preview.bp_after_stock),
-        ))
-        lines.append(_row(
-            "Buying Power (Option)",
-            _bp_triple(cur_option, preview.bp_after_option),
-        ))
+        lines.append(_row("Buying Power (Stock)", stock_row))
+        lines.append(_row("Buying Power (Option)", option_row))
 
     # Validation
     lines.append("")
@@ -454,25 +452,37 @@ def _format_leg_line(leg: dict) -> str:
     return f"  {sign}{qty}  {short_instr}  {sym}  ({asset})"
 
 
-_BP_COL_WIDTH = 14
+def _bp_triples(
+    cur_stock: float | None, after_stock: float | None,
+    cur_option: float | None, after_option: float | None,
+) -> tuple[str, str]:
+    """Format Stock + Option BP rows as ``current → effect → result``.
 
-
-def _bp_triple(current: float | None, after: float | None) -> str:
-    """Format a ``current → effect → result`` row, column-aligned.
-
-    Each cell is right-padded to ``_BP_COL_WIDTH`` so the ``→`` arrows
-    line up across the Stock and Option rows. Missing values render as
-    ``n/a`` rather than disappearing — keeps the columns honest.
+    Each of the three money columns is sized to the wider of the Stock
+    or Option cell so the arrows line up between the two rows without
+    wasting space. Missing values render as ``n/a``.
     """
-    effect = _delta(after, current)
-    cur_s = _fmt_money(current, unlimited="n/a")
-    eff_s = _fmt_money(effect, plus=True, unlimited="n/a")
-    res_s = _fmt_money(after, unlimited="n/a")
-    return (
-        f"{cur_s.rjust(_BP_COL_WIDTH)}  →  "
-        f"{eff_s.rjust(_BP_COL_WIDTH)}  →  "
-        f"{res_s.rjust(_BP_COL_WIDTH)}"
+    eff_stock = _delta(after_stock, cur_stock)
+    eff_option = _delta(after_option, cur_option)
+    s = (
+        _fmt_money(cur_stock, unlimited="n/a"),
+        _fmt_money(eff_stock, plus=True, unlimited="n/a"),
+        _fmt_money(after_stock, unlimited="n/a"),
     )
+    o = (
+        _fmt_money(cur_option, unlimited="n/a"),
+        _fmt_money(eff_option, plus=True, unlimited="n/a"),
+        _fmt_money(after_option, unlimited="n/a"),
+    )
+    widths = tuple(max(len(s[i]), len(o[i])) for i in range(3))
+
+    def _row(cells: tuple[str, str, str]) -> str:
+        return (
+            f"{cells[0].rjust(widths[0])}  →  "
+            f"{cells[1].rjust(widths[1])}  →  "
+            f"{cells[2].rjust(widths[2])}"
+        )
+    return _row(s), _row(o)
 
 
 def _delta(after: float | None, before: float | None) -> float | None:
