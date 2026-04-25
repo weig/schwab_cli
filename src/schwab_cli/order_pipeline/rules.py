@@ -83,19 +83,114 @@ class LoadProfileRule:
 class FetchAccountBalancesRule:
     """Step 2 — pull current Stock/Option BP for the panel's BP triple.
 
-    Skipped on ``place --yes`` (no panel = no need).
+    Always runs for preview and interactive place (panel review needs
+    BP + position data). For ``place --yes`` the operator already
+    committed and won't see the panel, so we skip the fetch unless the
+    profile actually references account-derived fields (e.g. a policy
+    that gates on buyingPower or position count).
+
+    Stashes the positions list as well so :class:`DetectOpenCloseRule`
+    can map option legs to existing positions without re-fetching.
     """
 
-    name = "fetch_account_balances"
+    name = "fetch_account"
 
     def applies(self, ctx: OrderContext) -> bool:
-        return ctx.dry_run or not ctx.yes
+        if ctx.dry_run or not ctx.yes:
+            return True
+        # place --yes: only fetch when the policy needs account data.
+        if ctx.profile is None:
+            return False
+        from schwab_cli.order_policy.sources import (
+            referenced_fields, required_sources,
+        )
+        try:
+            needed = required_sources(referenced_fields(ctx.profile))
+        except Exception:  # noqa: BLE001 — defensive
+            return False
+        return "account" in needed
 
     def execute(self, ctx: OrderContext) -> RuleResult:
-        from schwab_cli.commands.order import _fetch_current_balances_safe
-        ctx.current_balances = _fetch_current_balances_safe(
-            ctx.client, ctx.account.account_number,
+        from schwab_cli.commands.order import _fetch_account_safe
+        try:
+            raw = _fetch_account_safe(
+                ctx.client, ctx.account.account_number,
+            )
+        except Exception:  # noqa: BLE001 — best-effort
+            return RuleResult()
+        if not isinstance(raw, dict):
+            return RuleResult()
+        sec = raw.get("securitiesAccount") or {}
+        cur = sec.get("currentBalances") or {}
+        if isinstance(cur, dict):
+            ctx.current_balances = {
+                "stockBuyingPower": cur.get("buyingPower"),
+                "optionBuyingPower": cur.get("availableFunds"),
+            }
+        positions = sec.get("positions")
+        ctx.account_positions = positions if isinstance(positions, list) else []
+        return RuleResult()
+
+
+class DetectOpenCloseRule:
+    """Rewrite option legs to ``*_TO_CLOSE`` when a matching position
+    already exists.
+
+    User typed ``BUY +1 AMZN ... PUT`` against an existing short put →
+    real intent is ``BUY_TO_CLOSE`` (closing the short), not
+    ``BUY_TO_OPEN``. TOS auto-promotes; we should too. Sending the
+    wrong instruction also makes Schwab's previewOrder return BP
+    projections that don't reflect the close, so this rewrite has to
+    run BEFORE :class:`SchwabPreviewRule`.
+
+    Sets ``leg.positionEffect = "CLOSING"`` to match Schwab's wire
+    convention. Audits each rewrite so the change is visible in the
+    log.
+    """
+
+    name = "detect_open_close"
+
+    def applies(self, ctx: OrderContext) -> bool:
+        # Need positions; only runs when the account fetch ran.
+        return ctx.account_positions is not None and any(
+            (leg.get("instrument") or {}).get("assetType") == "OPTION"
+            for leg in ctx.body.get("orderLegCollection") or []
         )
+
+    def execute(self, ctx: OrderContext) -> RuleResult:
+        from schwab_cli.commands.order import _audit
+        positions = ctx.account_positions or []
+        rewrites: list[dict] = []
+        for leg in ctx.body.get("orderLegCollection") or []:
+            inst = leg.get("instrument") or {}
+            if inst.get("assetType") != "OPTION":
+                continue
+            sym = inst.get("symbol")
+            pos = next(
+                (p for p in positions
+                 if (p.get("instrument") or {}).get("symbol") == sym),
+                None,
+            )
+            if pos is None:
+                continue
+            short_qty = float(pos.get("shortQuantity") or 0)
+            long_qty = float(pos.get("longQuantity") or 0)
+            old = leg.get("instruction")
+            new = old
+            if old == "BUY_TO_OPEN" and short_qty > 0:
+                new = "BUY_TO_CLOSE"
+            elif old == "SELL_TO_OPEN" and long_qty > 0:
+                new = "SELL_TO_CLOSE"
+            if new != old:
+                leg["instruction"] = new
+                leg["positionEffect"] = "CLOSING"
+                rewrites.append({"symbol": sym, "from": old, "to": new})
+        if rewrites:
+            _audit(
+                ctx.sub, "leg_open_close_rewritten",
+                account=ctx.account.account_number,
+                rewrites=rewrites,
+            )
         return RuleResult()
 
 
@@ -660,6 +755,7 @@ class PlaceOrderRule:
 DEFAULT_RULES: tuple = (
     LoadProfileRule(),
     FetchAccountBalancesRule(),
+    DetectOpenCloseRule(),       # must run BEFORE SchwabPreviewRule
     FetchUnderlyingQuoteRule(),
     SchwabPreviewRule(),
     ComputeAnalyticsRule(),

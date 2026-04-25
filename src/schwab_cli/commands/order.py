@@ -1189,32 +1189,6 @@ def _fetch_quote_safe(client: SchwabClient, symbol: str) -> dict:
     return get_quotes(client, [symbol])
 
 
-def _fetch_current_balances_safe(
-    client: SchwabClient, account_number: str,
-) -> dict | None:
-    """Pull current ``buyingPower`` / ``availableFunds`` for the account.
-
-    Used to compute the BP-effect deltas in the confirmation panel
-    (Schwab's preview only returns the post-order projected values).
-    Returns ``None`` on any failure — the panel falls back to omitting
-    the delta lines rather than poisoning the preview flow.
-    """
-    try:
-        raw = _fetch_account_safe(client, account_number)
-    except Exception:  # noqa: BLE001 — best-effort
-        return None
-    if not isinstance(raw, dict):
-        return None
-    sec = raw.get("securitiesAccount") or {}
-    cur = sec.get("currentBalances") or {}
-    if not isinstance(cur, dict):
-        return None
-    return {
-        "stockBuyingPower": cur.get("buyingPower"),
-        "optionBuyingPower": cur.get("availableFunds"),
-    }
-
-
 def _fetch_underlying_quote_safe(
     client: SchwabClient, body: dict,
 ) -> dict | None:

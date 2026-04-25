@@ -212,11 +212,12 @@ def test_render_confirmation_computes_bp_effect_deltas():
     assert "$52,674.10" in out and "-$25,400.00" in out and "$27,274.10" in out
     assert "Buying Power (Option)" in out
     assert "$26,337.05" in out and "-$12,700.00" in out and "$13,637.05" in out
-    # Each row should contain two arrow separators.
+    # Format is "current  effect → result" — one arrow per row, between
+    # the signed effect and the resulting value.
     stock_line = next(ln for ln in out.splitlines() if "Buying Power (Stock)" in ln)
     option_line = next(ln for ln in out.splitlines() if "Buying Power (Option)" in ln)
-    assert stock_line.count("→") == 2
-    assert option_line.count("→") == 2
+    assert stock_line.count("→") == 1
+    assert option_line.count("→") == 1
 
 
 def test_render_confirmation_falls_back_to_n_a_without_balances():

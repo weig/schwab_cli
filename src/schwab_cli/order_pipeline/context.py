@@ -41,6 +41,7 @@ class OrderContext:
     profile_load_error: str | None = None
     underlying_quote: dict | None = None
     current_balances: dict | None = None
+    account_positions: list | None = None
     preview_summary: Any | None = None
     preview_unavailable: bool = False
     raw_preview: dict | None = None

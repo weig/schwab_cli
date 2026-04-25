@@ -1165,6 +1165,188 @@ def test_place_with_yes_does_not_start_ticker(monkeypatch, tmp_path):
     assert len(place_calls) == 1
 
 
+# ---- open/close detection from positions --------------------------------
+
+
+_AMZN_PUT_OSI = "AMZN  270115P00190000"
+
+
+def _account_with_short_put(qty: float = 1.0) -> dict:
+    """Return a get_account payload showing one short AMZN put."""
+    return {
+        "securitiesAccount": {
+            "accountNumber": "12345678",
+            "type": "MARGIN",
+            "currentBalances": {
+                "buyingPower": 50000.0,
+                "availableFunds": 25000.0,
+            },
+            "positions": [{
+                "instrument": {
+                    "assetType": "OPTION",
+                    "symbol": _AMZN_PUT_OSI,
+                },
+                "longQuantity": 0.0,
+                "shortQuantity": qty,
+            }],
+        },
+    }
+
+
+def _account_with_long_call(qty: float = 1.0) -> dict:
+    return {
+        "securitiesAccount": {
+            "accountNumber": "12345678",
+            "type": "MARGIN",
+            "currentBalances": {
+                "buyingPower": 50000.0,
+                "availableFunds": 25000.0,
+            },
+            "positions": [{
+                "instrument": {
+                    "assetType": "OPTION",
+                    "symbol": "AMZN  270115C00200000",
+                },
+                "longQuantity": qty,
+                "shortQuantity": 0.0,
+            }],
+        },
+    }
+
+
+def test_buy_against_existing_short_rewrites_to_close(monkeypatch, tmp_path):
+    """User types BUY for an option they already have short → leg should
+    flip to BUY_TO_CLOSE before the Schwab preview goes out."""
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    patches.append(patch(
+        "schwab_cli.api.accounts.get_account",
+        return_value=_account_with_short_put(),
+    ))
+    seen_bodies: list[dict] = []
+    def _spy_preview(client, account_hash, body):
+        seen_bodies.append(body)
+        return _PREVIEW_PAYLOAD
+    # Replace the default preview stub in `_patches` with our spy.
+    patches = [p for p in patches if p.attribute != "preview_order"]
+    patches.append(
+        patch("schwab_cli.commands.order.preview_order",
+              side_effect=_spy_preview),
+    )
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "--account", "5678",
+            "--parse",
+            "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    # The body Schwab saw must carry BUY_TO_CLOSE, not BUY_TO_OPEN.
+    assert len(seen_bodies) == 1
+    leg = seen_bodies[0]["orderLegCollection"][0]
+    assert leg["instruction"] == "BUY_TO_CLOSE"
+    assert leg.get("positionEffect") == "CLOSING"
+    # And the panel's leg row shows BTC.
+    assert "BTC  AMZN" in result.stderr
+
+
+def test_sell_against_existing_long_rewrites_to_close(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    patches.append(patch(
+        "schwab_cli.api.accounts.get_account",
+        return_value=_account_with_long_call(),
+    ))
+    seen_bodies: list[dict] = []
+    def _spy_preview(client, account_hash, body):
+        seen_bodies.append(body)
+        return _PREVIEW_PAYLOAD
+    patches = [p for p in patches if p.attribute != "preview_order"]
+    patches.append(
+        patch("schwab_cli.commands.order.preview_order",
+              side_effect=_spy_preview),
+    )
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "AMZN", "--account", "5678",
+            "--leg", "-1@270115C200", "--price", "8.00",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    leg = seen_bodies[0]["orderLegCollection"][0]
+    assert leg["instruction"] == "SELL_TO_CLOSE"
+    assert leg.get("positionEffect") == "CLOSING"
+
+
+def test_buy_with_no_matching_position_stays_open(monkeypatch, tmp_path):
+    """No position → instruction stays BUY_TO_OPEN."""
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    patches.append(patch(
+        "schwab_cli.api.accounts.get_account",
+        return_value={"securitiesAccount": {"positions": []}},
+    ))
+    seen_bodies: list[dict] = []
+    def _spy_preview(client, account_hash, body):
+        seen_bodies.append(body)
+        return _PREVIEW_PAYLOAD
+    patches = [p for p in patches if p.attribute != "preview_order"]
+    patches.append(
+        patch("schwab_cli.commands.order.preview_order",
+              side_effect=_spy_preview),
+    )
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "--account", "5678",
+            "--parse", "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    leg = seen_bodies[0]["orderLegCollection"][0]
+    assert leg["instruction"] == "BUY_TO_OPEN"
+    assert "positionEffect" not in leg
+
+
+def test_place_yes_skips_account_when_profile_does_not_need_it(
+    monkeypatch, tmp_path,
+):
+    """``place --yes`` short-circuits the account fetch (and therefore
+    the open/close rewrite) when the active policy doesn't reference
+    account-derived fields. Honors the spec: --yes means committed; no
+    extra round-trips beyond the wire call."""
+    _prep(monkeypatch, tmp_path)
+    place_calls: list = []
+    patches = _patches(place_calls=place_calls)
+    account_calls: list = []
+    def _spy_account(client, account_number):
+        account_calls.append(account_number)
+        return _account_with_short_put()
+    patches.append(patch(
+        "schwab_cli.api.accounts.get_account",
+        side_effect=_spy_account,
+    ))
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+            "--yes",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    # default test profile (allow_underlying-only) doesn't reference
+    # account fields → fetch skipped entirely.
+    assert account_calls == []
+    assert len(place_calls) == 1
+
+
 def test_quantity_with_leg_is_rejected(monkeypatch, tmp_path):
     """``--quantity`` is ambiguous when paired with ``--leg`` (each leg
     already carries its own signed N). Reject before doing anything."""

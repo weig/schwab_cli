@@ -468,11 +468,14 @@ def _bp_triples(
     cur_stock: float | None, after_stock: float | None,
     cur_option: float | None, after_option: float | None,
 ) -> tuple[str, str]:
-    """Format Stock + Option BP rows as ``current → effect → result``.
+    """Format Stock + Option BP rows as ``current  effect → result``.
 
-    Each of the three money columns is sized to the wider of the Stock
-    or Option cell so the arrows line up between the two rows without
-    wasting space. Missing values render as ``n/a``.
+    The semantic shape is *value, action, value* — not a chain — so we
+    use a single arrow between the (signed) effect and the resulting
+    value. The starting value sits beside the effect with whitespace
+    separation. Each column is sized to the wider of the Stock or
+    Option cell so the arrows align between rows. Missing values
+    render as ``n/a``.
     """
     cur_s_str = _fmt_money(cur_stock, unlimited="n/a")
     cur_o_str = _fmt_money(cur_option, unlimited="n/a")
@@ -492,7 +495,7 @@ def _bp_triples(
 
     def _row(cells: tuple[str, str, str]) -> str:
         return (
-            f"{cells[0].rjust(widths[0])}  →  "
+            f"{cells[0].rjust(widths[0])}  "
             f"{cells[1].rjust(widths[1])}  →  "
             f"{cells[2].rjust(widths[2])}"
         )
@@ -521,11 +524,13 @@ def _fmt_money(
     if v is None:
         return unlimited
     sign = ""
-    if plus and v > 0:
-        sign = "+"
-    elif v < 0:
+    if v < 0:
         sign = "-"
         v = -v
+    elif plus:
+        # Always emit "+" for non-negatives (including zero) when plus
+        # is requested — keeps signed columns visually balanced.
+        sign = "+"
     return f"{sign}${v:,.2f}"
 
 
