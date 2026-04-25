@@ -187,6 +187,217 @@ def _render_policy_decision(decision: Decision) -> None:
     )
 
 
+def _run_override_path(
+    *,
+    body: dict,
+    account: AccountIds,
+    prof,
+    override_reason: str,
+    sub: str,
+) -> None:
+    """Phase 2e — gate + tier-driven ceremony for an override.
+
+    On entry the panel has already been rendered. This:
+
+    1. Refuses if the profile forbids override (``allow_override=False``
+       or ``override_confirmation="deny"``).
+    2. Enforces ``override_max_per_day`` against the counter file.
+    3. Pings Telegram (always, when ``notify_on_override``).
+    4. Drives the typed-``OVERRIDE`` CLI prompt (every tier) and the
+       inbound Telegram ``CONFIRM_OVERRIDE`` wait (``telegram_inbound``
+       tier).
+    5. Audits ``override_invoked``.
+
+    Raises ``typer.Exit(EXIT_USAGE)`` if the profile or cap blocks
+    the override; ``typer.Exit(0)`` if the user aborts at the
+    ``OVERRIDE`` prompt; ``typer.Exit(EXIT_USAGE)`` if the inbound
+    Telegram wait times out.
+    """
+    from schwab_cli.order_policy import counters as _counters_mod
+
+    tier = prof.override_confirmation
+    if not prof.allow_override or tier == "deny":
+        typer.secho(
+            f"override is not permitted by profile {prof.name!r} "
+            f"(allow_override={prof.allow_override}, "
+            f"override_confirmation={tier!r}).",
+            fg=typer.colors.RED, err=True,
+        )
+        _audit(
+            sub, "override_blocked_by_profile",
+            account=account.account_number,
+            profile_name=prof.name,
+            override_confirmation=tier,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
+    # Per-day cap.
+    state = _counters_mod.load()
+    today_count = _counters_mod.get_override_count_today(
+        state, account.account_number,
+    )
+    cap = prof.override_max_per_day
+    if cap is not None and today_count >= cap:
+        typer.secho(
+            f"override cap reached: {today_count}/{cap} today on "
+            f"account ********{account.account_number[-4:]}",
+            fg=typer.colors.RED, err=True,
+        )
+        _audit(
+            sub, "override_cap_exceeded",
+            account=account.account_number,
+            profile_name=prof.name,
+            count_today=today_count, cap=cap,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
+    typer.secho(
+        f"\n!! OVERRIDE PATH — bypassing policy {prof.name!r}",
+        fg=typer.colors.RED, err=True, bold=True,
+    )
+    typer.secho(f"   tier:    {tier}", fg=typer.colors.RED, err=True)
+    typer.secho(f"   reason:  {override_reason}",
+                fg=typer.colors.RED, err=True)
+    if cap is not None:
+        typer.secho(
+            f"   today:   {today_count + 1}/{cap}",
+            fg=typer.colors.RED, err=True,
+        )
+
+    # Notify (always, when notify_on_override).
+    if prof.notify_on_override:
+        try:
+            _send_override_notification(
+                reason=override_reason, body=body,
+                account=account, prof=prof, tier=tier,
+            )
+        except Exception as e:  # noqa: BLE001
+            _audit(
+                sub, "override_notify_failed",
+                account=account.account_number,
+                error=f"{type(e).__name__}: {e}",
+            )
+
+    # Inbound Telegram tier — block until CONFIRM_OVERRIDE arrives.
+    if tier == "telegram_inbound":
+        if not _wait_for_telegram_confirm(account=account):
+            typer.secho(
+                "Telegram CONFIRM_OVERRIDE timed out — override aborted.",
+                fg=typer.colors.RED, err=True,
+            )
+            _audit(
+                sub, "override_telegram_timeout",
+                account=account.account_number, profile_name=prof.name,
+            )
+            raise typer.Exit(code=EXIT_USAGE)
+
+    # Typed CLI prompt — every tier.
+    _override_typed_prompt()
+
+    _audit(
+        sub, "override_invoked",
+        account=account.account_number,
+        profile_name=prof.name,
+        override_reason=override_reason,
+        override_tier=tier,
+        override_count_today=today_count + 1,
+    )
+
+
+def _override_typed_prompt() -> None:
+    """Block until the user types literal ``OVERRIDE`` (case-sensitive
+    full word). Anything else aborts (exit 0)."""
+    typer.echo('Type "OVERRIDE" (case-sensitive) to bypass policy:',
+               err=True, nl=False)
+    typer.echo(" ", err=True, nl=False)
+    try:
+        entered = sys.stdin.readline()
+    except (KeyboardInterrupt, EOFError):
+        typer.echo("\naborted", err=True)
+        raise typer.Exit(code=0)
+    if not re.fullmatch(r"\s*OVERRIDE\s*", entered):
+        typer.echo("aborted", err=True)
+        raise typer.Exit(code=0)
+
+
+def _wait_for_telegram_confirm(*, account: AccountIds) -> bool:
+    """Send a prompt to Telegram, then long-poll for ``CONFIRM_OVERRIDE``
+    in reply. Returns True if the reply arrived in time, False on
+    timeout. Network errors during polling propagate to the caller as
+    a generic Exception (audited as override_notify_failed)."""
+    from schwab_cli.notify.config import load as load_notify_config
+    from schwab_cli.notify import telegram as _send
+    from schwab_cli.notify.telegram_poll import (
+        load_claude_allowlist, wait_for_text_reply,
+    )
+
+    cfg = load_notify_config()
+    bot_token = (cfg.telegram.bot_token or "").strip()
+    chat_id = (cfg.telegram.chat_id or "").strip()
+    if not (bot_token and chat_id):
+        typer.secho(
+            "telegram_inbound tier requires Telegram to be configured "
+            "(notify setup) — aborting override.",
+            fg=typer.colors.RED, err=True,
+        )
+        return False
+
+    # Send the prompt.
+    prompt = (
+        "🚨 *Override requested*\n"
+        f"Account: ********{account.account_number[-4:]}\n"
+        "Reply with `CONFIRM_OVERRIDE` within 5 minutes to proceed."
+    )
+    try:
+        _send.send(bot_token=bot_token, chat_id=chat_id, text=prompt)
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+
+    typer.secho(
+        "Waiting up to 5 minutes for CONFIRM_OVERRIDE on Telegram…",
+        fg=typer.colors.YELLOW, err=True,
+    )
+    out = wait_for_text_reply(
+        bot_token=bot_token, chat_id=chat_id,
+        expected_text="CONFIRM_OVERRIDE",
+        timeout_seconds=300,
+        allowed_user_ids=load_claude_allowlist(),
+    )
+    return out is not None
+
+
+def _send_override_notification(
+    *, reason: str, body: dict, account: AccountIds, prof, tier: str,
+) -> None:
+    """Fire-and-forget Telegram message announcing an override
+    invocation. Skipped silently when Telegram isn't configured."""
+    from schwab_cli.notify.config import load as load_notify_config
+    from schwab_cli.notify import telegram as _send
+
+    cfg = load_notify_config()
+    bot_token = (cfg.telegram.bot_token or "").strip()
+    chat_id = (cfg.telegram.chat_id or "").strip()
+    if not (bot_token and chat_id):
+        return
+
+    legs_summary = []
+    for leg in body.get("orderLegCollection") or []:
+        instr = leg.get("instruction", "?")
+        qty = leg.get("quantity", "?")
+        sym = (leg.get("instrument") or {}).get("symbol", "?")
+        legs_summary.append(f"{instr} {qty} {sym}")
+    msg = (
+        "⚠️ *OVERRIDE INVOKED*\n"
+        f"Account: ********{account.account_number[-4:]}\n"
+        f"Profile: {prof.name} (tier={tier})\n"
+        f"Order: {body.get('orderType', '?')} "
+        f"{body.get('price') or ''}\n"
+        f"Legs: {' / '.join(legs_summary) or '(none)'}\n"
+        f"Reason: {reason}"
+    )
+    _send.send(bot_token=bot_token, chat_id=chat_id, text=msg)
+
+
 def _confirm_or_abort(*, yes: bool) -> None:
     """Block until the user types 'yea' (case-insensitive). With ``yes``,
     skip the prompt entirely. Anything other than 'yea' aborts (exit 0).
@@ -486,6 +697,48 @@ def _validate_session_combo(
         raise typer.Exit(code=EXIT_USAGE)
 
 
+def _validate_override_flags(
+    *,
+    override_reason: str | None,
+    override_confirm: bool,
+    yes: bool,
+    dry_run: bool,
+) -> None:
+    """Phase 2e: ``--override REASON --override-confirm`` must be passed
+    together; either alone is a usage error. ``--override`` may not
+    combine with ``--yes`` (override is not routine; the user must
+    type both ``OVERRIDE`` and ``yea``). And it can't be used with
+    ``--dry-run`` either — preview already bypasses placement."""
+    if not override_reason or not override_confirm:
+        typer.secho(
+            "--override and --override-confirm must both be set together "
+            "(either alone has no effect by design).",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+    if yes:
+        typer.secho(
+            "--override may not be combined with --yes (override is not "
+            "routine; type OVERRIDE and yea explicitly).",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+    if dry_run:
+        typer.secho(
+            "--override is meaningless with --dry-run / `order preview` "
+            "(preview already skips placement).",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+    n = len(override_reason)
+    if not (10 <= n <= 500):
+        typer.secho(
+            f"--override reason must be 10..500 characters, got {n}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
+
 # ---- run_place / run_preview ---------------------------------------------
 
 
@@ -507,6 +760,8 @@ def run_place(
     yes: bool,
     as_json: bool,
     profile: str | None = None,
+    override_reason: str | None = None,
+    override_confirm: bool = False,
 ) -> None:
     sub = "preview" if dry_run else "place"
     # Log the raw invocation BEFORE any validation so even bad-flag
@@ -521,8 +776,21 @@ def run_place(
             "session": session, "legs": list(leg_specs),
             "complex_strategy": complex_strategy, "special": special,
             "parse_string": parse_string, "yes": yes,
+            "override_reason": (
+                "<set>" if override_reason else None
+            ),
+            "override_confirm": override_confirm,
         },
     )
+
+    # Validate override flag combination before doing anything else.
+    overriding = bool(override_reason) or override_confirm
+    if overriding:
+        _validate_override_flags(
+            override_reason=override_reason,
+            override_confirm=override_confirm,
+            yes=yes, dry_run=dry_run,
+        )
 
     _validate_combo(
         parse_string=parse_string, symbol=symbol, order_type=order_type,
@@ -623,7 +891,7 @@ def run_place(
         rejects=list(preview_summary.rejects),
     )
 
-    # ---- policy gate (Phase 2a) -----------------------------------------
+    # ---- profile load (used by both policy and override paths) ---------
     profile_name = select_profile_name(
         flag=profile, env=os.environ.get("SCHWAB_CLI_PROFILE"),
     )
@@ -637,49 +905,7 @@ def run_place(
         )
         raise typer.Exit(code=EXIT_USAGE)
 
-    # Build the order context. Phase 2b lazily fetches chain / quote /
-    # account / dividends only when policies in this profile reference
-    # fields that need them. preview_data is always available since
-    # we already ran previewOrder above.
-    order_ctx = _build_policy_context(
-        client=client,
-        body=body,
-        account=acct,
-        prof=prof,
-        preview_raw=_raw_preview if not preview_unavailable else None,
-        sub=sub,
-    )
-    decision = policy_evaluate(prof, order_ctx)
-    _audit(
-        sub,
-        "policy_evaluated" if decision.approved else "policy_rejected",
-        account=acct.account_number,
-        profile_name=prof.name,
-        decision=decision.decision,
-        rule=decision.rule_name,
-        phase=decision.rule_phase,
-        reason=decision.reason,
-        policy_evaluations=[
-            {
-                "policy": ev.name,
-                "matched": ev.matched,
-                "effect": ev.effect,
-                "satisfied": ev.satisfied if ev.matched else None,
-                "conditions": [
-                    {
-                        "field": p.field, "op": p.op,
-                        "expected": p.expected, "actual": p.actual,
-                        "satisfied": p.satisfied,
-                        "unevaluatable": p.unevaluatable,
-                    }
-                    for p in ev.predicates
-                ],
-            }
-            for ev in decision.evaluations
-        ],
-    )
-
-    # Local analytics (max P/L, breakevens) — single-leg + vertical only in Phase 1.
+    # ---- compute analytics (shared by both paths) -----------------------
     analytics = compute_analytics(
         strategy=spec.complex_strategy if spec.complex_strategy != "NONE" else None,
         side=spec.side,
@@ -688,7 +914,6 @@ def run_place(
         quantity=spec.quantity,
         price=spec.price,
     )
-
     panel = render_confirmation(
         body=body,
         account_tail=acct.account_number[-4:],
@@ -698,58 +923,124 @@ def run_place(
         preview=preview_summary,
         preview_unavailable=preview_unavailable,
     )
-    typer.echo(panel, err=True)
-    _render_policy_decision(decision)
-    for warning in limits.warnings:
-        typer.secho(
-            f"limit warning [{warning.rule_name}]: {warning.message}",
-            fg=typer.colors.YELLOW, err=True,
+
+    # ---- override branch (Phase 2e) -------------------------------------
+    if overriding:
+        # The override path bypasses the policy gate entirely. Render the
+        # confirmation panel + run the tier-driven ceremony + place.
+        typer.echo(panel, err=True)
+        _run_override_path(
+            body=body, account=acct, prof=prof,
+            override_reason=override_reason or "",
+            sub=sub,
+        )
+        # Final yea prompt — override does not skip the standard
+        # confirmation. _confirm_or_abort raises Exit(0) on reject.
+        try:
+            _confirm_or_abort(yes=False)
+        except typer.Exit as exit_:
+            if int(exit_.exit_code or 0) == 0:
+                _audit(sub, "aborted", account=acct.account_number,
+                       override="aborted_at_yea")
+            raise
+        _audit(
+            sub, "confirmed",
+            account=acct.account_number, via="yea",
+            override=True,
+        )
+        # Fall through to the place block below.
+    else:
+        # ---- standard policy gate (Phase 2a) ----------------------------
+        order_ctx = _build_policy_context(
+            client=client,
+            body=body,
+            account=acct,
+            prof=prof,
+            preview_raw=_raw_preview if not preview_unavailable else None,
+            sub=sub,
+        )
+        decision = policy_evaluate(prof, order_ctx)
+        _audit(
+            sub,
+            "policy_evaluated" if decision.approved else "policy_rejected",
+            account=acct.account_number,
+            profile_name=prof.name,
+            decision=decision.decision,
+            rule=decision.rule_name,
+            phase=decision.rule_phase,
+            reason=decision.reason,
+            policy_evaluations=[
+                {
+                    "policy": ev.name,
+                    "matched": ev.matched,
+                    "effect": ev.effect,
+                    "satisfied": ev.satisfied if ev.matched else None,
+                    "conditions": [
+                        {
+                            "field": p.field, "op": p.op,
+                            "expected": p.expected, "actual": p.actual,
+                            "satisfied": p.satisfied,
+                            "unevaluatable": p.unevaluatable,
+                        }
+                        for p in ev.predicates
+                    ],
+                }
+                for ev in decision.evaluations
+            ],
         )
 
-    if dry_run:
-        _audit(sub, "dry_run_done", account=acct.account_number)
-        # Surface the body on stdout when --json is set so it's pipeable.
-        if as_json:
-            typer.echo(_json.dumps({"order": body, "preview": preview_summary.__dict__}, default=str))
-        else:
-            if decision.approved:
-                typer.echo("(dry-run: not sending placeOrder)", err=True)
+        typer.echo(panel, err=True)
+        _render_policy_decision(decision)
+        for warning in limits.warnings:
+            typer.secho(
+                f"limit warning [{warning.rule_name}]: {warning.message}",
+                fg=typer.colors.YELLOW, err=True,
+            )
+
+        if dry_run:
+            _audit(sub, "dry_run_done", account=acct.account_number)
+            # Surface the body on stdout when --json is set so it's pipeable.
+            if as_json:
+                typer.echo(_json.dumps({"order": body, "preview": preview_summary.__dict__}, default=str))
             else:
-                # Preview-mode rejects are warnings, not blockers.
-                typer.secho(
-                    "WARNING: this order would be REJECTED by policy "
-                    f"{prof.name!r} during a real `order place`. "
-                    "Preview exits 0 anyway — informational only.",
-                    fg=typer.colors.YELLOW, err=True,
-                )
-        return
+                if decision.approved:
+                    typer.echo("(dry-run: not sending placeOrder)", err=True)
+                else:
+                    # Preview-mode rejects are warnings, not blockers.
+                    typer.secho(
+                        "WARNING: this order would be REJECTED by policy "
+                        f"{prof.name!r} during a real `order place`. "
+                        "Preview exits 0 anyway — informational only.",
+                        fg=typer.colors.YELLOW, err=True,
+                    )
+            return
 
-    # In real-place mode, a policy reject hard-blocks the wire call.
-    if not decision.approved:
-        typer.secho(
-            f"REJECTED by policy {prof.name!r}: {decision.reason}",
-            fg=typer.colors.RED, err=True,
-        )
-        typer.secho(
-            "(no order sent to Schwab. Use `--profile <other>` or pass "
-            "`--override` (Phase 2e) to bypass.)",
-            fg=typer.colors.RED, err=True,
-        )
-        raise typer.Exit(code=EXIT_POLICY_REJECTED)
+        # In real-place mode, a policy reject hard-blocks the wire call.
+        if not decision.approved:
+            typer.secho(
+                f"REJECTED by policy {prof.name!r}: {decision.reason}",
+                fg=typer.colors.RED, err=True,
+            )
+            typer.secho(
+                "(no order sent to Schwab. Use `--profile <other>` or pass "
+                "`--override REASON --override-confirm` to bypass.)",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=EXIT_POLICY_REJECTED)
 
-    # _confirm_or_abort raises typer.Exit(0) when the user doesn't say
-    # "yea". We want the abort to land in the audit log too, so wrap.
-    try:
-        _confirm_or_abort(yes=yes)
-    except typer.Exit as exit_:
-        if int(exit_.exit_code or 0) == 0:
-            _audit(sub, "aborted", account=acct.account_number)
-        raise
-    _audit(
-        sub, "confirmed",
-        account=acct.account_number,
-        via="--yes" if yes else "yea",
-    )
+        # _confirm_or_abort raises typer.Exit(0) when the user doesn't say
+        # "yea". We want the abort to land in the audit log too, so wrap.
+        try:
+            _confirm_or_abort(yes=yes)
+        except typer.Exit as exit_:
+            if int(exit_.exit_code or 0) == 0:
+                _audit(sub, "aborted", account=acct.account_number)
+            raise
+        _audit(
+            sub, "confirmed",
+            account=acct.account_number,
+            via="--yes" if yes else "yea",
+        )
 
     try:
         order_id, _resp = _safe_place(
@@ -786,6 +1077,11 @@ def run_place(
             account_number=acct.account_number,
             underlying=_underlying_from_body(body),
         )
+        # Phase 2e: also bump the override counter for the per-day cap.
+        if overriding:
+            _counters_mod.record_override(
+                account_number=acct.account_number,
+            )
     except Exception as e:  # noqa: BLE001
         _audit(
             sub, "counter_increment_failed",

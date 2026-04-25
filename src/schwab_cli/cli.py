@@ -778,6 +778,19 @@ def order_place(
         None, "--profile",
         help="Policy profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
     ),
+    override_reason: str = typer.Option(
+        None, "--override",
+        help=(
+            "Bypass the policy gate. Reason 10-500 chars; logged "
+            "verbatim. Requires --override-confirm. Tier-driven ceremony "
+            "follows (cli / telegram_notify_then_cli / telegram_inbound)."
+        ),
+    ),
+    override_confirm: bool = typer.Option(
+        False, "--override-confirm",
+        help="Required companion flag for --override. Without it the "
+             "override has no effect (ceremony — see docs/plan/order.md).",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     order_cmd.run_place(
@@ -788,6 +801,8 @@ def order_place(
         special=special, parse_string=parse_string,
         dry_run=dry_run, yes=yes, as_json=as_json,
         profile=profile,
+        override_reason=override_reason,
+        override_confirm=override_confirm,
     )
 
 
