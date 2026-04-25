@@ -454,9 +454,13 @@ class OverrideCeremonyRule:
 
 
 class ConfirmRule:
-    """Final yea/no prompt. Always runs for real-place; ``--yes`` is
-    handled inside ``_confirm_or_abort`` (it just prints "skipping" and
-    returns)."""
+    """Final yes/no prompt. Always runs for real-place; ``--yes`` is
+    handled inside ``_confirm_or_abort`` (prints "skipping" and returns).
+
+    For interactive (non-``--yes``) place runs we also start a
+    :class:`LiveTicker` that polls the underlying quote in the
+    background and repaints a status line above the prompt every ~1.5s,
+    so the operator decides on fresh data."""
 
     name = "confirm"
 
@@ -464,26 +468,93 @@ class ConfirmRule:
         return not ctx.dry_run
 
     def execute(self, ctx: OrderContext) -> RuleResult:
-        from schwab_cli.commands.order import _audit, _confirm_or_abort
-        try:
-            # `--override` paths have their own ceremony already; the
-            # standard --yes / yea prompt still runs after.
-            _confirm_or_abort(yes=ctx.yes if not ctx.overriding else False)
-        except typer.Exit as exit_:
-            if int(exit_.exit_code or 0) == 0:
-                _audit(
-                    ctx.sub, "aborted",
-                    account=ctx.account.account_number,
-                    **({"override": "aborted_at_yes"} if ctx.overriding else {}),
-                )
-            raise
-        _audit(
-            ctx.sub, "confirmed",
-            account=ctx.account.account_number,
-            via="--yes" if (ctx.yes and not ctx.overriding) else "yes",
-            **({"override": True} if ctx.overriding else {}),
+        from schwab_cli.commands.order import (
+            _audit, _confirm_or_abort, _fetch_underlying_quote_safe,
         )
+
+        # Only run a live ticker when (a) we'll actually display a prompt
+        # and (b) we have an underlying symbol from the panel-time fetch.
+        skip_prompt = ctx.yes and not ctx.overriding
+        ticker = None
+        if not skip_prompt:
+            # Blank-line separator between panel and prompt; emitted here
+            # (not inside _confirm_or_abort) so the ticker's initial line
+            # lands directly above the prompt for deterministic repaint.
+            typer.echo("", err=True)
+            if ctx.underlying_quote is not None:
+                from .live_ticker import LiveTicker
+                initial = _format_live_line(ctx.underlying_quote)
+                ticker = LiveTicker(
+                    fetch=lambda: _fetch_underlying_quote_safe(
+                        ctx.client, ctx.body,
+                    ),
+                    render=_format_live_line,
+                    initial_line=initial,
+                )
+                ticker.start()
+
+        try:
+            try:
+                # `--override` paths have their own ceremony already; the
+                # standard --yes / yes prompt still runs after.
+                _confirm_or_abort(yes=ctx.yes if not ctx.overriding else False)
+            except typer.Exit as exit_:
+                if int(exit_.exit_code or 0) == 0:
+                    _audit(
+                        ctx.sub, "aborted",
+                        account=ctx.account.account_number,
+                        **({"override": "aborted_at_yes"} if ctx.overriding else {}),
+                    )
+                raise
+            _audit(
+                ctx.sub, "confirmed",
+                account=ctx.account.account_number,
+                via="--yes" if (ctx.yes and not ctx.overriding) else "yes",
+                **({"override": True} if ctx.overriding else {}),
+            )
+        finally:
+            if ticker is not None:
+                ticker.stop()
         return RuleResult()
+
+
+def _format_live_line(q: dict) -> str:
+    """One-line status: "Live <SYM>  $last  bid $bx ×N  ask $ax ×N  vol".
+
+    Stays under 78 chars on typical terminals.
+    """
+    sym = q.get("symbol", "?")
+    last = q.get("last")
+    bid = q.get("bid")
+    ask = q.get("ask")
+    bid_size = q.get("bid_size")
+    ask_size = q.get("ask_size")
+    net_change = q.get("net_change")
+
+    def _money(v: float | None) -> str:
+        if v is None:
+            return "—"
+        return f"${v:,.2f}"
+
+    def _signed(v: float | None) -> str:
+        if v is None:
+            return ""
+        sign = "+" if v >= 0 else "-"
+        return f"  ({sign}${abs(v):,.2f})"
+
+    def _qty(v: float | int | None) -> str:
+        if v is None:
+            return "—"
+        try:
+            return f"{int(v):,}"
+        except (TypeError, ValueError):
+            return "—"
+
+    return (
+        f"  Live {sym}  {_money(last)}{_signed(net_change)}  "
+        f"bid {_money(bid)} ×{_qty(bid_size)}  "
+        f"ask {_money(ask)} ×{_qty(ask_size)}"
+    )
 
 
 class PlaceOrderRule:

@@ -294,11 +294,15 @@ def _send_override_notification(
 def _confirm_or_abort(*, yes: bool) -> None:
     """Block until the user types 'yes' (case-insensitive). With ``yes=True``,
     skip the prompt entirely. Anything other than 'yes' aborts (exit 0).
+
+    The caller is responsible for any leading blank line / live-ticker
+    output above the prompt — keeping the prompt itself a single line
+    means the ticker's row math (``\\x1b[1A`` to repaint one row up) is
+    deterministic.
     """
     if yes:
         typer.echo("(--yes: skipping confirmation prompt)", err=True)
         return
-    typer.echo("", err=True)  # blank line separating panel from prompt
     typer.echo('Type "yes" to confirm:', err=True, nl=False)
     typer.echo(" ", err=True, nl=False)
     try:
@@ -1446,6 +1450,8 @@ def run_cancel(
     typer.echo(render_order_detail_human(order), err=True)
 
     try:
+        if not yes:
+            typer.echo("", err=True)  # separator between panel and prompt
         _confirm_or_abort(yes=yes)
     except typer.Exit as exit_:
         if int(exit_.exit_code or 0) == 0:

@@ -1078,6 +1078,88 @@ def test_type_rejects_side_word_with_helpful_hint(monkeypatch, tmp_path):
     assert "use --side" in result.stderr
 
 
+def test_place_without_yes_starts_and_stops_live_ticker(monkeypatch, tmp_path):
+    """Real-place + interactive confirm should construct a LiveTicker
+    around the prompt: started before the readline, stopped after.
+    The ticker class itself is exercised in test_live_ticker.py — here
+    we just verify the wiring."""
+    _prep(monkeypatch, tmp_path)
+    place_calls: list = []
+    patches = _patches(place_calls=place_calls)
+    quote_calls: list = []
+    def _stub_quotes(client, symbols, **kwargs):
+        quote_calls.append(symbols)
+        return _QUOTE_PAYLOAD
+    patches.append(patch("schwab_cli.api.quotes.get_quotes",
+                         side_effect=_stub_quotes))
+
+    started: list = []
+    stopped: list = []
+
+    class _StubTicker:
+        def __init__(self, *, fetch, render, initial_line, config=None):
+            self._initial = initial_line
+            self._fetch = fetch
+        def start(self) -> None:
+            started.append(self._initial)
+        def stop(self) -> None:
+            stopped.append(True)
+
+    patches.append(
+        patch("schwab_cli.order_pipeline.live_ticker.LiveTicker",
+              _StubTicker),
+    )
+
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+        ], input="yes\n")
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    # Ticker constructed and used exactly once.
+    assert len(started) == 1
+    assert len(stopped) == 1
+    # Initial line carried the symbol from the panel-time fetch.
+    assert "AAPL" in started[0]
+    # Order actually placed (we typed "yes").
+    assert len(place_calls) == 1
+
+
+def test_place_with_yes_does_not_start_ticker(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    place_calls: list = []
+    patches = _patches(place_calls=place_calls)
+    started: list = []
+
+    class _StubTicker:
+        def __init__(self, **kw):
+            pass
+        def start(self) -> None:
+            started.append(True)
+        def stop(self) -> None:
+            pass
+
+    patches.append(
+        patch("schwab_cli.order_pipeline.live_ticker.LiveTicker",
+              _StubTicker),
+    )
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+            "--yes",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert started == []
+    assert len(place_calls) == 1
+
+
 def test_quantity_with_leg_is_rejected(monkeypatch, tmp_path):
     """``--quantity`` is ambiguous when paired with ``--leg`` (each leg
     already carries its own signed N). Reject before doing anything."""
