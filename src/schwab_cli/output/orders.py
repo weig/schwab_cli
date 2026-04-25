@@ -315,8 +315,10 @@ def render_confirmation(
     for leg in body.get("orderLegCollection", []):
         lines.append(_format_leg_line(leg))
 
-    # Width fits the longest label below ("Result Buying Power (Option):").
-    _w = 32
+    # Width fits the longest current label ("Buying Power (Option):" =
+    # 22 chars) plus a 2-char minimum gap to the value column. Wider
+    # columns just produce dead air across every panel row.
+    _w = 24
 
     def _row(label: str, value: str) -> str:
         return f"  {(label + ':').ljust(_w)}{value}"
