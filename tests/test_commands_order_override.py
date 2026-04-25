@@ -210,7 +210,7 @@ def test_override_happy_path_typed_override_then_yea(
             ["order", "place", "AAPL", "--account", "5678",
              "--type", "LIMIT", "--price", "150", "--side", "BUY",
              "--override", _REASON, "--override-confirm"],
-            input="OVERRIDE\nyea\n",
+            input="OVERRIDE\nyes\n",
         )
     finally:
         _exit(patches)
@@ -262,7 +262,7 @@ def test_override_notify_on_override_fires_telegram(monkeypatch, tmp_path):
             ["order", "place", "AAPL", "--account", "5678",
              "--type", "LIMIT", "--price", "150", "--side", "BUY",
              "--override", _REASON, "--override-confirm"],
-            input="OVERRIDE\nyea\n",
+            input="OVERRIDE\nyes\n",
         )
     finally:
         _exit(patches)
@@ -290,7 +290,7 @@ def test_override_audit_row_contains_reason(monkeypatch, tmp_path):
             ["order", "place", "AAPL", "--account", "5678",
              "--type", "LIMIT", "--price", "150", "--side", "BUY",
              "--override", _REASON, "--override-confirm"],
-            input="OVERRIDE\nyea\n",
+            input="OVERRIDE\nyes\n",
         )
     finally:
         _exit(patches)
@@ -322,7 +322,7 @@ def test_override_does_not_increment_override_counter(monkeypatch, tmp_path):
             ["order", "place", "AAPL", "--account", "5678",
              "--type", "LIMIT", "--price", "150", "--side", "BUY",
              "--override", _REASON, "--override-confirm"],
-            input="OVERRIDE\nyea\n",
+            input="OVERRIDE\nyes\n",
         )
     finally:
         _exit(patches)

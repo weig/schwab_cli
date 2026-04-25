@@ -474,13 +474,13 @@ class ConfirmRule:
                 _audit(
                     ctx.sub, "aborted",
                     account=ctx.account.account_number,
-                    **({"override": "aborted_at_yea"} if ctx.overriding else {}),
+                    **({"override": "aborted_at_yes"} if ctx.overriding else {}),
                 )
             raise
         _audit(
             ctx.sub, "confirmed",
             account=ctx.account.account_number,
-            via="--yes" if (ctx.yes and not ctx.overriding) else "yea",
+            via="--yes" if (ctx.yes and not ctx.overriding) else "yes",
             **({"override": True} if ctx.overriding else {}),
         )
         return RuleResult()
@@ -547,7 +547,7 @@ class PlaceOrderRule:
         if ctx.as_json:
             typer.echo(_json.dumps({"orderId": order_id}))
         else:
-            typer.echo(f"placed order {order_id}", err=True)
+            typer.echo(f"Schwab: placed order {order_id}", err=True)
         return RuleResult()
 
 

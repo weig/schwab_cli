@@ -14,7 +14,7 @@ Phase 1 supports:
 * ``order cancel``   — DELETE one order by id.
 
 The confirmation flow (place / cancel) requires the user to type
-``"yea"`` (case-insensitive) unless ``--yes`` is passed. Even with
+``"yes"`` (case-insensitive) unless ``--yes`` is passed. Even with
 ``--yes`` the panel renders so the user has a record of what was sent.
 
 **Safety**: tests for this module mock every Schwab call. Never let
@@ -283,20 +283,21 @@ def _send_override_notification(
 
 
 def _confirm_or_abort(*, yes: bool) -> None:
-    """Block until the user types 'yea' (case-insensitive). With ``yes``,
-    skip the prompt entirely. Anything other than 'yea' aborts (exit 0).
+    """Block until the user types 'yes' (case-insensitive). With ``yes=True``,
+    skip the prompt entirely. Anything other than 'yes' aborts (exit 0).
     """
     if yes:
         typer.echo("(--yes: skipping confirmation prompt)", err=True)
         return
-    typer.echo('Type "yea" to confirm:', err=True, nl=False)
+    typer.echo("", err=True)  # blank line separating panel from prompt
+    typer.echo('Type "yes" to confirm:', err=True, nl=False)
     typer.echo(" ", err=True, nl=False)
     try:
         entered = sys.stdin.readline()
     except (KeyboardInterrupt, EOFError):
         typer.echo("\naborted", err=True)
         raise typer.Exit(code=0)
-    if not re.fullmatch(r"\s*yea\s*", entered, re.IGNORECASE):
+    if not re.fullmatch(r"\s*yes\s*", entered, re.IGNORECASE):
         typer.echo("aborted", err=True)
         raise typer.Exit(code=0)
 

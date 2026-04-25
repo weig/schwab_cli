@@ -705,7 +705,7 @@ order_app = typer.Typer(
         "Place, preview, list, get, and cancel Schwab orders. Phase 1 "
         "supports equity (single leg) and option orders (single or "
         "multi-leg via --leg or --parse). Confirmation prompt requires "
-        'typing "yea" unless --yes is passed.'
+        'typing "yes" unless --yes is passed.'
     ),
     no_args_is_help=True,
 )
@@ -768,7 +768,7 @@ def order_place(
     ),
     yes: bool = typer.Option(
         False, "--yes",
-        help='Skip the "yea" confirmation prompt. Panel still renders for the record.',
+        help='Skip the "yes" confirmation prompt. Panel still renders for the record.',
     ),
     as_json: bool = typer.Option(
         False, "--json",
@@ -888,7 +888,7 @@ def order_cancel(
     ),
     yes: bool = typer.Option(
         False, "--yes",
-        help='Skip the "yea" confirmation prompt.',
+        help='Skip the "yes" confirmation prompt.',
     ),
     as_json: bool = typer.Option(False, "--json"),
     doc: bool = doc_option(),

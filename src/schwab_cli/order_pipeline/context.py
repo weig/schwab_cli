@@ -50,7 +50,7 @@ class OrderContext:
     policy_decision: Any | None = None
     placed_order_id: str | None = None
 
-    # Free-form tags rules can set / inspect (e.g. "confirmed_via=yea").
+    # Free-form tags rules can set / inspect (e.g. "confirmed_via=yes").
     tags: dict[str, str] = field(default_factory=dict)
 
 

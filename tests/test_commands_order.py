@@ -10,7 +10,7 @@ Coverage:
       and render the panel without calling placeOrder.
     - ``order place --yes`` calls placeOrder exactly once and prints
       the returned id.
-    - ``order place`` aborts cleanly when stdin doesn't supply "yea".
+    - ``order place`` aborts cleanly when stdin doesn't supply "yes".
     - ``--parse`` mutex check.
     - ``--leg`` parsing and option-leg expansion.
     - ``order list`` defaults: ACTIVE → ALL → 60-day window;
@@ -221,7 +221,7 @@ def test_place_with_yes_skips_prompt_and_calls_placeOrder(monkeypatch, tmp_path)
     assert account_hash == "HASH"
     assert body["orderType"] == "LIMIT"
     assert body["orderLegCollection"][0]["instrument"]["symbol"] == "AAPL"
-    assert "placed order 987654" in result.stderr
+    assert "Schwab: placed order 987654" in result.stderr
 
 
 def test_place_aborts_when_user_does_not_type_yea(monkeypatch, tmp_path):
@@ -243,7 +243,7 @@ def test_place_aborts_when_user_does_not_type_yea(monkeypatch, tmp_path):
     assert "aborted" in result.stderr
 
 
-def test_place_proceeds_when_user_types_yea(monkeypatch, tmp_path):
+def test_place_proceeds_when_user_types_yes(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     place_calls: list = []
     patches = _patches(place_calls=place_calls)
@@ -253,7 +253,7 @@ def test_place_proceeds_when_user_types_yea(monkeypatch, tmp_path):
             app,
             ["order", "place", "AAPL", "--account", "5678",
              "--type", "LIMIT", "--price", "150", "--side", "BUY"],
-            input="YEA\n",
+            input="YES\n",
         )
     finally:
         _exit_all(patches)
