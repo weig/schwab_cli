@@ -932,6 +932,21 @@ def _check_profile_type(t: str) -> None:
         raise typer.Exit(code=2)
 
 
+@profile_app.command(
+    "new",
+    help=(
+        "Interactively create a new profile. Top-level questionnaire "
+        "+ a vim-key list editor (j/k/c/d/u/s/q). TTY-only."
+    ),
+)
+def profile_new(
+    type_: str = _PROFILE_TYPE_OPT,
+    doc: bool = doc_option(),
+) -> None:
+    _check_profile_type(type_)
+    profile_cmd.run_new()
+
+
 @profile_app.command("show", help="Print the resolved profile as JSON.")
 def profile_show(
     type_: str = _PROFILE_TYPE_OPT,

@@ -42,6 +42,19 @@ def _resolve_name(flag: str | None) -> str:
     )
 
 
+def run_new() -> None:
+    """Interactive `profile new --type=order` (Phase 2f-4).
+
+    Drives the questionnaire + vim-key list editor. TTY-only —
+    non-TTY exits 2 with a pointer at hand-authoring.
+    """
+    from schwab_cli.order_policy.loader import profiles_dir
+    from schwab_cli.order_policy.profile_new import run_interactive
+    code = run_interactive(base_dir=profiles_dir())
+    if code != 0:
+        raise typer.Exit(code=code)
+
+
 def run_show(*, profile: str | None) -> None:
     name = _resolve_name(profile)
     try:
