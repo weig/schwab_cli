@@ -579,8 +579,10 @@ def _format_live_line(q: dict) -> str:
             return f"{n / 1e3:.1f}K"
         return f"{n}"
 
+    # Anchored at column 0 with a leading 📡 icon so the live row is
+    # visually distinct from the indented panel rows above it.
     return (
-        f"  Live {sym}  {_money(last)}{_signed(net_change)}  "
+        f"📡 Live {sym}  {_money(last)}{_signed(net_change)}  "
         f"bid {_money(bid)} ×{_qty(bid_size)}  "
         f"ask {_money(ask)} ×{_qty(ask_size)}  "
         f"vol {_vol(volume)}"

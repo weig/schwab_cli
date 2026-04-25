@@ -185,8 +185,14 @@ def _render_policy_decision(decision: Decision) -> None:
                 if p.unevaluatable:
                     detail += "  [unavailable in current phase]"
                 typer.secho(detail, fg=typer.colors.RED, err=True)
+    # Map internal verbs to past-participle policy vocabulary so the
+    # display lines up with the engine's allow/deny semantics:
+    #   "approve" → APPROVED   (the order is allowed through)
+    #   "reject"  → DENIED     (the order was blocked by a deny rule
+    #                          or fell through the default_action: deny)
+    label = {"approve": "APPROVED"}.get(decision.decision, "DENIED")
     typer.secho(
-        f"  Decision: {decision.decision.upper()}",
+        f"  Decision: {label}",
         fg=color, bold=True, err=True,
     )
 

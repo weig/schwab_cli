@@ -73,17 +73,20 @@ class LiveTicker:
     def start(self) -> None:
         """Print the initial line and start the background poller.
 
-        The initial line is printed BEFORE the caller prints the prompt
-        so the layout becomes::
+        Layout written by ``start()``::
 
-            <initial_line>            ← row N
-            <prompt>                  ← row N+1, cursor here
+            <initial_line>            ← row N    (live ticker target)
+                                      ← row N+1  (blank separator)
+            <prompt>                  ← row N+2  (cursor lands here)
 
-        The thread overwrites row N (one above the cursor) on each tick.
+        Each tick the thread moves the cursor up two rows (``\\x1b[2A``)
+        to overwrite row N, then restores. The blank separator gives the
+        live block visual breathing room from the prompt.
         """
         # Always print the initial line — even on non-TTY — so the user
-        # sees the most recent quote at decision time.
-        sys.stderr.write(self._initial_line + "\n")
+        # sees the most recent quote at decision time. Trailing "\n\n"
+        # creates the blank separator row below the live line.
+        sys.stderr.write(self._initial_line + "\n\n")
         sys.stderr.flush()
         if not self._tty:
             return  # no live updates without ANSI; the static line stands
@@ -116,16 +119,17 @@ class LiveTicker:
             self._repaint(line)
 
     def _repaint(self, line: str) -> None:
-        """Move cursor up one row, clear it, write ``line``, return.
+        """Move cursor up two rows, clear, write ``line``, restore.
 
-        Sequence: ``\\x1b7`` save cursor, ``\\x1b[1A`` up one, ``\\x1b[2K``
-        clear entire line, ``\\r`` carriage return, ``write(line)``,
-        ``\\x1b8`` restore cursor (back to where the user is typing).
+        Sequence: ``\\x1b7`` save cursor, ``\\x1b[2A`` up two rows (past
+        the blank separator to land on the live row), ``\\x1b[2K\\r``
+        clear that line and CR to col 0, ``write(line)``, ``\\x1b8``
+        restore cursor (back to where the user is typing).
         """
         if not self._tty:
             return
         try:
-            sys.stderr.write("\x1b7\x1b[1A\x1b[2K\r" + line + "\x1b8")
+            sys.stderr.write("\x1b7\x1b[2A\x1b[2K\r" + line + "\x1b8")
             sys.stderr.flush()
         except Exception:  # noqa: BLE001 — never let ticker writes crash
             pass
