@@ -195,66 +195,40 @@ def _run_override_path(
     override_reason: str,
     sub: str,
 ) -> None:
-    """Phase 2e — gate + tier-driven ceremony for an override.
+    """Single-ceremony override (Phase 2f-2).
 
-    On entry the panel has already been rendered. This:
+    On entry the panel has already been rendered. The ceremony is:
 
-    1. Refuses if the profile forbids override (``allow_override=False``
-       or ``override_confirmation="deny"``).
-    2. Enforces ``override_max_per_day`` against the counter file.
-    3. Pings Telegram (always, when ``notify_on_override``).
-    4. Drives the typed-``OVERRIDE`` CLI prompt (every tier) and the
-       inbound Telegram ``CONFIRM_OVERRIDE`` wait (``telegram_inbound``
-       tier).
-    5. Audits ``override_invoked``.
+    1. Print the override banner (account, reason).
+    2. Fire a Telegram notification when ``prof.notify_on_override``
+       is true and Telegram is configured. Best-effort; doesn't gate.
+    3. Prompt for typed ``OVERRIDE`` (case-sensitive whole word).
+    4. Audit ``override_invoked``.
 
-    Raises ``typer.Exit(EXIT_USAGE)`` if the profile or cap blocks
-    the override; ``typer.Exit(0)`` if the user aborts at the
-    ``OVERRIDE`` prompt; ``typer.Exit(EXIT_USAGE)`` if the inbound
-    Telegram wait times out.
+    Anything other than typed ``OVERRIDE`` raises ``typer.Exit(0)``
+    (aborted). The post-ceremony ``yea`` prompt and the actual place
+    are handled by the caller.
     """
-    # Phase 2f-1: per-profile override gating + per-day cap dropped.
-    # Every profile accepts override via the single CLI ceremony.
-    # The tier enum is gone too; we hardcode "cli" until 2f-2
-    # finishes the deeper refactor that drops tier-driven branching.
-    tier = "cli"
-
     typer.secho(
         f"\n!! OVERRIDE PATH — bypassing policy {prof.name!r}",
         fg=typer.colors.RED, err=True, bold=True,
     )
-    typer.secho(f"   tier:    {tier}", fg=typer.colors.RED, err=True)
     typer.secho(f"   reason:  {override_reason}",
                 fg=typer.colors.RED, err=True)
 
-    # Notify (always, when notify_on_override).
     if prof.notify_on_override:
         try:
             _send_override_notification(
                 reason=override_reason, body=body,
-                account=account, prof=prof, tier=tier,
+                account=account, prof=prof,
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — best-effort
             _audit(
                 sub, "override_notify_failed",
                 account=account.account_number,
                 error=f"{type(e).__name__}: {e}",
             )
 
-    # Inbound Telegram tier — block until CONFIRM_OVERRIDE arrives.
-    if tier == "telegram_inbound":
-        if not _wait_for_telegram_confirm(account=account):
-            typer.secho(
-                "Telegram CONFIRM_OVERRIDE timed out — override aborted.",
-                fg=typer.colors.RED, err=True,
-            )
-            _audit(
-                sub, "override_telegram_timeout",
-                account=account.account_number, profile_name=prof.name,
-            )
-            raise typer.Exit(code=EXIT_USAGE)
-
-    # Typed CLI prompt — every tier.
     _override_typed_prompt()
 
     _audit(
@@ -262,7 +236,6 @@ def _run_override_path(
         account=account.account_number,
         profile_name=prof.name,
         override_reason=override_reason,
-        override_tier=tier,
     )
 
 
@@ -282,54 +255,8 @@ def _override_typed_prompt() -> None:
         raise typer.Exit(code=0)
 
 
-def _wait_for_telegram_confirm(*, account: AccountIds) -> bool:
-    """Send a prompt to Telegram, then long-poll for ``CONFIRM_OVERRIDE``
-    in reply. Returns True if the reply arrived in time, False on
-    timeout. Network errors during polling propagate to the caller as
-    a generic Exception (audited as override_notify_failed)."""
-    from schwab_cli.notify.config import load as load_notify_config
-    from schwab_cli.notify import telegram as _send
-    from schwab_cli.notify.telegram_poll import (
-        load_claude_allowlist, wait_for_text_reply,
-    )
-
-    cfg = load_notify_config()
-    bot_token = (cfg.telegram.bot_token or "").strip()
-    chat_id = (cfg.telegram.chat_id or "").strip()
-    if not (bot_token and chat_id):
-        typer.secho(
-            "telegram_inbound tier requires Telegram to be configured "
-            "(notify setup) — aborting override.",
-            fg=typer.colors.RED, err=True,
-        )
-        return False
-
-    # Send the prompt.
-    prompt = (
-        "🚨 *Override requested*\n"
-        f"Account: ********{account.account_number[-4:]}\n"
-        "Reply with `CONFIRM_OVERRIDE` within 5 minutes to proceed."
-    )
-    try:
-        _send.send(bot_token=bot_token, chat_id=chat_id, text=prompt)
-    except Exception:  # noqa: BLE001 — best-effort
-        pass
-
-    typer.secho(
-        "Waiting up to 5 minutes for CONFIRM_OVERRIDE on Telegram…",
-        fg=typer.colors.YELLOW, err=True,
-    )
-    out = wait_for_text_reply(
-        bot_token=bot_token, chat_id=chat_id,
-        expected_text="CONFIRM_OVERRIDE",
-        timeout_seconds=300,
-        allowed_user_ids=load_claude_allowlist(),
-    )
-    return out is not None
-
-
 def _send_override_notification(
-    *, reason: str, body: dict, account: AccountIds, prof, tier: str,
+    *, reason: str, body: dict, account: AccountIds, prof,
 ) -> None:
     """Fire-and-forget Telegram message announcing an override
     invocation. Skipped silently when Telegram isn't configured."""
@@ -351,7 +278,7 @@ def _send_override_notification(
     msg = (
         "⚠️ *OVERRIDE INVOKED*\n"
         f"Account: ********{account.account_number[-4:]}\n"
-        f"Profile: {prof.name} (tier={tier})\n"
+        f"Profile: {prof.name}\n"
         f"Order: {body.get('orderType', '?')} "
         f"{body.get('price') or ''}\n"
         f"Legs: {' / '.join(legs_summary) or '(none)'}\n"
@@ -889,7 +816,7 @@ def run_place(
     # ---- override branch (Phase 2e) -------------------------------------
     if overriding:
         # The override path bypasses the policy gate entirely. Render the
-        # confirmation panel + run the tier-driven ceremony + place.
+        # confirmation panel + run the single-ceremony override + place.
         typer.echo(panel, err=True)
         _run_override_path(
             body=body, account=acct, prof=prof,

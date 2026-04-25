@@ -274,7 +274,7 @@ def test_override_notify_on_override_fires_telegram(monkeypatch, tmp_path):
 # ---- audit row ----------------------------------------------------------
 
 
-def test_override_audit_row_contains_reason_and_tier(monkeypatch, tmp_path):
+def test_override_audit_row_contains_reason(monkeypatch, tmp_path):
     profiles = _prep(monkeypatch, tmp_path)
     _write_profile(profiles, "default", {
         "default_action": "deny",
@@ -298,7 +298,8 @@ def test_override_audit_row_contains_reason_and_tier(monkeypatch, tmp_path):
     rows = [json.loads(l) for l in log]
     invoked = next(r for r in rows if r["stage"] == "override_invoked")
     assert invoked["override_reason"] == _REASON
-    assert invoked["override_tier"] == "cli"
+    # tier is gone in 2f-2 — the row must NOT carry it anymore.
+    assert "override_tier" not in invoked
     # And the placed row carries an order_id (placement actually happened).
     placed = next(r for r in rows if r["stage"] == "placed")
     assert placed["order_id"] == "987654"
