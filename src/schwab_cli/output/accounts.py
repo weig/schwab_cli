@@ -16,7 +16,10 @@ def _shape_account(raw: dict) -> dict:
         "accountNumber": sec.get("accountNumber", ""),
         "type": sec.get("type", ""),
         "liquidationValue": bal.get("liquidationValue"),
-        "buyingPower": bal.get("buyingPower"),
+        # TOS terminology: stock BP = `buyingPower` (margin-extended);
+        # option BP = `availableFunds` (cash-secured).
+        "stockBuyingPower": bal.get("buyingPower"),
+        "optionBuyingPower": bal.get("availableFunds"),
         "cashBalance": bal.get("cashBalance"),
         "maintenanceRequirement": bal.get("maintenanceRequirement"),
         "positionCount": len(sec.get("positions") or []),
@@ -57,14 +60,15 @@ def render_accounts(raw_list: list[dict], fmt: Format) -> str:
         return _json.dumps(rows, indent=2)
     if fmt is Format.MD:
         lines = [
-            "| Account | Type | Net Liq | Buying Power | Cash | Maint Req | Positions |",
-            "|---------|------|---------|--------------|------|-----------|-----------|",
+            "| Account | Type | Net Liq | BP (Stock) | BP (Option) | Cash | Maint Req | Positions |",
+            "|---------|------|---------|------------|-------------|------|-----------|-----------|",
         ]
         for r in rows:
             lines.append(
                 f"| {_mask_account(r['accountNumber'])} | {r['type']} | "
                 f"{_fmt_money(r['liquidationValue'])} | "
-                f"{_fmt_money(r['buyingPower'])} | "
+                f"{_fmt_money(r['stockBuyingPower'])} | "
+                f"{_fmt_money(r['optionBuyingPower'])} | "
                 f"{_fmt_money(r['cashBalance'])} | "
                 f"{_fmt_money(r['maintenanceRequirement'])} | "
                 f"{r['positionCount']} |"
@@ -72,12 +76,13 @@ def render_accounts(raw_list: list[dict], fmt: Format) -> str:
         return "\n".join(lines) + "\n"
     # HUMAN — widen so the extra columns fit cleanly
     buf = StringIO()
-    console = Console(file=buf, force_terminal=False, no_color=True, width=140)
+    console = Console(file=buf, force_terminal=False, no_color=True, width=150)
     t = Table(title="Accounts")
     t.add_column("Account", style="bold")
     t.add_column("Type")
     t.add_column("Net Liq", justify="right")
-    t.add_column("Buying Power", justify="right")
+    t.add_column("BP (Stock)", justify="right")
+    t.add_column("BP (Option)", justify="right")
     t.add_column("Cash", justify="right")
     t.add_column("Maint Req", justify="right")
     t.add_column("Positions", justify="right")
@@ -86,7 +91,8 @@ def render_accounts(raw_list: list[dict], fmt: Format) -> str:
             _mask_account(r["accountNumber"]),
             r["type"],
             _fmt_money(r["liquidationValue"]),
-            _fmt_money(r["buyingPower"]),
+            _fmt_money(r["stockBuyingPower"]),
+            _fmt_money(r["optionBuyingPower"]),
             _fmt_money(r["cashBalance"]),
             _fmt_money(r["maintenanceRequirement"]),
             str(r["positionCount"]),
@@ -115,7 +121,10 @@ def render_account(raw: dict, fmt: Format) -> str:
             f"- **Type:** {data['type']}",
             f"- **Liquidation Value:** {_fmt_money(bal.get('liquidationValue'))}",
             f"- **Cash Balance:** {_fmt_money(bal.get('cashBalance'))}",
-            f"- **Buying Power:** {_fmt_money(bal.get('buyingPower'))}",
+            f"- **Buying Power (Stock):** {_fmt_money(bal.get('buyingPower'))}",
+            f"- **Buying Power (Option):** {_fmt_money(bal.get('availableFunds'))}",
+            f"- **Day Trading BP:** {_fmt_money(bal.get('dayTradingBuyingPower'))}",
+            f"- **Maintenance Requirement:** {_fmt_money(bal.get('maintenanceRequirement'))}",
             f"- **Positions:** {data['positionCount']}",
         ]
         return "\n".join(lines) + "\n"
@@ -130,7 +139,10 @@ def render_account(raw: dict, fmt: Format) -> str:
     t.add_row("Type", data["type"])
     t.add_row("Liquidation Value", _fmt_money(bal.get("liquidationValue")))
     t.add_row("Cash Balance", _fmt_money(bal.get("cashBalance")))
-    t.add_row("Buying Power", _fmt_money(bal.get("buyingPower")))
+    t.add_row("Buying Power (Stock)", _fmt_money(bal.get("buyingPower")))
+    t.add_row("Buying Power (Option)", _fmt_money(bal.get("availableFunds")))
+    t.add_row("Day Trading BP", _fmt_money(bal.get("dayTradingBuyingPower")))
+    t.add_row("Maintenance Requirement", _fmt_money(bal.get("maintenanceRequirement")))
     t.add_row("Positions", str(data["positionCount"]))
     console.print(t)
     return buf.getvalue()

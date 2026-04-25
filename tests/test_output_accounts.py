@@ -10,7 +10,8 @@ _ACCOUNTS_PAYLOAD = [
         "type": "MARGIN",
         "currentBalances": {
             "liquidationValue": 12345.67,
-            "buyingPower": 24691.34,
+            "buyingPower": 24691.34,            # stock BP (margin-extended)
+            "availableFunds": 12345.67,         # option BP (cash-secured)
             "cashBalance": 1000.0,
             "maintenanceRequirement": 3456.78,
         },
@@ -36,10 +37,12 @@ def test_render_accounts_json_is_parseable():
     assert data[0]["accountNumber"] == "12345678"
     assert data[0]["type"] == "MARGIN"
     assert data[0]["liquidationValue"] == 12345.67
-    assert data[0]["buyingPower"] == 24691.34
+    assert data[0]["stockBuyingPower"] == 24691.34
+    assert data[0]["optionBuyingPower"] == 12345.67
     assert data[0]["maintenanceRequirement"] == 3456.78
-    # Cash account: buying power / maintenance absent from balances → None in output
-    assert data[1]["buyingPower"] is None
+    # Cash account: BP / maintenance absent from balances → None in output
+    assert data[1]["stockBuyingPower"] is None
+    assert data[1]["optionBuyingPower"] is None
     assert data[1]["maintenanceRequirement"] is None
 
 
@@ -49,7 +52,8 @@ def test_render_accounts_md_has_header_and_rows():
     assert len(lines) >= 4
     # New header includes all requested columns.
     assert "Net Liq" in lines[0]
-    assert "Buying Power" in lines[0]
+    assert "BP (Stock)" in lines[0]
+    assert "BP (Option)" in lines[0]
     assert "Cash" in lines[0]
     assert "Maint" in lines[0]
     assert "Positions" in lines[0]
@@ -57,7 +61,8 @@ def test_render_accounts_md_has_header_and_rows():
     assert "5678" in out
     assert "12345678" not in out
     # MARGIN row shows values; CASH row shows em-dashes for absent fields.
-    assert "24,691.34" in out  # buying power
+    assert "24,691.34" in out  # stock BP
+    assert "12,345.67" in out  # option BP (= availableFunds)
     assert "3,456.78" in out   # maintenance
     assert "—" in out          # em-dash from missing CASH fields
 
@@ -67,8 +72,9 @@ def test_render_accounts_human_includes_last_4_mask():
     assert "5678" in out or "...5678" in out
     # Human table must show the new columns too.
     assert "Net Liq" in out
-    assert "Buying Power" in out
-    assert "Maint" in out  # header may be "Maint Req" or similar
+    assert "BP (Stock)" in out
+    assert "BP (Option)" in out
+    assert "Maint" in out
 
 
 _SINGLE_ACCOUNT = {"securitiesAccount": {
@@ -78,6 +84,8 @@ _SINGLE_ACCOUNT = {"securitiesAccount": {
         "liquidationValue": 12345.67,
         "cashBalance": 1000.0,
         "buyingPower": 24691.34,
+        "availableFunds": 12345.67,
+        "dayTradingBuyingPower": 49382.68,
     },
     "initialBalances": {"cashBalance": 1000.0},
 }}

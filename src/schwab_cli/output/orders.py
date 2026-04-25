@@ -318,6 +318,7 @@ def render_confirmation(
     analytics: OrderAnalytics | None,
     preview: PreviewSummary,
     preview_unavailable: bool = False,
+    underlying_quote: dict | None = None,
 ) -> str:
     """Render the TOS-style confirmation panel as a string.
 
@@ -355,6 +356,35 @@ def render_confirmation(
 
     def _row(label: str, value: str) -> str:
         return f"  {(label + ':').ljust(_w)}{value}"
+
+    # Underlying quote (best-effort — caller passes None on miss).
+    # Header marks the snapshot as "Live Quote" for real-place reviews
+    # vs "Quote" for previews so the operator knows the freshness budget.
+    if underlying_quote:
+        lines.append("")
+        kind = "Live Quote" if underlying_quote.get("is_live") else "Quote"
+        lines.append(f"Underlying  ({underlying_quote.get('symbol', '?')} — {kind})")
+        lines.append("-" * 62)
+        last = underlying_quote.get("last")
+        bid = underlying_quote.get("bid")
+        ask = underlying_quote.get("ask")
+        bid_size = underlying_quote.get("bid_size")
+        ask_size = underlying_quote.get("ask_size")
+        volume = underlying_quote.get("volume")
+        net_change = underlying_quote.get("net_change")
+        last_str = _fmt_money(last) if last is not None else "—"
+        if net_change is not None:
+            last_str = f"{last_str}  ({_fmt_money(net_change, plus=True)})"
+        lines.append(_row("Last", last_str))
+        lines.append(_row(
+            "Bid × Size",
+            f"{_fmt_money(bid)} × {_fmt_size(bid_size)}",
+        ))
+        lines.append(_row(
+            "Ask × Size",
+            f"{_fmt_money(ask)} × {_fmt_size(ask_size)}",
+        ))
+        lines.append(_row("Volume", _fmt_size(volume)))
 
     # P&L
     if analytics is not None:
@@ -447,6 +477,15 @@ def _format_leg_line(leg: dict) -> str:
     if asset == "OPTION":
         return f"  {sign}{qty}  {short_instr}  {sym}"
     return f"  {sign}{qty}  {short_instr}  {sym}  ({asset})"
+
+
+def _fmt_size(v: float | int | None) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{int(v):,}"
+    except (TypeError, ValueError):
+        return "—"
 
 
 def _fmt_money(

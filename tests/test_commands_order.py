@@ -955,3 +955,103 @@ def test_real_place_still_errors_when_no_profile_resolves(monkeypatch, tmp_path)
     assert result.exit_code == 2
     assert place_calls == []
     assert "policy load failed" in result.stderr
+
+
+# ---- underlying-quote gating policy --------------------------------------
+#
+# preview        → fetch (standard)
+# place (no -y)  → fetch (live)
+# place (-y)     → skip
+
+
+_QUOTE_PAYLOAD = {
+    "AAPL": {"quote": {
+        "lastPrice": 200.10,
+        "bidPrice": 200.05, "askPrice": 200.15,
+        "bidSize": 1500, "askSize": 800,
+        "totalVolume": 12_345_678,
+        "netChange": 1.25,
+    }},
+}
+
+
+def test_preview_fetches_quote_and_renders_underlying_section(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    patches = _patches(place_calls=[])
+    quote_calls: list = []
+    def _stub_quotes(client, symbols, **kwargs):
+        quote_calls.append(symbols)
+        return _QUOTE_PAYLOAD
+    patches.append(patch("schwab_cli.api.quotes.get_quotes",
+                         side_effect=_stub_quotes))
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert quote_calls == [["AAPL"]]
+    # Underlying section + standard ("Quote") label, not the live one.
+    assert "Underlying" in result.stderr
+    assert "AAPL — Quote" in result.stderr
+    assert "AAPL — Live Quote" not in result.stderr
+    assert "200.05" in result.stderr  # bid
+    assert "1,500" in result.stderr   # bid size
+
+
+def test_place_without_yes_fetches_live_quote(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    place_calls: list = []
+    patches = _patches(place_calls=place_calls)
+    quote_calls: list = []
+    def _stub_quotes(client, symbols, **kwargs):
+        quote_calls.append(symbols)
+        return _QUOTE_PAYLOAD
+    patches.append(patch("schwab_cli.api.quotes.get_quotes",
+                         side_effect=_stub_quotes))
+    _enter_all(patches)
+    try:
+        # No --yes — interactive confirm prompt aborts at "no" (typer's
+        # default when stdin has nothing). We just want to see that the
+        # quote was fetched and labeled live.
+        result = runner.invoke(app, [
+            "order", "place", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+        ], input="\n")
+    finally:
+        _exit_all(patches)
+    # Quote was fetched once for the panel.
+    assert quote_calls == [["AAPL"]]
+    assert "AAPL — Live Quote" in result.stderr
+    # Confirmation declined → no place call.
+    assert place_calls == []
+
+
+def test_place_with_yes_skips_quote_fetch(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    place_calls: list = []
+    patches = _patches(place_calls=place_calls)
+    quote_calls: list = []
+    def _stub_quotes(client, symbols, **kwargs):
+        quote_calls.append(symbols)
+        return _QUOTE_PAYLOAD
+    patches.append(patch("schwab_cli.api.quotes.get_quotes",
+                         side_effect=_stub_quotes))
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+            "--yes",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    # --yes path skips the quote fetch entirely.
+    assert quote_calls == []
+    # And the panel must not show the Underlying section.
+    assert "Underlying" not in result.stderr
+    assert len(place_calls) == 1
