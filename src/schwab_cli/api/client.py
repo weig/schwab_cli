@@ -50,15 +50,47 @@ class SchwabClient:
 
     def get(self, url: str, *, params: dict | None = None) -> dict | list:
         """Authed GET. Returns parsed JSON body. Raises ApiError/SessionExpired."""
+        resp = self._authed_request("GET", url, params=params)
+        return resp.json()
+
+    def post(
+        self, url: str, *, json: dict | None = None, params: dict | None = None,
+    ) -> httpx.Response:
+        """Authed POST. Returns the raw :class:`httpx.Response` so the caller
+        can read headers (e.g. the ``Location`` header on a 201 from
+        ``placeOrder`` / ``replaceOrder``) and decide whether to parse
+        the body. Raises ApiError/SessionExpired on auth/network/HTTP
+        failures.
+        """
+        return self._authed_request("POST", url, json=json, params=params)
+
+    def delete(self, url: str, *, params: dict | None = None) -> httpx.Response:
+        """Authed DELETE. Returns raw :class:`httpx.Response` (Schwab's
+        ``cancelOrder`` returns 200/204 with no body)."""
+        return self._authed_request("DELETE", url, params=params)
+
+    def _authed_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+    ) -> httpx.Response:
+        """Issue ``method`` against ``url`` with the bearer token; on 401,
+        refresh once and retry. Returns the response only if it's < 400;
+        otherwise raises :class:`ApiError` (or :class:`SessionExpired`
+        for unrecoverable auth failures).
+        """
         try:
-            resp = self._request("GET", url, params=params)
+            resp = self._request(method, url, params=params, json=json)
         except httpx.RequestError as e:
             raise ApiError(f"network: {type(e).__name__}") from e
 
         if resp.status_code == 401:
             self._refresh_or_expire()
             try:
-                resp = self._request("GET", url, params=params)
+                resp = self._request(method, url, params=params, json=json)
             except httpx.RequestError as e:
                 raise ApiError(f"network: {type(e).__name__}") from e
             if resp.status_code == 401:
@@ -70,13 +102,21 @@ class SchwabClient:
             body = (resp.text or "").splitlines()[0] if resp.text else ""
             raise ApiError(f"{resp.status_code} {body}".strip())
 
-        return resp.json()
+        return resp
 
-    def _request(self, method: str, url: str, *, params: dict | None = None) -> httpx.Response:
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+    ) -> httpx.Response:
         return httpx.request(
             method,
             url,
             params=params,
+            json=json,
             headers={"Authorization": f"Bearer {self._session.access_token}"},
             timeout=30.0,
         )

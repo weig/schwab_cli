@@ -1,6 +1,6 @@
-"""Option-leg parser for the ``strategy`` command.
+"""Option-leg parser for the ``strategy`` and ``order`` commands.
 
-Grammar: ``±N@YYYYMMDD{C|P}STRIKE``
+Grammar: ``±N@YYYYMMDD{C|P}STRIKE[o|c]``
 
 Each ``--leg`` token describes one contract in a multi-leg position:
 
@@ -10,12 +10,17 @@ Each ``--leg`` token describes one contract in a multi-leg position:
 * ``YYYYMMDD`` full 8-digit calendar date; must be a real date.
 * ``C`` / ``P`` side; lowercase accepted and normalised.
 * ``STRIKE`` positive number (int or float).
+* ``o`` / ``c`` optional **open/close suffix**: ``o`` (default, opening)
+              or ``c`` (closing). Combined with the sign this maps to
+              the Schwab ``instruction`` field — see :data:`Effect`.
 
 Examples::
 
-    -1@20260501P270.5    sell 1 put, 2026-05-01, strike 270.5
-    +2@20260501C255      buy 2 calls, 2026-05-01, strike 255
-    1@20260701P300       buy 1 put (unsigned = buy)
+    -1@20260501P270.5     sell to open 1 put, 2026-05-01, strike 270.5
+    +2@20260501C255       buy to open 2 calls
+    1@20260701P300        buy to open 1 put (unsigned = buy)
+    +1@20260117C250c      buy to CLOSE 1 call (closing a short)
+    -1@20260117P200c      sell to CLOSE 1 put (closing a long)
 """
 
 from __future__ import annotations
@@ -26,6 +31,10 @@ from datetime import date
 from typing import Literal
 
 Side = Literal["C", "P"]
+Effect = Literal["o", "c"]
+Instruction = Literal[
+    "BUY_TO_OPEN", "BUY_TO_CLOSE", "SELL_TO_OPEN", "SELL_TO_CLOSE"
+]
 
 
 class LegParseError(ValueError):
@@ -39,12 +48,18 @@ class Leg:
     ``qty`` is signed: positive = long, negative = short. The absolute
     value is the contract count (ratios like 2:1 use ``qty=2`` paired
     with ``qty=-1``).
+
+    ``effect`` is the open/close intent (``"o"`` opening, ``"c"`` closing),
+    needed to derive the Schwab ``instruction`` field for orders. Defaults
+    to ``"o"`` since opening is the dominant case and analytics-only
+    callers (the existing strategy command) don't care.
     """
 
     qty: int
     side: Side
     expiry: date
     strike: float
+    effect: Effect = "o"
 
     @property
     def is_long(self) -> bool:
@@ -54,9 +69,17 @@ class Leg:
     def is_short(self) -> bool:
         return self.qty < 0
 
+    @property
+    def instruction(self) -> Instruction:
+        """Schwab ``instruction`` derived from sign + open/close effect."""
+        if self.qty > 0:
+            return "BUY_TO_OPEN" if self.effect == "o" else "BUY_TO_CLOSE"
+        return "SELL_TO_OPEN" if self.effect == "o" else "SELL_TO_CLOSE"
 
-# Grammar: optional sign, digits, '@', 8 digits, side char, strike (int or float).
-# Side and strike parsed loosely here so we can emit specific errors below.
+
+# Grammar: optional sign, digits, '@', 8 digits, side char, strike (int or
+# float), optional open/close suffix.
+# Side, strike, suffix parsed loosely here so we can emit specific errors below.
 _LEG_RE = re.compile(
     r"""
     ^
@@ -65,7 +88,8 @@ _LEG_RE = re.compile(
     @                        # separator
     (?P<date>\d{8})          # YYYYMMDD
     (?P<side>[A-Za-z])       # C or P (case-insensitive, validated later)
-    (?P<strike>-?[\d.]+)     # strike, signed checked below so we can reject it
+    (?P<strike>-?[\d.]+?)    # strike, signed checked below so we can reject it
+    (?P<effect>[A-Za-z]?)    # optional open/close suffix
     $
     """,
     re.VERBOSE,
@@ -143,7 +167,17 @@ def parse_leg(token: str) -> Leg:
     if strike <= 0:
         raise LegParseError(f"{token!r}: strike must be positive, got {strike}")
 
-    return Leg(qty=qty, side=side_raw, expiry=expiry, strike=strike)
+    effect_raw = m.group("effect").lower()
+    if effect_raw == "":
+        effect: Effect = "o"
+    elif effect_raw in ("o", "c"):
+        effect = effect_raw  # type: ignore[assignment]
+    else:
+        raise LegParseError(
+            f"{token!r}: open/close suffix must be 'o' or 'c', got {m.group('effect')!r}"
+        )
+
+    return Leg(qty=qty, side=side_raw, expiry=expiry, strike=strike, effect=effect)
 
 
 def _diagnose_after_at(token: str, rest: str) -> None:

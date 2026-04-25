@@ -166,3 +166,53 @@ def test_leg_is_short_and_is_long_helpers():
     long_ = Leg(qty=1, side="C", expiry=date(2026, 5, 1), strike=260.0)
     assert short.is_short and not short.is_long
     assert long_.is_long and not long_.is_short
+
+
+# ---- open/close suffix --------------------------------------------------
+
+
+def test_parse_leg_default_effect_is_open():
+    leg = parse_leg("+1@20260501C255")
+    assert leg.effect == "o"
+    assert leg.instruction == "BUY_TO_OPEN"
+
+
+def test_parse_leg_open_suffix_explicit():
+    leg = parse_leg("+1@20260501C255o")
+    assert leg.effect == "o"
+    assert leg.instruction == "BUY_TO_OPEN"
+
+
+def test_parse_leg_close_suffix_long_call():
+    leg = parse_leg("+1@20260117C250c")
+    assert leg.effect == "c"
+    assert leg.instruction == "BUY_TO_CLOSE"
+
+
+def test_parse_leg_close_suffix_short_put():
+    leg = parse_leg("-1@20260501P270.5c")
+    assert leg.effect == "c"
+    assert leg.instruction == "SELL_TO_CLOSE"
+    assert leg.strike == 270.5
+
+
+def test_parse_leg_close_suffix_uppercase():
+    leg = parse_leg("-2@20260501P240C")
+    assert leg.effect == "c"
+    assert leg.instruction == "SELL_TO_CLOSE"
+
+
+def test_parse_leg_invalid_effect_letter_rejected():
+    with pytest.raises(LegParseError, match="suffix"):
+        parse_leg("+1@20260501C255x")
+
+
+def test_parse_leg_instruction_all_four():
+    long_open = parse_leg("+1@20260501C250o")
+    long_close = parse_leg("+1@20260501C250c")
+    short_open = parse_leg("-1@20260501C250o")
+    short_close = parse_leg("-1@20260501C250c")
+    assert long_open.instruction == "BUY_TO_OPEN"
+    assert long_close.instruction == "BUY_TO_CLOSE"
+    assert short_open.instruction == "SELL_TO_OPEN"
+    assert short_close.instruction == "SELL_TO_CLOSE"

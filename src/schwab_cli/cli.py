@@ -10,6 +10,7 @@ from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import mcp as mcp_cmd
 from schwab_cli.commands import notify as notify_cmd
 from schwab_cli.commands import option as option_cmd
+from schwab_cli.commands import order as order_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import skew as skew_cmd
@@ -693,4 +694,179 @@ def transactions(
         type_filter=type_filter,
         as_json=as_json,
         as_md=as_md,
+    )
+
+
+# ---- order subcommand group ----------------------------------------------
+
+order_app = typer.Typer(
+    help=(
+        "Place, preview, list, get, and cancel Schwab orders. Phase 1 "
+        "supports equity (single leg) and option orders (single or "
+        "multi-leg via --leg or --parse). Confirmation prompt requires "
+        'typing "yea" unless --yes is passed.'
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(order_app, name="order")
+
+
+@order_app.command("place", help="Place an order. Always shows a confirmation panel.")
+def order_place(
+    symbol: str = typer.Argument(
+        None,
+        help="Underlying symbol for an equity order. Omit when using --leg or --parse.",
+    ),
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Account number or trailing-digit suffix (required for place).",
+    ),
+    order_type: str = typer.Option(
+        None, "--type",
+        help="MARKET, LIMIT, NET_DEBIT, NET_CREDIT (Phase 1).",
+    ),
+    price: float = typer.Option(
+        None, "--price",
+        help="Limit / net price. Required for LIMIT, NET_DEBIT, NET_CREDIT.",
+    ),
+    quantity: int = typer.Option(
+        None, "--quantity", "-q",
+        help="Equity share count (default 1). Multi-leg uses qty in --leg.",
+    ),
+    side: str = typer.Option(
+        None, "--side",
+        help="Equity instruction: BUY, SELL, SELL_SHORT, BUY_TO_COVER (default BUY).",
+    ),
+    duration: str = typer.Option(
+        None, "--duration",
+        help="DAY, GTC (=GOOD_TILL_CANCEL), FOK, IOC, etc. (default DAY).",
+    ),
+    session: str = typer.Option(
+        "NORMAL", "--session",
+        help="NORMAL, AM, PM, SEAMLESS. AM/PM/SEAMLESS require LIMIT+DAY.",
+    ),
+    legs: list[str] = typer.Option(
+        [], "--leg",
+        help="Repeatable option leg spec: ±N@YYYYMMDD{C|P}STRIKE[o|c].",
+    ),
+    complex_strategy: str = typer.Option(
+        None, "--complex",
+        help="complexOrderStrategyType (NONE, VERTICAL, CALENDAR, ..., CUSTOM, AUTO).",
+    ),
+    special: str = typer.Option(
+        None, "--special",
+        help="specialInstruction (ALL_OR_NONE, DO_NOT_REDUCE, ...).",
+    ),
+    parse_string: str = typer.Option(
+        None, "--parse",
+        help='Schwab/TOS-style ticket, e.g. "BUY +1 VERTICAL AMZN 1 MAY 26 250/260 CALL @1.50 LMT".',
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Render the confirmation panel and exit without placing the order (same as `order preview`).",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes",
+        help='Skip the "yea" confirmation prompt. Panel still renders for the record.',
+    ),
+    as_json: bool = typer.Option(
+        False, "--json",
+        help="Emit JSON on stdout (panel still goes to stderr).",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    order_cmd.run_place(
+        symbol=symbol, account=account,
+        order_type=order_type, price=price, quantity=quantity, side=side,
+        duration=duration, session=session,
+        leg_specs=tuple(legs), complex_strategy=complex_strategy,
+        special=special, parse_string=parse_string,
+        dry_run=dry_run, yes=yes, as_json=as_json,
+    )
+
+
+@order_app.command("preview", help="Preview an order — same as `place --dry-run`.")
+def order_preview(
+    symbol: str = typer.Argument(None, help="Equity underlying."),
+    account: str = typer.Option(
+        None, "--account", "-a", help="Account number / suffix (required)."
+    ),
+    order_type: str = typer.Option(None, "--type"),
+    price: float = typer.Option(None, "--price"),
+    quantity: int = typer.Option(None, "--quantity", "-q"),
+    side: str = typer.Option(None, "--side"),
+    duration: str = typer.Option(None, "--duration"),
+    session: str = typer.Option("NORMAL", "--session"),
+    legs: list[str] = typer.Option([], "--leg"),
+    complex_strategy: str = typer.Option(None, "--complex"),
+    special: str = typer.Option(None, "--special"),
+    parse_string: str = typer.Option(None, "--parse"),
+    as_json: bool = typer.Option(False, "--json"),
+    doc: bool = doc_option(),
+) -> None:
+    order_cmd.run_place(
+        symbol=symbol, account=account,
+        order_type=order_type, price=price, quantity=quantity, side=side,
+        duration=duration, session=session,
+        leg_specs=tuple(legs), complex_strategy=complex_strategy,
+        special=special, parse_string=parse_string,
+        dry_run=True, yes=False, as_json=as_json,
+    )
+
+
+@order_app.command("get", help="Fetch one order by id.")
+def order_get(
+    order_id: str = typer.Argument(..., help="Schwab order id."),
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Account number / suffix (recommended; warns if omitted).",
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+    doc: bool = doc_option(),
+) -> None:
+    order_cmd.run_get(order_id=order_id, account=account, as_json=as_json)
+
+
+@order_app.command("list", help="List orders. Defaults: --status=ACTIVE → --range=ALL.")
+def order_list(
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Account number / suffix. Omit to query across all accounts (warned).",
+    ),
+    status: str = typer.Option(
+        "ACTIVE", "--status",
+        help="ACTIVE | FILLED | CANCELED | REPLACED | REJECTED | EXPIRED | ALL "
+             "or any raw Schwab status (e.g. WORKING).",
+    ),
+    range_str: str = typer.Option(
+        None, "--range",
+        help="Time range. Defaults to ALL when status=ACTIVE, else -7d..now. "
+             "Accepts ytd/mtd/wtd or <start>..<end> tokens (-7d, -1mo, now, YYYYMMDD).",
+    ),
+    limit: int = typer.Option(None, "--limit", help="Maps to maxResults."),
+    as_json: bool = typer.Option(False, "--json"),
+    doc: bool = doc_option(),
+) -> None:
+    order_cmd.run_list(
+        account=account, status=status,
+        range_str=range_str, limit=limit, as_json=as_json,
+    )
+
+
+@order_app.command("cancel", help="Cancel one order by id.")
+def order_cancel(
+    order_id: str = typer.Argument(..., help="Schwab order id."),
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Account number / suffix. Omit to scan every account (warned).",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes",
+        help='Skip the "yea" confirmation prompt.',
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+    doc: bool = doc_option(),
+) -> None:
+    order_cmd.run_cancel(
+        order_id=order_id, account=account, yes=yes, as_json=as_json,
     )
