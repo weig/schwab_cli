@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import typer
-from prompt_toolkit import Application, prompt
+from prompt_toolkit import Application
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
@@ -21,6 +21,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 
 from schwab_cli.order_policy.profile_new.questionnaire import (
     PromptToolkitPrompter,
+    StdinPrompter,
 )
 from schwab_cli.order_policy.profile_new.save import (
     ProfileExistsError, atomic_save,
@@ -175,13 +176,19 @@ def _list_editor_loop(
         undo_delete(state)
         event.app.invalidate()
 
+    # Inside the running prompt_toolkit Application we cannot reuse
+    # PromptToolkitPrompter (nested ``prompt`` calls fight the outer
+    # event loop). The template picker and its inner questionnaire run
+    # under a plain stdin prompter instead.
+    inner_prompter = StdinPrompter()
+
     @bindings.add("c")
     def _(event):
         # Run the template-pick + parameter prompts in the terminal,
         # then re-enter the editor.
         def runner():
             try:
-                policy = _run_template_picker(prompter)
+                policy = _run_template_picker(inner_prompter)
                 if policy is not None:
                     add_policy(state, policy)
             except Exception as e:  # noqa: BLE001 — show & continue
@@ -225,9 +232,10 @@ def _list_editor_loop(
             result["quit"] = True
             event.app.exit()
             return
-        # Confirm discard.
+        # Confirm discard. Plain input() — nested prompt_toolkit prompt
+        # would crash the outer Application's event loop.
         def runner():
-            ans = prompt("discard unsaved changes? [y/N]: ").strip().lower()
+            ans = input("discard unsaved changes? [y/N]: ").strip().lower()
             if ans in ("y", "yes"):
                 result["quit"] = True
                 event.app.exit()
@@ -263,7 +271,7 @@ def _run_template_picker(prompter) -> dict | None:
     typer.secho("Pick a template:", fg=typer.colors.CYAN, err=True)
     for i, t in enumerate(TEMPLATES, start=1):
         typer.echo(f"  [{i}] {t.label} — {t.description}", err=True)
-    raw = prompt("template number (or 'q' to cancel): ").strip().lower()
+    raw = input("template number (or 'q' to cancel): ").strip().lower()
     if raw in ("", "q"):
         return None
     try:
