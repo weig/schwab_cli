@@ -781,18 +781,37 @@ def run_place(
     )
 
     # ---- profile load (used by both policy and override paths) ---------
+    # `dry_run` is permissive about a missing profile — it's a read-only
+    # operation that should always show the panel (BP / commission /
+    # validation are still useful even if the policy gate can't run).
+    # `place` and `--override` keep the hard error so we never send an
+    # order without an explicit gate or bypass on file.
     profile_name = select_profile_name(
         flag=profile, env=os.environ.get("SCHWAB_CLI_PROFILE"),
     )
+    prof: object | None = None
     try:
         prof = load_profile(profile_name)
     except PolicyConfigError as e:
-        typer.secho(f"policy load failed: {e}", fg=typer.colors.RED, err=True)
         _audit(
             sub, "policy_load_failed",
             account=acct.account_number, profile=profile_name, error=str(e),
         )
-        raise typer.Exit(code=EXIT_USAGE)
+        if dry_run and not overriding:
+            # Preview without a profile: warn but proceed.
+            typer.secho(
+                f"warning: no policy profile resolved ({e})",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            typer.secho(
+                "  preview will show the order detail + Schwab preview "
+                "but skip the policy gate.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        else:
+            typer.secho(f"policy load failed: {e}",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=EXIT_USAGE)
 
     # ---- compute analytics (shared by both paths) -----------------------
     analytics = compute_analytics(
@@ -839,6 +858,33 @@ def run_place(
         )
         # Fall through to the place block below.
     else:
+        # Dry-run with no profile — render the panel + Schwab preview,
+        # skip the gate entirely. Real-place would have errored above.
+        if prof is None:
+            typer.echo(panel, err=True)
+            typer.secho(
+                "\nPolicy Check  (no profile loaded — gate skipped)",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            for warning in limits.warnings:
+                typer.secho(
+                    f"limit warning [{warning.rule_name}]: {warning.message}",
+                    fg=typer.colors.YELLOW, err=True,
+                )
+            _audit(sub, "dry_run_done", account=acct.account_number,
+                   profile_name=None)
+            if as_json:
+                typer.echo(_json.dumps(
+                    {"order": body, "preview": preview_summary.__dict__},
+                    default=str,
+                ))
+            else:
+                typer.echo(
+                    "(dry-run: no profile evaluated; not sending placeOrder)",
+                    err=True,
+                )
+            return
+
         # ---- standard policy gate (Phase 2a) ----------------------------
         order_ctx = _build_policy_context(
             client=client,

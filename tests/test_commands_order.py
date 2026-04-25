@@ -891,3 +891,57 @@ def test_orders_match_multi_leg_order_strict():
     schwab_swapped = dict(schwab_match)
     schwab_swapped["orderLegCollection"] = list(reversed(schwab_match["orderLegCollection"]))
     assert _orders_match(body, schwab_swapped) is False
+
+
+# ---- preview without a profile (regression) ----------------------------
+
+
+def test_preview_renders_panel_when_no_profile_resolves(monkeypatch, tmp_path):
+    """`order preview` should always show the panel, even when no
+    profile resolves. Real `place` still hard-errors in that state."""
+    # Set up everything except the default.json — strip it so the
+    # loader returns "no profile resolved".
+    _prep(monkeypatch, tmp_path)
+    profiles_dir = tmp_path / "profiles" / "order"
+    (profiles_dir / "default.json").unlink()  # remove what _prep wrote
+
+    place_calls: list = []
+    patches = _patches(place_calls=place_calls)
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert place_calls == [], "preview must NOT call placeOrder"
+    # Panel rendered to stderr.
+    assert "Confirm order" in result.stderr
+    # Warning that policy gate was skipped.
+    assert "no policy profile resolved" in result.stderr or \
+           "no profile loaded" in result.stderr
+    # Should still surface BP impact (Schwab preview ran).
+    assert "BP effect" in result.stderr
+
+
+def test_real_place_still_errors_when_no_profile_resolves(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    profiles_dir = tmp_path / "profiles" / "order"
+    (profiles_dir / "default.json").unlink()
+
+    place_calls: list = []
+    patches = _patches(place_calls=place_calls)
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "150", "--side", "BUY",
+            "--yes",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 2
+    assert place_calls == []
+    assert "policy load failed" in result.stderr
