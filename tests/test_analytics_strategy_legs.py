@@ -216,3 +216,39 @@ def test_parse_leg_instruction_all_four():
     assert long_close.instruction == "BUY_TO_CLOSE"
     assert short_open.instruction == "SELL_TO_OPEN"
     assert short_close.instruction == "SELL_TO_CLOSE"
+
+
+# ---- YYMMDD date form (preferred, OSI-aligned) -----------------------------
+
+
+def test_yymmdd_six_digit_date_accepted():
+    """6-digit YYMMDD form maps to 21st-century year. Matches OSI
+    on-the-wire format and the chain command's date input."""
+    leg = parse_leg("+1@260501C255")
+    assert leg.expiry.isoformat() == "2026-05-01"
+    assert leg.qty == 1 and leg.side == "C" and leg.strike == 255.0
+
+
+def test_yymmdd_with_signed_short_close():
+    leg = parse_leg("-2@260117P200c")
+    assert leg.expiry.isoformat() == "2026-01-17"
+    assert leg.qty == -2 and leg.side == "P" and leg.effect == "c"
+
+
+def test_yymmdd_invalid_month_message_lists_both_forms():
+    import pytest
+    with pytest.raises(LegParseError, match="YYMMDD or YYYYMMDD"):
+        parse_leg("+1@261301C255")  # month 13 — invalid YYMMDD
+
+
+def test_seven_digit_date_rejected_with_clear_hint():
+    """Reject ambiguous 7-digit dates — must be exactly 6 or 8."""
+    import pytest
+    with pytest.raises(LegParseError, match=r"6 digits.*8 digits"):
+        parse_leg("+1@2605010C255")
+
+
+def test_yyyymmdd_legacy_form_still_accepted():
+    """Existing scripts/tests using YYYYMMDD must keep working."""
+    leg = parse_leg("+1@20260501C255")
+    assert leg.expiry.isoformat() == "2026-05-01"

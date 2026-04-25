@@ -547,7 +547,7 @@ def mcp_install(
     "strategy",
     help=(
         "Option-strategy probability + risk analysis. Pass one or more "
-        "--leg tokens in OCC-style form: ±N@YYYYMMDD{C|P}STRIKE. See "
+        "--leg tokens in OCC-style form: ±N@YYMMDD{C|P}STRIKE. See "
         "`schwab_cli strategy --doc` for the full grammar and examples."
     ),
 )
@@ -556,8 +556,8 @@ def strategy(
     leg: list[str] = typer.Option(
         ..., "--leg",
         help=(
-            "Option leg in OCC form: ±N@YYYYMMDD{C|P}STRIKE. Repeat for "
-            "multi-leg positions. Example: --leg +1@20260501C255."
+            "Option leg in OCC form: ±N@YYMMDD{C|P}STRIKE. Repeat for "
+            "multi-leg positions. Example: --leg +1@260501C255."
         ),
     ),
     risk_free: float = typer.Option(
@@ -748,7 +748,7 @@ def order_place(
     ),
     legs: list[str] = typer.Option(
         [], "--leg",
-        help="Repeatable option leg spec: ±N@YYYYMMDD{C|P}STRIKE[o|c].",
+        help="Repeatable option leg spec: ±N@YYMMDD{C|P}STRIKE[o|c].",
     ),
     complex_strategy: str = typer.Option(
         None, "--complex",

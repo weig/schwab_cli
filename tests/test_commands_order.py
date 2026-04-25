@@ -1078,6 +1078,42 @@ def test_type_rejects_side_word_with_helpful_hint(monkeypatch, tmp_path):
     assert "use --side" in result.stderr
 
 
+def test_quantity_with_leg_is_rejected(monkeypatch, tmp_path):
+    """``--quantity`` is ambiguous when paired with ``--leg`` (each leg
+    already carries its own signed N). Reject before doing anything."""
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "AXP", "--account", "5678",
+            "--quantity", "2", "--leg", "+1@260501C335",
+            "--price", "0.40",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 2
+    assert "--quantity may not be combined with --leg" in result.stderr
+
+
+def test_yymmdd_leg_form_works_through_cli(monkeypatch, tmp_path):
+    """End-to-end: a 6-digit YYMMDD leg parses cleanly through the CLI
+    and reaches the panel."""
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "AXP", "--account", "5678",
+            "--leg", "+1@260501C335", "--price", "0.40",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    # OSI-style symbol on the leg row (date in the symbol is YYMMDD).
+    assert "260501C00335000" in result.stderr
+
+
 def test_type_rejects_garbage_value(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     patches = _patches()

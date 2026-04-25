@@ -549,7 +549,19 @@ def _validate_combo(
     side: str | None, duration: str | None, leg_specs: tuple[str, ...],
     complex_strategy: str | None,
 ) -> None:
-    """Mutex check: ``--parse`` is incompatible with body-defining flags."""
+    """Mutex checks for incompatible flag combinations."""
+    # ``--quantity`` is per-order top-level; for multi-leg orders each
+    # ``--leg`` token has its own signed N. Mixing the two creates an
+    # ambiguity (does --quantity 2 mean 2× each leg, or override the
+    # leg's own N?) — reject explicitly so the user picks one form.
+    if leg_specs and quantity is not None:
+        typer.secho(
+            "--quantity may not be combined with --leg "
+            "(each --leg token already carries its own signed quantity).",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
     if not parse_string:
         return
     forbidden = []
