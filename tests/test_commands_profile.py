@@ -99,7 +99,7 @@ def test_policy_show_missing_default_returns_helpful_error(monkeypatch, tmp_path
     file, `default` resolves to nothing and the loader points at
     `profile new`."""
     _prep(monkeypatch, tmp_path)
-    result = runner.invoke(app, ["policy", "show", "--profile", "default"])
+    result = runner.invoke(app, ["profile", "show", "--type", "order", "--profile", "default"])
     assert result.exit_code == 2
     assert "profile new" in result.stderr
 
@@ -111,7 +111,7 @@ def test_policy_show_user_profile_wins(monkeypatch, tmp_path):
         "default_action": "deny",
         "policies": [],
     })
-    result = runner.invoke(app, ["policy", "show", "--profile", "default"])
+    result = runner.invoke(app, ["profile", "show", "--type", "order", "--profile", "default"])
     assert result.exit_code == 0
     data = json.loads(result.stdout)
     assert "user override" in data["description"]
@@ -124,7 +124,7 @@ def test_policy_lint_all_with_no_profiles_says_no_profiles_found(
     """No reserved profiles ship anymore; an empty dir → 'no profiles
     found' rather than a wall of bundled-default validations."""
     _prep(monkeypatch, tmp_path)
-    result = runner.invoke(app, ["policy", "lint", "--all"])
+    result = runner.invoke(app, ["profile", "lint", "--type", "order", "--all"])
     assert result.exit_code == 0
     assert "no profiles found" in result.stderr or "no profiles found" in result.stdout
 
@@ -132,7 +132,7 @@ def test_policy_lint_all_with_no_profiles_says_no_profiles_found(
 def test_policy_lint_reports_bad_profile(monkeypatch, tmp_path):
     profiles = _prep(monkeypatch, tmp_path)
     _write_profile(profiles, "broken", {"unknown_field": True})
-    result = runner.invoke(app, ["policy", "lint", "--profile", "broken"])
+    result = runner.invoke(app, ["profile", "lint", "--type", "order", "--profile", "broken"])
     assert result.exit_code == 2
     assert "broken" in result.stdout or "broken" in result.stderr
 
@@ -160,7 +160,7 @@ def test_policy_test_evaluates_order_body(monkeypatch, tmp_path):
     body_path = tmp_path / "order.json"
     body_path.write_text(json.dumps(body))
     result = runner.invoke(app, [
-        "policy", "test", str(body_path), "--profile", "default",
+        "profile", "test", "--type", "order", str(body_path), "--profile", "default",
     ])
     assert result.exit_code == 0
     out = json.loads(result.stdout)
@@ -184,7 +184,7 @@ def test_policy_test_returns_4_when_rejected(monkeypatch, tmp_path):
     }
     body_path = tmp_path / "order.json"
     body_path.write_text(json.dumps(body))
-    result = runner.invoke(app, ["policy", "test", str(body_path)])
+    result = runner.invoke(app, ["profile", "test", "--type", "order", str(body_path)])
     assert result.exit_code == 4
 
 

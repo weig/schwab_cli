@@ -11,7 +11,7 @@ from schwab_cli.commands import mcp as mcp_cmd
 from schwab_cli.commands import notify as notify_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import order as order_cmd
-from schwab_cli.commands import policy as policy_cmd
+from schwab_cli.commands import profile as profile_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import skew as skew_cmd
@@ -898,32 +898,56 @@ def order_cancel(
     )
 
 
-# ---- policy subcommand group --------------------------------------------
+# ---- profile subcommand group -------------------------------------------
 
-policy_app = typer.Typer(
+profile_app = typer.Typer(
     help=(
-        "Manage order policy profiles. Profiles live as one JSON file "
-        "each under ~/.config/schwab_cli/profiles/order/; the policy "
-        "engine gates every `order place` / `order preview`."
+        "Manage profiles for the policy engine. Profiles live as one "
+        "JSON file each under ~/.config/schwab_cli/profiles/<type>/. "
+        "Today only `--type=order` is supported (used by `order place` "
+        "/ `order preview`); future types (notification, strategy, …) "
+        "share the same group."
     ),
     no_args_is_help=True,
 )
-app.add_typer(policy_app, name="policy")
+app.add_typer(profile_app, name="profile")
 
 
-@policy_app.command("show", help="Print the resolved profile as JSON.")
-def policy_show(
+_PROFILE_TYPE_OPT = typer.Option(
+    ...,
+    "--type",
+    help="Profile type. Required; only `order` is supported today.",
+)
+
+
+def _check_profile_type(t: str) -> None:
+    """Validate ``--type``. Phase 2f only ships ``order``."""
+    if t != "order":
+        typer.secho(
+            f"--type must be 'order' (got {t!r}). "
+            f"Other types (notification, strategy, …) are reserved "
+            "for future phases.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=2)
+
+
+@profile_app.command("show", help="Print the resolved profile as JSON.")
+def profile_show(
+    type_: str = _PROFILE_TYPE_OPT,
     profile: str = typer.Option(
         None, "--profile",
         help="Profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
     ),
     doc: bool = doc_option(),
 ) -> None:
-    policy_cmd.run_show(profile=profile)
+    _check_profile_type(type_)
+    profile_cmd.run_show(profile=profile)
 
 
-@policy_app.command("lint", help="Validate one or every profile file.")
-def policy_lint(
+@profile_app.command("lint", help="Validate one or every profile file.")
+def profile_lint(
+    type_: str = _PROFILE_TYPE_OPT,
     profile: str = typer.Option(
         None, "--profile",
         help="Profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
@@ -934,15 +958,17 @@ def policy_lint(
     ),
     doc: bool = doc_option(),
 ) -> None:
-    policy_cmd.run_lint(profile=profile, all_profiles=all_profiles)
+    _check_profile_type(type_)
+    profile_cmd.run_lint(profile=profile, all_profiles=all_profiles)
 
 
-@policy_app.command("test", help="Dry-run evaluate a JSON order body.")
-def policy_test(
+@profile_app.command("test", help="Dry-run evaluate a JSON order body.")
+def profile_test(
     order_path: str = typer.Argument(
         ...,
         help="Path to JSON order body (Schwab POST shape). Use '-' for stdin.",
     ),
+    type_: str = _PROFILE_TYPE_OPT,
     profile: str = typer.Option(
         None, "--profile",
         help="Profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
@@ -953,13 +979,15 @@ def policy_test(
     ),
     doc: bool = doc_option(),
 ) -> None:
-    policy_cmd.run_test(
+    _check_profile_type(type_)
+    profile_cmd.run_test(
         order_json_path=order_path, profile=profile, account=account,
     )
 
 
-@policy_app.command("counters", help="Show persisted order counters.")
-def policy_counters(
+@profile_app.command("counters", help="Show persisted order counters.")
+def profile_counters(
+    type_: str = _PROFILE_TYPE_OPT,
     account: str = typer.Option(
         None, "--account", "-a",
         help="Limit output to one account (matches the stored 8-digit number).",
@@ -967,11 +995,13 @@ def policy_counters(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
     doc: bool = doc_option(),
 ) -> None:
-    policy_cmd.run_counters(account=account, as_json=as_json)
+    _check_profile_type(type_)
+    profile_cmd.run_counters(account=account, as_json=as_json)
 
 
-@policy_app.command("audit", help="Tail the order audit log.")
-def policy_audit(
+@profile_app.command("audit", help="Tail the order audit log.")
+def profile_audit(
+    type_: str = _PROFILE_TYPE_OPT,
     since: str = typer.Option(
         None, "--since",
         help="Range token (e.g. -1d..now, ytd, mtd, 20260420..20260425). "
@@ -991,7 +1021,8 @@ def policy_audit(
     as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
     doc: bool = doc_option(),
 ) -> None:
-    policy_cmd.run_audit(
+    _check_profile_type(type_)
+    profile_cmd.run_audit(
         since=since, account=account, decision=decision,
         limit=limit, as_json=as_json,
     )

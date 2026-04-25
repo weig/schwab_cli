@@ -207,7 +207,7 @@ def test_policy_counters_human(monkeypatch, tmp_path):
             "--type", "LIMIT", "--price", "65", "--side", "BUY",
             "--yes",
         ])
-        result = runner.invoke(app, ["policy", "counters"])
+        result = runner.invoke(app, ["profile", "counters", "--type", "order"])
     finally:
         _exit(patches)
     assert result.exit_code == 0
@@ -234,7 +234,7 @@ def test_policy_counters_json(monkeypatch, tmp_path):
     # module's own load() with `now` arg. The CLI doesn't expose that,
     # so this test uses the JSON output and accepts the date may be
     # rotated.
-    result = runner.invoke(app, ["policy", "counters", "--json"])
+    result = runner.invoke(app, ["profile", "counters", "--type", "order", "--json"])
     assert result.exit_code == 0
     out = json.loads(result.stdout)
     assert out["tz"] == "America/New_York"
@@ -256,7 +256,7 @@ def test_policy_audit_lists_recent_rows(monkeypatch, tmp_path):
             "--type", "LIMIT", "--price", "150", "--side", "BUY",
             "--yes",
         ])
-        result = runner.invoke(app, ["policy", "audit", "--limit", "10"])
+        result = runner.invoke(app, ["profile", "audit", "--type", "order", "--limit", "10"])
     finally:
         _exit(patches)
     assert result.exit_code == 0
@@ -278,7 +278,7 @@ def test_policy_audit_filter_by_decision(monkeypatch, tmp_path):
             "--yes",
         ])
         result = runner.invoke(app, [
-            "policy", "audit", "--decision", "reject", "--json",
+            "profile", "audit", "--type", "order", "--decision", "reject", "--json",
         ])
     finally:
         _exit(patches)
@@ -292,6 +292,6 @@ def test_policy_audit_filter_by_decision(monkeypatch, tmp_path):
 
 def test_policy_audit_no_log_dir_returns_empty(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    result = runner.invoke(app, ["policy", "audit"])
+    result = runner.invoke(app, ["profile", "audit", "--type", "order"])
     assert result.exit_code == 0
     assert "no audit log entries" in result.stdout
