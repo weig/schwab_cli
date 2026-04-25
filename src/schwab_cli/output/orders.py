@@ -140,11 +140,12 @@ class PreviewSummary:
     ``bp_after_stock`` and ``bp_after_option`` separate the two TOS
     "Result Buying Power" figures: stock BP includes margin extension,
     option BP is the cash-equivalent that secures option positions.
+    Buying-power *effect* is computed at render time as
+    ``after - current`` (preview returns only the post-order values).
     """
 
     commission: float | None
     fees: float | None
-    bp_effect: float | None             # negative = consumed BP
     bp_after_stock: float | None        # projectedBuyingPower
     bp_after_option: float | None       # projectedAvailableFund
     warnings: tuple[str, ...]
@@ -163,7 +164,7 @@ def summarise_preview(preview: dict | None) -> PreviewSummary:
       orderValidationResult.{warns,rejects,alerts,reviews}[*].activityMessage
     """
     if not preview:
-        return PreviewSummary(None, None, None, None, None, (), ())
+        return PreviewSummary(None, None, None, None, (), ())
 
     commission = _sum_commission_legs(
         _path(preview, ["commissionAndFee", "commission", "commissionLegs"])
@@ -177,16 +178,12 @@ def summarise_preview(preview: dict | None) -> PreviewSummary:
     bp_after_option = _to_float(_path(
         preview, ["orderStrategy", "orderBalance", "projectedAvailableFund"]
     ))
-    # Schwab doesn't return a BP-effect delta; surface order value (with
-    # sign by side: + = adds BP, - = consumes BP) as the closest signal.
-    bp_effect = _bp_effect_from_order_value(preview)
 
     warnings, rejects = _collect_validation_messages(preview)
 
     return PreviewSummary(
         commission=commission,
         fees=fees,
-        bp_effect=bp_effect,
         bp_after_stock=bp_after_stock,
         bp_after_option=bp_after_option,
         warnings=tuple(warnings),
@@ -220,40 +217,6 @@ def _sum_fee_legs(legs: Any) -> float | None:
                 total += v
                 seen = True
     return total if seen else None
-
-
-_BUY_INSTRUCTIONS = {"BUY", "BUY_TO_OPEN", "BUY_TO_CLOSE", "BUY_TO_COVER"}
-_SELL_INSTRUCTIONS = {"SELL", "SELL_TO_OPEN", "SELL_TO_CLOSE", "SELL_SHORT"}
-
-
-def _bp_effect_from_order_value(preview: dict) -> float | None:
-    """Derive a signed BP-effect estimate from ``orderBalance.orderValue``.
-
-    Schwab returns ``orderValue`` as a positive magnitude. We sign it by
-    the dominant leg instruction so the panel shows ``+`` (BP freed) for
-    sells and ``-`` (BP consumed) for buys. This is best-effort — net
-    debit/credit spreads aren't perfectly captured because Schwab
-    aggregates the legs into one value.
-    """
-    order_value = _to_float(_path(
-        preview, ["orderStrategy", "orderBalance", "orderValue"]
-    ))
-    if order_value is None:
-        return None
-    legs = _path(preview, ["orderStrategy", "orderLegs"]) or []
-    sign = 0
-    if isinstance(legs, list):
-        for leg in legs:
-            if not isinstance(leg, dict):
-                continue
-            instr = leg.get("instruction")
-            if instr in _BUY_INSTRUCTIONS:
-                sign -= 1
-            elif instr in _SELL_INSTRUCTIONS:
-                sign += 1
-    if sign == 0:
-        return None  # ambiguous — don't guess
-    return order_value if sign > 0 else -order_value
 
 
 def _collect_validation_messages(preview: dict) -> tuple[list[str], list[str]]:
@@ -319,6 +282,7 @@ def render_confirmation(
     preview: PreviewSummary,
     preview_unavailable: bool = False,
     underlying_quote: dict | None = None,
+    current_balances: dict | None = None,
 ) -> str:
     """Render the TOS-style confirmation panel as a string.
 
@@ -414,13 +378,23 @@ def render_confirmation(
     if preview_unavailable:
         lines.append(_row("Est. Commission", "unavailable (preview endpoint not enabled)"))
         lines.append(_row("Est. Fees", "unavailable"))
-        lines.append(_row("Buying Power Effect", "unavailable"))
+        lines.append(_row("Buying Power Effect (Stock)", "unavailable"))
+        lines.append(_row("Buying Power Effect (Option)", "unavailable"))
         lines.append(_row("Result Buying Power (Stock)", "unavailable"))
         lines.append(_row("Result Buying Power (Option)", "unavailable"))
     else:
+        # Effect = projected (after order) - current. Schwab's preview
+        # returns only the projected side, so we pair it with a fresh
+        # account fetch upstream. When current_balances is missing
+        # (network failure, --yes path), fall back to "n/a".
+        cur_stock = (current_balances or {}).get("stockBuyingPower") if current_balances else None
+        cur_option = (current_balances or {}).get("optionBuyingPower") if current_balances else None
+        eff_stock = _delta(preview.bp_after_stock, cur_stock)
+        eff_option = _delta(preview.bp_after_option, cur_option)
         lines.append(_row("Est. Commission", _fmt_money(preview.commission, unlimited='n/a')))
         lines.append(_row("Est. Fees", _fmt_money(preview.fees, unlimited='n/a')))
-        lines.append(_row("Buying Power Effect", _fmt_money(preview.bp_effect, plus=True, unlimited='n/a')))
+        lines.append(_row("Buying Power Effect (Stock)", _fmt_money(eff_stock, plus=True, unlimited='n/a')))
+        lines.append(_row("Buying Power Effect (Option)", _fmt_money(eff_option, plus=True, unlimited='n/a')))
         lines.append(_row("Result Buying Power (Stock)", _fmt_money(preview.bp_after_stock, unlimited='n/a')))
         lines.append(_row("Result Buying Power (Option)", _fmt_money(preview.bp_after_option, unlimited='n/a')))
 
@@ -477,6 +451,13 @@ def _format_leg_line(leg: dict) -> str:
     if asset == "OPTION":
         return f"  {sign}{qty}  {short_instr}  {sym}"
     return f"  {sign}{qty}  {short_instr}  {sym}  ({asset})"
+
+
+def _delta(after: float | None, before: float | None) -> float | None:
+    """Return ``after - before`` when both are numeric; ``None`` otherwise."""
+    if after is None or before is None:
+        return None
+    return after - before
 
 
 def _fmt_size(v: float | int | None) -> str:

@@ -102,20 +102,6 @@ def test_bp_after_option_uses_projected_available_fund():
     assert s.bp_after_option == 26337.05
 
 
-def test_bp_effect_signed_positive_for_sell():
-    s = summarise_preview(_REAL_PREVIEW)
-    # SELL frees BP — so bp_effect should be positive orderValue.
-    assert s.bp_effect == 190.0
-
-
-def test_bp_effect_signed_negative_for_buy():
-    """Same shape, BUY instead of SELL — BP effect should flip sign."""
-    p = _deep_copy(_REAL_PREVIEW)
-    p["orderStrategy"]["orderLegs"][0]["instruction"] = "BUY"
-    s = summarise_preview(p)
-    assert s.bp_effect == -190.0
-
-
 def test_rejects_are_extracted_from_activityMessage():
     """Regression: parser used to look for 'message' but Schwab uses
     'activityMessage'. A real REJECT was being silently dropped."""
@@ -149,12 +135,12 @@ def test_warnings_collected_from_warns_alerts_reviews():
 
 def test_empty_preview_yields_all_none():
     s = summarise_preview({})
-    assert s == PreviewSummary(None, None, None, None, None, (), ())
+    assert s == PreviewSummary(None, None, None, None, (), ())
 
 
 def test_none_preview_yields_all_none():
     s = summarise_preview(None)
-    assert s == PreviewSummary(None, None, None, None, None, (), ())
+    assert s == PreviewSummary(None, None, None, None, (), ())
 
 
 def test_missing_commissionAndFee_block_yields_none_not_zero():
@@ -167,26 +153,88 @@ def test_missing_commissionAndFee_block_yields_none_not_zero():
     assert s.fees is None
 
 
-def test_bp_effect_zero_legs_returns_none():
-    """Ambiguous side mix (or no legs) → bp_effect is None, not 0.0."""
-    p = _deep_copy(_REAL_PREVIEW)
-    p["orderStrategy"]["orderLegs"] = []
-    s = summarise_preview(p)
-    assert s.bp_effect is None
+# ---- BP-effect delta rendering (regression) -----------------------------
+#
+# The earlier guess (`orderValue` × side sign) was wrong for naked shorts:
+# a $164 credit would tie up ~$12,700 of margin, but the panel showed
+# +$164 instead of -$12,700. The renderer now computes the deltas from
+# (projected after order) - (current account balance).
 
 
-def test_bp_effect_handles_options_buy_to_open():
-    p = _deep_copy(_REAL_PREVIEW)
-    p["orderStrategy"]["orderLegs"][0]["instruction"] = "BUY_TO_OPEN"
-    s = summarise_preview(p)
-    assert s.bp_effect == -190.0
+def test_render_confirmation_computes_bp_effect_deltas():
+    from schwab_cli.output.orders import (
+        OrderAnalytics, render_confirmation, summarise_preview,
+    )
+    preview = summarise_preview({
+        "commissionAndFee": {
+            "commission": {"commissionLegs": [
+                {"commissionValues": [{"type": "COMMISSION", "value": 0.65}]},
+            ]},
+            "fee": {"feeLegs": [
+                {"feeValues": [{"type": "SEC_FEE", "value": 0.01}]},
+            ]},
+        },
+        "orderStrategy": {
+            "orderBalance": {
+                "orderValue": 164.0,
+                "projectedBuyingPower": 27274.10,
+                "projectedAvailableFund": 13637.05,
+            },
+            "orderLegs": [{"instruction": "SELL_TO_OPEN"}],
+        },
+    })
+    body = {
+        "orderType": "LIMIT", "duration": "DAY", "session": "NORMAL",
+        "complexOrderStrategyType": "NONE",
+        "orderLegCollection": [{
+            "instruction": "SELL_TO_OPEN", "quantity": 1,
+            "instrument": {"assetType": "OPTION", "symbol": "C   260501P00127000"},
+        }],
+    }
+    out = render_confirmation(
+        body=body,
+        account_tail="0756",
+        strategy_label="SELL 1 C PUT",
+        is_naked_short=True,
+        analytics=OrderAnalytics(
+            max_profit=164.0, max_loss=-12536.0,
+            breakevens=(125.36,), order_cost=-164.0,
+        ),
+        preview=preview,
+        current_balances={
+            "stockBuyingPower": 52674.10,
+            "optionBuyingPower": 26337.05,
+        },
+    )
+    # The naked short ties up margin: projected - current is the real delta.
+    assert "Buying Power Effect (Stock):    -$25,400.00" in out
+    assert "Buying Power Effect (Option):   -$12,700.00" in out
 
 
-def test_bp_effect_handles_options_sell_to_open():
-    p = _deep_copy(_REAL_PREVIEW)
-    p["orderStrategy"]["orderLegs"][0]["instruction"] = "SELL_TO_OPEN"
-    s = summarise_preview(p)
-    assert s.bp_effect == 190.0
+def test_render_confirmation_falls_back_to_n_a_without_balances():
+    """When account-fetch is skipped (e.g. ``place --yes`` path), the
+    delta lines collapse to ``n/a`` rather than guessing."""
+    from schwab_cli.output.orders import render_confirmation, summarise_preview
+    preview = summarise_preview({
+        "orderStrategy": {
+            "orderBalance": {
+                "projectedBuyingPower": 14213.65,
+                "projectedAvailableFund": 7106.83,
+            },
+        },
+    })
+    out = render_confirmation(
+        body={"orderType": "LIMIT", "duration": "DAY", "session": "NORMAL",
+              "orderLegCollection": []},
+        account_tail="0756",
+        strategy_label="t",
+        is_naked_short=False,
+        analytics=None,
+        preview=preview,
+        current_balances=None,
+    )
+    assert "Buying Power Effect (Stock):    n/a" in out
+    assert "Buying Power Effect (Option):   n/a" in out
 
 
 # ---- helpers ------------------------------------------------------------

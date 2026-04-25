@@ -774,7 +774,6 @@ def run_place(
         account=acct.account_number,
         commission=preview_summary.commission,
         fees=preview_summary.fees,
-        bp_effect=preview_summary.bp_effect,
         bp_after_stock=preview_summary.bp_after_stock,
         bp_after_option=preview_summary.bp_after_option,
         warnings=list(preview_summary.warnings),
@@ -823,16 +822,20 @@ def run_place(
         quantity=spec.quantity,
         price=spec.price,
     )
-    # Quote fetch policy:
-    #   - preview (dry_run): fetch a standard quote — informational
-    #   - real place WITHOUT --yes: fetch a live quote — last review before send
-    #   - real place WITH --yes:    skip — operator already committed
+    # Side-fetch policy: when the panel will be reviewed (preview, or
+    # place without --yes), fetch the live quote + current account
+    # balances. Skip both on `place --yes` since the operator already
+    # committed and won't see the panel before submission.
     if dry_run or not yes:
         underlying_quote = _fetch_underlying_quote_safe(client, body)
         if underlying_quote is not None:
             underlying_quote["is_live"] = (not dry_run)
+        current_balances = _fetch_current_balances_safe(
+            client, acct.account_number,
+        )
     else:
         underlying_quote = None
+        current_balances = None
     panel = render_confirmation(
         body=body,
         account_tail=acct.account_number[-4:],
@@ -842,6 +845,7 @@ def run_place(
         preview=preview_summary,
         preview_unavailable=preview_unavailable,
         underlying_quote=underlying_quote,
+        current_balances=current_balances,
     )
 
     # ---- override branch (Phase 2e) -------------------------------------
@@ -1398,6 +1402,32 @@ def _fetch_chain_safe(client: SchwabClient, symbol: str) -> dict:
 def _fetch_quote_safe(client: SchwabClient, symbol: str) -> dict:
     from schwab_cli.api.quotes import get_quotes
     return get_quotes(client, [symbol])
+
+
+def _fetch_current_balances_safe(
+    client: SchwabClient, account_number: str,
+) -> dict | None:
+    """Pull current ``buyingPower`` / ``availableFunds`` for the account.
+
+    Used to compute the BP-effect deltas in the confirmation panel
+    (Schwab's preview only returns the post-order projected values).
+    Returns ``None`` on any failure — the panel falls back to omitting
+    the delta lines rather than poisoning the preview flow.
+    """
+    try:
+        raw = _fetch_account_safe(client, account_number)
+    except Exception:  # noqa: BLE001 — best-effort
+        return None
+    if not isinstance(raw, dict):
+        return None
+    sec = raw.get("securitiesAccount") or {}
+    cur = sec.get("currentBalances") or {}
+    if not isinstance(cur, dict):
+        return None
+    return {
+        "stockBuyingPower": cur.get("buyingPower"),
+        "optionBuyingPower": cur.get("availableFunds"),
+    }
 
 
 def _fetch_underlying_quote_safe(

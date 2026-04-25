@@ -114,6 +114,7 @@ _PREVIEW_PAYLOAD = {
         "orderBalance": {
             "orderValue": 86.35,
             "projectedBuyingPower": 14213.65,
+            "projectedAvailableFund": 7106.83,
         },
         "orderLegs": [{"instruction": "BUY"}],
     },
@@ -234,7 +235,8 @@ def test_audit_preview_logs_invoke_preview_dry_run(monkeypatch, tmp_path):
     assert invoked["account"] == "5678"
     assert invoked["flags"]["price"] == 150
     assert _prev["commission"] == 1.30
-    assert _prev["bp_effect"] == -86.35
+    assert _prev["bp_after_stock"] == 14213.65
+    assert _prev["bp_after_option"] == 7106.83
     assert pol["profile_name"] == "default"
     assert pol["decision"] == "approve"
 
