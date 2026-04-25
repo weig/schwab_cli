@@ -135,12 +135,18 @@ def compute_analytics(
 
 @dataclass(frozen=True)
 class PreviewSummary:
-    """The four Schwab-sourced fields the panel surfaces."""
+    """Schwab-sourced fields the panel surfaces.
+
+    ``bp_after_stock`` and ``bp_after_option`` separate the two TOS
+    "Result Buying Power" figures: stock BP includes margin extension,
+    option BP is the cash-equivalent that secures option positions.
+    """
 
     commission: float | None
     fees: float | None
-    bp_effect: float | None       # negative = consumed BP
-    bp_after: float | None
+    bp_effect: float | None             # negative = consumed BP
+    bp_after_stock: float | None        # projectedBuyingPower
+    bp_after_option: float | None       # projectedAvailableFund
     warnings: tuple[str, ...]
     rejects: tuple[str, ...]
 
@@ -149,68 +155,146 @@ def summarise_preview(preview: dict | None) -> PreviewSummary:
     """Pluck commission / fees / BP fields and validation messages out of
     Schwab's previewOrder response shape.
 
-    Schwab's exact field paths shift between response shapes; we try
-    a couple of common locations and fall through to ``None`` on miss.
+    Observed Schwab shape (2026-04):
+      commissionAndFee.commission.commissionLegs[*].commissionValues[*].value
+      commissionAndFee.fee.feeLegs[*].feeValues[*].value
+      orderStrategy.orderBalance.projectedBuyingPower
+      orderStrategy.orderBalance.orderValue
+      orderValidationResult.{warns,rejects,alerts,reviews}[*].activityMessage
     """
     if not preview:
-        return PreviewSummary(None, None, None, None, (), ())
+        return PreviewSummary(None, None, None, None, None, (), ())
 
-    commission = _first(preview, [
-        ["commission"],
-        ["orderValueImpact", "commission"],
-        ["orderFees", "commission"],
-    ])
-    fees = _first(preview, [
-        ["fees"],
-        ["orderValueImpact", "fees"],
-        ["orderFees", "fees"],
-    ])
-    bp_effect = _first(preview, [
-        ["orderValueImpact", "buyingPowerEffect"],
-        ["buyingPowerEffect"],
-        ["accountImpact", "buyingPowerEffect"],
-    ])
-    bp_after = _first(preview, [
-        ["orderValueImpact", "buyingPowerAfter"],
-        ["buyingPowerAfter"],
-        ["accountImpact", "buyingPowerAfter"],
-    ])
+    commission = _sum_commission_legs(
+        _path(preview, ["commissionAndFee", "commission", "commissionLegs"])
+    )
+    fees = _sum_fee_legs(
+        _path(preview, ["commissionAndFee", "fee", "feeLegs"])
+    )
+    bp_after_stock = _to_float(_path(
+        preview, ["orderStrategy", "orderBalance", "projectedBuyingPower"]
+    ))
+    bp_after_option = _to_float(_path(
+        preview, ["orderStrategy", "orderBalance", "projectedAvailableFund"]
+    ))
+    # Schwab doesn't return a BP-effect delta; surface order value (with
+    # sign by side: + = adds BP, - = consumes BP) as the closest signal.
+    bp_effect = _bp_effect_from_order_value(preview)
 
-    warnings: list[str] = []
-    rejects: list[str] = []
-    val = preview.get("orderValidationResult") or {}
-    for w in val.get("warnings") or []:
-        msg = w.get("message") if isinstance(w, dict) else str(w)
-        if msg:
-            warnings.append(msg)
-    for r in val.get("rejects") or []:
-        msg = r.get("message") if isinstance(r, dict) else str(r)
-        if msg:
-            rejects.append(msg)
+    warnings, rejects = _collect_validation_messages(preview)
 
     return PreviewSummary(
-        commission=_to_float(commission),
-        fees=_to_float(fees),
-        bp_effect=_to_float(bp_effect),
-        bp_after=_to_float(bp_after),
+        commission=commission,
+        fees=fees,
+        bp_effect=bp_effect,
+        bp_after_stock=bp_after_stock,
+        bp_after_option=bp_after_option,
         warnings=tuple(warnings),
         rejects=tuple(rejects),
     )
 
 
-def _first(d: dict, paths: list[list[str]]) -> Any:
-    for path in paths:
-        cur: Any = d
-        ok = True
-        for k in path:
-            if isinstance(cur, dict) and k in cur:
-                cur = cur[k]
-            else:
-                ok = False
-                break
-        if ok and cur is not None:
-            return cur
+def _sum_commission_legs(legs: Any) -> float | None:
+    if not isinstance(legs, list) or not legs:
+        return None
+    total = 0.0
+    seen = False
+    for leg in legs:
+        for cv in (leg.get("commissionValues") if isinstance(leg, dict) else []) or []:
+            v = _to_float(cv.get("value")) if isinstance(cv, dict) else None
+            if v is not None:
+                total += v
+                seen = True
+    return total if seen else None
+
+
+def _sum_fee_legs(legs: Any) -> float | None:
+    if not isinstance(legs, list) or not legs:
+        return None
+    total = 0.0
+    seen = False
+    for leg in legs:
+        for fv in (leg.get("feeValues") if isinstance(leg, dict) else []) or []:
+            v = _to_float(fv.get("value")) if isinstance(fv, dict) else None
+            if v is not None:
+                total += v
+                seen = True
+    return total if seen else None
+
+
+_BUY_INSTRUCTIONS = {"BUY", "BUY_TO_OPEN", "BUY_TO_CLOSE", "BUY_TO_COVER"}
+_SELL_INSTRUCTIONS = {"SELL", "SELL_TO_OPEN", "SELL_TO_CLOSE", "SELL_SHORT"}
+
+
+def _bp_effect_from_order_value(preview: dict) -> float | None:
+    """Derive a signed BP-effect estimate from ``orderBalance.orderValue``.
+
+    Schwab returns ``orderValue`` as a positive magnitude. We sign it by
+    the dominant leg instruction so the panel shows ``+`` (BP freed) for
+    sells and ``-`` (BP consumed) for buys. This is best-effort — net
+    debit/credit spreads aren't perfectly captured because Schwab
+    aggregates the legs into one value.
+    """
+    order_value = _to_float(_path(
+        preview, ["orderStrategy", "orderBalance", "orderValue"]
+    ))
+    if order_value is None:
+        return None
+    legs = _path(preview, ["orderStrategy", "orderLegs"]) or []
+    sign = 0
+    if isinstance(legs, list):
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            instr = leg.get("instruction")
+            if instr in _BUY_INSTRUCTIONS:
+                sign -= 1
+            elif instr in _SELL_INSTRUCTIONS:
+                sign += 1
+    if sign == 0:
+        return None  # ambiguous — don't guess
+    return order_value if sign > 0 else -order_value
+
+
+def _collect_validation_messages(preview: dict) -> tuple[list[str], list[str]]:
+    """Extract human-readable warnings and rejects.
+
+    Schwab uses ``activityMessage`` (with ``message`` as a legacy
+    fallback). Buckets observed: ``warns``, ``rejects``, ``alerts``,
+    ``reviews``. Anything in ``rejects`` blocks the order; the others
+    surface as warnings.
+    """
+    val = preview.get("orderValidationResult") or {}
+    warnings: list[str] = []
+    rejects: list[str] = []
+    for entry in val.get("rejects") or []:
+        msg = _val_message(entry)
+        if msg:
+            rejects.append(msg)
+    for bucket in ("warns", "warnings", "alerts", "reviews"):
+        for entry in val.get(bucket) or []:
+            msg = _val_message(entry)
+            if msg:
+                warnings.append(msg)
+    return warnings, rejects
+
+
+def _val_message(entry: object) -> str | None:
+    if isinstance(entry, dict):
+        return entry.get("activityMessage") or entry.get("message")
+    if isinstance(entry, str):
+        return entry
     return None
+
+
+def _path(d: dict, path: list[str]) -> Any:
+    cur: Any = d
+    for k in path:
+        if isinstance(cur, dict) and k in cur:
+            cur = cur[k]
+        else:
+            return None
+    return cur
 
 
 def _to_float(v: Any) -> float | None:
@@ -241,7 +325,7 @@ def render_confirmation(
     parseable.
     """
     lines: list[str] = []
-    lines.append("=== Confirm order ".ljust(62, "="))
+    lines.append("=== Confirm Order ".ljust(62, "="))
     lines.append(f"Account:        ********{account_tail}")
 
     strat_line = strategy_label or _classify_label(body)
@@ -266,41 +350,49 @@ def render_confirmation(
     for leg in body.get("orderLegCollection", []):
         lines.append(_format_leg_line(leg))
 
+    # Width fits the longest label below ("Result Buying Power (Option):").
+    _w = 32
+
+    def _row(label: str, value: str) -> str:
+        return f"  {(label + ':').ljust(_w)}{value}"
+
     # P&L
     if analytics is not None:
         lines.append("")
-        lines.append("P&L (at expiry)")
+        lines.append("P&L (At Expiry)")
         lines.append("-" * 62)
-        lines.append(
-            f"  Max profit:        {_fmt_money(analytics.max_profit, plus=True, unlimited='unlimited (call)')}"
-        )
-        lines.append(
-            f"  Max loss:          {_fmt_money(analytics.max_loss, plus=True, unlimited='unlimited (call)')}"
-        )
+        lines.append(_row(
+            "Max Profit",
+            _fmt_money(analytics.max_profit, plus=True, unlimited='unlimited (call)'),
+        ))
+        lines.append(_row(
+            "Max Loss",
+            _fmt_money(analytics.max_loss, plus=True, unlimited='unlimited (call)'),
+        ))
         if analytics.breakevens:
             be = "  ".join(f"${b:,.2f}" for b in analytics.breakevens)
-            lines.append(f"  Breakevens:        {be}")
-        lines.append(
-            "  POP:               (deferred to Phase 2 — needs live IV)"
-        )
+            lines.append(_row("Breakevens", be))
+        lines.append(_row("POP", "(deferred to Phase 2 — needs live IV)"))
 
-    # Cost & buying power
+    # Cost & Buying Power
     lines.append("")
-    lines.append("Cost & buying power")
+    lines.append("Cost & Buying Power")
     lines.append("-" * 62)
     if analytics is not None:
-        cost_label = "Order cost" if analytics.order_cost >= 0 else "Order credit"
-        lines.append(f"  {cost_label}:        {_fmt_money(abs(analytics.order_cost))}")
+        cost_label = "Order Cost" if analytics.order_cost >= 0 else "Order Credit"
+        lines.append(_row(cost_label, _fmt_money(abs(analytics.order_cost))))
     if preview_unavailable:
-        lines.append("  Est. commission:   unavailable (preview endpoint not enabled)")
-        lines.append("  Est. fees:         unavailable")
-        lines.append("  BP effect:         unavailable")
-        lines.append("  BP after order:    unavailable")
+        lines.append(_row("Est. Commission", "unavailable (preview endpoint not enabled)"))
+        lines.append(_row("Est. Fees", "unavailable"))
+        lines.append(_row("Buying Power Effect", "unavailable"))
+        lines.append(_row("Result Buying Power (Stock)", "unavailable"))
+        lines.append(_row("Result Buying Power (Option)", "unavailable"))
     else:
-        lines.append(f"  Est. commission:   {_fmt_money(preview.commission)}")
-        lines.append(f"  Est. fees:         {_fmt_money(preview.fees)}")
-        lines.append(f"  BP effect:         {_fmt_money(preview.bp_effect, plus=True)}")
-        lines.append(f"  BP after order:    {_fmt_money(preview.bp_after)}")
+        lines.append(_row("Est. Commission", _fmt_money(preview.commission, unlimited='n/a')))
+        lines.append(_row("Est. Fees", _fmt_money(preview.fees, unlimited='n/a')))
+        lines.append(_row("Buying Power Effect", _fmt_money(preview.bp_effect, plus=True, unlimited='n/a')))
+        lines.append(_row("Result Buying Power (Stock)", _fmt_money(preview.bp_after_stock, unlimited='n/a')))
+        lines.append(_row("Result Buying Power (Option)", _fmt_money(preview.bp_after_option, unlimited='n/a')))
 
     # Validation
     lines.append("")

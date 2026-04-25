@@ -53,11 +53,21 @@ def _write_profile(profiles_dir: Path, name: str, body: dict) -> None:
 
 _ACCT = AccountIds(account_number="12345678", hash_value="HASH")
 _PREVIEW_PAYLOAD = {
-    "commission": 1.30,
-    "fees": 0.05,
-    "orderValueImpact": {
-        "buyingPowerEffect": -86.35,
-        "buyingPowerAfter": 14213.65,
+    "commissionAndFee": {
+        "commission": {"commissionLegs": [
+            {"commissionValues": [{"type": "COMMISSION", "value": 1.30}]},
+        ]},
+        "fee": {"feeLegs": [
+            {"feeValues": [{"type": "SEC_FEE", "value": 0.05}]},
+        ]},
+    },
+    "orderStrategy": {
+        "orderBalance": {
+            "orderValue": 86.35,
+            "projectedBuyingPower": 14213.65,
+            "projectedAvailableFund": 7106.83,
+        },
+        "orderLegs": [{"instruction": "BUY"}],
     },
     "orderValidationResult": {"warnings": [], "rejects": []},
 }

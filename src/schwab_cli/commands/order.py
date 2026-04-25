@@ -775,7 +775,8 @@ def run_place(
         commission=preview_summary.commission,
         fees=preview_summary.fees,
         bp_effect=preview_summary.bp_effect,
-        bp_after=preview_summary.bp_after,
+        bp_after_stock=preview_summary.bp_after_stock,
+        bp_after_option=preview_summary.bp_after_option,
         warnings=list(preview_summary.warnings),
         rejects=list(preview_summary.rejects),
     )

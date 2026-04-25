@@ -71,11 +71,21 @@ def _prep(monkeypatch, tmp_path):
 
 _ACCT = AccountIds(account_number="12345678", hash_value="HASH")
 _PREVIEW_PAYLOAD = {
-    "commission": 1.30,
-    "fees": 0.05,
-    "orderValueImpact": {
-        "buyingPowerEffect": -86.35,
-        "buyingPowerAfter": 14213.65,
+    "commissionAndFee": {
+        "commission": {"commissionLegs": [
+            {"commissionValues": [{"type": "COMMISSION", "value": 1.30}]},
+        ]},
+        "fee": {"feeLegs": [
+            {"feeValues": [{"type": "SEC_FEE", "value": 0.05}]},
+        ]},
+    },
+    "orderStrategy": {
+        "orderBalance": {
+            "orderValue": 86.35,
+            "projectedBuyingPower": 14213.65,
+            "projectedAvailableFund": 7106.83,
+        },
+        "orderLegs": [{"instruction": "BUY"}],
     },
     "orderValidationResult": {"warnings": [], "rejects": []},
 }
@@ -148,7 +158,7 @@ def test_preview_renders_panel_without_placing(monkeypatch, tmp_path):
     assert result.exit_code == 0, (result.stdout, result.stderr)
     assert place_calls == [], "preview must NOT call placeOrder"
     # Panel goes to stderr.
-    assert "Confirm order" in result.stderr
+    assert "Confirm Order" in result.stderr
     assert "********5678" in result.stderr
 
 
@@ -918,12 +928,12 @@ def test_preview_renders_panel_when_no_profile_resolves(monkeypatch, tmp_path):
     assert result.exit_code == 0, (result.stdout, result.stderr)
     assert place_calls == [], "preview must NOT call placeOrder"
     # Panel rendered to stderr.
-    assert "Confirm order" in result.stderr
+    assert "Confirm Order" in result.stderr
     # Warning that policy gate was skipped.
     assert "no policy profile resolved" in result.stderr or \
            "no profile loaded" in result.stderr
     # Should still surface BP impact (Schwab preview ran).
-    assert "BP effect" in result.stderr
+    assert "Buying Power Effect" in result.stderr
 
 
 def test_real_place_still_errors_when_no_profile_resolves(monkeypatch, tmp_path):
