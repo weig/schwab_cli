@@ -941,3 +941,42 @@ def policy_test(
     policy_cmd.run_test(
         order_json_path=order_path, profile=profile, account=account,
     )
+
+
+@policy_app.command("counters", help="Show persisted order counters.")
+def policy_counters(
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Limit output to one account (matches the stored 8-digit number).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+    doc: bool = doc_option(),
+) -> None:
+    policy_cmd.run_counters(account=account, as_json=as_json)
+
+
+@policy_app.command("audit", help="Tail the order audit log.")
+def policy_audit(
+    since: str = typer.Option(
+        None, "--since",
+        help="Range token (e.g. -1d..now, ytd, mtd, 20260420..20260425). "
+             "Default: last 24h.",
+    ),
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Filter to one account (exact match on the audit row's `account`).",
+    ),
+    decision: str = typer.Option(
+        None, "--decision",
+        help="Filter to approve or reject rows.",
+    ),
+    limit: int = typer.Option(
+        None, "--limit", help="Keep only the last N matching rows.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+    doc: bool = doc_option(),
+) -> None:
+    policy_cmd.run_audit(
+        since=since, account=account, decision=decision,
+        limit=limit, as_json=as_json,
+    )

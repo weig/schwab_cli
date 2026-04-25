@@ -13,10 +13,13 @@ fetches; Phase 2c with counters + position state.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Any
+from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any
 
 from schwab_cli.order_policy.conditions import UnevaluatableField
+
+if TYPE_CHECKING:  # pragma: no cover
+    from schwab_cli.order_policy.counters import Counters
 
 # Categorical fields that the match clause needs (per spec §6.6).
 CATEGORICAL_FIELDS = (
@@ -58,6 +61,23 @@ PHASE_2B_FIELDS = frozenset({
     "days_to_ex_div",
 })
 
+# Phase 2c — counters + position state.
+PHASE_2C_FIELDS = frozenset({
+    # Counters
+    "daily_order_count",
+    "daily_order_count_per_ticker",
+    "minutely_order_count",
+    "replace_count",
+    "consecutive_losing_closes_24h",
+    # Position state
+    "existing_position_qty",
+    "existing_position_count_per_ticker",
+    "concentration_pct",
+    "covered_by_equity",
+    "cash_secured_for_short_put",
+    "covered_by_pmcc",
+})
+
 
 @dataclass(frozen=True)
 class OrderContext:
@@ -97,6 +117,9 @@ class OrderContext:
     preview_data: dict | None = None
     now_et: "datetime | None" = None    # forward ref; lazy-resolved at use
     dividend_data: dict | None = None
+    # Phase 2c — counters + transaction history.
+    counters_data: "Counters | None" = None  # already-loaded counter view
+    transactions_data: list[dict] | None = None    # last 24h transactions
 
 
 def categorical_view(ctx: OrderContext) -> dict[str, Any]:
@@ -166,10 +189,12 @@ class FieldProvider:
             value = self._compute(field_name)
         elif field_name in PHASE_2B_FIELDS:
             value = self._compute_2b(field_name)
+        elif field_name in PHASE_2C_FIELDS:
+            value = self._compute_2c(field_name)
         else:
             raise UnevaluatableField(
                 f"field {field_name!r} not implemented "
-                "(Phase 2c/2e or backlog)"
+                "(Phase 2e or backlog)"
             )
         self._cache[field_name] = value
         return value
@@ -666,6 +691,314 @@ class FieldProvider:
                 f"unparseable ex-div date {next_iso!r}"
             )
         return (ex - self._ctx.today).days
+
+    # ====================================================================
+    # Phase 2c — counters + position state
+    # ====================================================================
+
+    def _compute_2c(self, name: str) -> Any:
+        if name in {
+            "daily_order_count", "daily_order_count_per_ticker",
+            "minutely_order_count", "replace_count",
+        }:
+            return self._counter_field(name)
+        if name == "consecutive_losing_closes_24h":
+            return self._consecutive_losing_closes_24h()
+        if name in {
+            "existing_position_qty",
+            "existing_position_count_per_ticker",
+            "concentration_pct",
+            "covered_by_equity",
+            "cash_secured_for_short_put",
+            "covered_by_pmcc",
+        }:
+            return self._position_field(name)
+        raise UnevaluatableField(f"internal: no Phase 2c provider for {name!r}")
+
+    # ---- counters ----------------------------------------------------
+
+    def _counter_field(self, name: str) -> Any:
+        c = self._ctx.counters_data
+        if c is None:
+            raise UnevaluatableField(
+                f"{name} needs counters_data — not loaded"
+            )
+        from schwab_cli.order_policy.counters import (
+            get_daily_per_ticker, get_daily_total,
+            get_minutely_total, get_replace_count,
+        )
+        acct = self._cats["account"]
+        if name == "daily_order_count":
+            return get_daily_total(c, acct)
+        if name == "daily_order_count_per_ticker":
+            und = self._cats["underlying"]
+            if not und:
+                raise UnevaluatableField(
+                    "daily_order_count_per_ticker needs an underlying"
+                )
+            return get_daily_per_ticker(c, acct, und)
+        if name == "minutely_order_count":
+            return get_minutely_total(c, acct, now=self._ctx.now_et)
+        if name == "replace_count":
+            # Replace count is keyed by Schwab order id; on a `place`
+            # there's no id yet, so the field returns 0. Phase 3
+            # reuses the same field on `order replace` with an id.
+            order_id = self._ctx.body.get("orderId")
+            if not order_id:
+                return 0
+            return get_replace_count(c, str(order_id))
+        raise UnevaluatableField(f"unknown counter field {name!r}")
+
+    def _consecutive_losing_closes_24h(self) -> int:
+        """Count of closes (transactions) with realized P/L < 0 in
+        the last 24 hours. Walks ``transactions_data`` and counts
+        from the most recent close back until a non-loss break."""
+        if self._ctx.transactions_data is None:
+            raise UnevaluatableField(
+                "consecutive_losing_closes_24h needs transactions_data — not prefetched"
+            )
+        # Filter to the last 24h on this account.
+        cutoff = (
+            (self._ctx.now_et or _now_utc()) - timedelta(hours=24)
+        )
+        cutoff_iso = cutoff.astimezone(timezone.utc).isoformat()
+        recent_closes: list[tuple[str, float]] = []
+        for tx in self._ctx.transactions_data:
+            if not isinstance(tx, dict):
+                continue
+            kind = (tx.get("type") or "").upper()
+            if kind not in {"TRADE", "CLOSE", "ORDER"}:
+                continue
+            ts = tx.get("time") or tx.get("transactionDate") or ""
+            if not isinstance(ts, str) or ts < cutoff_iso:
+                continue
+            net = tx.get("netAmount")
+            if not isinstance(net, (int, float)):
+                continue
+            recent_closes.append((ts, float(net)))
+        # Sort newest-first.
+        recent_closes.sort(reverse=True)
+        streak = 0
+        for _ts, net in recent_closes:
+            if net < 0:
+                streak += 1
+            else:
+                break
+        return streak
+
+    # ---- position state ----------------------------------------------
+
+    def _position_field(self, name: str) -> Any:
+        if not self._ctx.account_data:
+            raise UnevaluatableField(
+                f"{name} needs account_data (positions) — not prefetched"
+            )
+        sa = self._ctx.account_data.get("securitiesAccount") or {}
+        positions = sa.get("positions") or []
+        legs = self._ctx.body.get("orderLegCollection") or []
+        und = self._cats["underlying"]
+
+        if name == "existing_position_qty":
+            # Net qty of the same exact instrument (option OSI or equity).
+            if not legs:
+                raise UnevaluatableField("no leg on order")
+            sym = (legs[0].get("instrument") or {}).get("symbol", "").strip()
+            return _net_qty_for_symbol(positions, sym)
+
+        if name == "existing_position_count_per_ticker":
+            return _option_count_per_ticker(positions, und or "")
+
+        if name == "concentration_pct":
+            # underlying notional / net_liq. Notional = sum of |market
+            # value| of all positions on the same underlying.
+            net_liq = self.get("net_liq")
+            if float(net_liq) == 0:
+                raise UnevaluatableField("net_liq is zero")
+            notional = _underlying_notional(positions, und or "")
+            return notional / float(net_liq) * 100.0
+
+        if name == "covered_by_equity":
+            return _covered_by_equity(positions, legs)
+
+        if name == "cash_secured_for_short_put":
+            return _cash_secured_for_short_put(
+                positions=positions, legs=legs,
+                cash=self.get("cash"),
+            )
+
+        if name == "covered_by_pmcc":
+            # Simplified: strike < short_strike AND expiry > short_expiry.
+            # Phase 2c notes: full delta ≥ 0.50 check needs a fresh
+            # quote on each candidate long call — deferred.
+            return _covered_by_pmcc(positions, legs)
+
+        raise UnevaluatableField(f"unknown position field {name!r}")
+
+
+def _now_utc() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _net_qty_for_symbol(positions: list[dict], symbol: str) -> int:
+    qty = 0
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        instr = p.get("instrument") or {}
+        if (instr.get("symbol") or "").strip() == symbol:
+            qty += int(p.get("longQuantity") or 0)
+            qty -= int(p.get("shortQuantity") or 0)
+    return qty
+
+
+def _option_count_per_ticker(positions: list[dict], underlying: str) -> int:
+    if not underlying:
+        return 0
+    seen: set[str] = set()
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        instr = p.get("instrument") or {}
+        if (instr.get("assetType") or "").upper() != "OPTION":
+            continue
+        sym = (instr.get("symbol") or "").strip()
+        if len(sym) >= 21 and sym[:6].strip().upper() == underlying:
+            seen.add(sym)
+    return len(seen)
+
+
+def _underlying_notional(positions: list[dict], underlying: str) -> float:
+    if not underlying:
+        return 0.0
+    total = 0.0
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        instr = p.get("instrument") or {}
+        sym = (instr.get("symbol") or "").strip().upper()
+        atype = (instr.get("assetType") or "").upper()
+        if atype == "EQUITY" and sym == underlying:
+            mv = p.get("marketValue")
+        elif atype == "OPTION" and len(sym) >= 21 and sym[:6].strip() == underlying:
+            mv = p.get("marketValue")
+        else:
+            continue
+        if isinstance(mv, (int, float)):
+            total += abs(float(mv))
+    return total
+
+
+def _covered_by_equity(positions: list[dict], legs: list[dict]) -> bool:
+    """For SHORT_CALL legs: equity_qty ≥ contracts × 100."""
+    short_call_contracts = 0
+    underlying: str | None = None
+    for leg in legs:
+        if leg.get("instruction") not in ("SELL_TO_OPEN", "SELL_TO_CLOSE"):
+            continue
+        instr = leg.get("instrument") or {}
+        if (instr.get("assetType") or "").upper() != "OPTION":
+            continue
+        sym = (instr.get("symbol") or "").strip()
+        if len(sym) < 21 or sym[12].upper() != "C":
+            continue
+        if underlying is None:
+            underlying = sym[:6].strip().upper()
+        short_call_contracts += int(leg.get("quantity") or 0)
+    if short_call_contracts == 0 or not underlying:
+        return False
+    # Look for matching equity longs.
+    equity_qty = 0
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        instr = p.get("instrument") or {}
+        if (instr.get("assetType") or "").upper() != "EQUITY":
+            continue
+        if (instr.get("symbol") or "").strip().upper() == underlying:
+            equity_qty += int(p.get("longQuantity") or 0)
+    return equity_qty >= short_call_contracts * 100
+
+
+def _cash_secured_for_short_put(
+    *, positions: list[dict], legs: list[dict], cash: float,
+) -> bool:
+    """For SHORT_PUT: cash ≥ strike × 100 × contracts (sum across put legs)."""
+    required = 0.0
+    for leg in legs:
+        if leg.get("instruction") not in ("SELL_TO_OPEN", "SELL_TO_CLOSE"):
+            continue
+        instr = leg.get("instrument") or {}
+        if (instr.get("assetType") or "").upper() != "OPTION":
+            continue
+        sym = (instr.get("symbol") or "").strip()
+        if len(sym) < 21 or sym[12].upper() != "P":
+            continue
+        try:
+            strike = int(sym[13:21]) / 1000.0
+        except (ValueError, IndexError):
+            continue
+        qty = int(leg.get("quantity") or 0)
+        required += strike * 100.0 * qty
+    if required == 0.0:
+        return False
+    return float(cash) >= required
+
+
+def _covered_by_pmcc(positions: list[dict], legs: list[dict]) -> bool:
+    """Simplified PMCC check: a long call exists with strike < short_strike
+    and expiry > short_expiry on the same underlying. Delta check
+    deferred (would need a fresh quote per candidate long)."""
+    short_calls = []
+    for leg in legs:
+        if leg.get("instruction") not in ("SELL_TO_OPEN", "SELL_TO_CLOSE"):
+            continue
+        instr = leg.get("instrument") or {}
+        if (instr.get("assetType") or "").upper() != "OPTION":
+            continue
+        sym = (instr.get("symbol") or "").strip()
+        if len(sym) < 21 or sym[12].upper() != "C":
+            continue
+        try:
+            strike = int(sym[13:21]) / 1000.0
+            yy = int(sym[6:8]); mm = int(sym[8:10]); dd = int(sym[10:12])
+            expiry = date(2000 + yy, mm, dd)
+        except (ValueError, IndexError):
+            continue
+        underlying = sym[:6].strip().upper()
+        short_calls.append((underlying, expiry, strike))
+
+    if not short_calls:
+        return False
+
+    long_calls: list[tuple[str, date, float]] = []
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        instr = p.get("instrument") or {}
+        if (instr.get("assetType") or "").upper() != "OPTION":
+            continue
+        sym = (instr.get("symbol") or "").strip()
+        if len(sym) < 21 or sym[12].upper() != "C":
+            continue
+        if int(p.get("longQuantity") or 0) <= 0:
+            continue
+        try:
+            strike = int(sym[13:21]) / 1000.0
+            yy = int(sym[6:8]); mm = int(sym[8:10]); dd = int(sym[10:12])
+            expiry = date(2000 + yy, mm, dd)
+        except (ValueError, IndexError):
+            continue
+        long_calls.append((sym[:6].strip().upper(), expiry, strike))
+
+    # Every short call must be coverable by some long call on the
+    # same underlying with longer expiry and lower strike.
+    for sc_und, sc_exp, sc_strike in short_calls:
+        if not any(
+            lc_und == sc_und and lc_exp > sc_exp and lc_strike < sc_strike
+            for lc_und, lc_exp, lc_strike in long_calls
+        ):
+            return False
+    return True
 
 
 def _itm_or_otm(pct_above: float, side: str | None, *, threshold: str) -> str:

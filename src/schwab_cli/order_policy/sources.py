@@ -32,7 +32,10 @@ from schwab_cli.order_policy.schema import (
     WildcardMatch,
 )
 
-Source = Literal["chain", "account", "preview", "calendar", "dividends", "none"]
+Source = Literal[
+    "chain", "account", "preview", "calendar", "dividends",
+    "counters", "transactions", "none",
+]
 
 
 # Single source of truth — every field implemented by Phase 2a/2b
@@ -108,6 +111,24 @@ FIELD_SOURCE: dict[str, Source] = {
 
     # --- 2b dividends ---
     "days_to_ex_div": "dividends",
+
+    # --- 2c counters ---
+    "daily_order_count": "counters",
+    "daily_order_count_per_ticker": "counters",
+    "minutely_order_count": "counters",
+    "replace_count": "counters",
+
+    # --- 2c position state (rides on the same getAccount payload as
+    # account state) ---
+    "existing_position_qty": "account",
+    "existing_position_count_per_ticker": "account",
+    "concentration_pct": "account",
+    "covered_by_equity": "account",
+    "cash_secured_for_short_put": "account",
+    "covered_by_pmcc": "account",
+
+    # --- 2c transactions ---
+    "consecutive_losing_closes_24h": "transactions",
 }
 
 

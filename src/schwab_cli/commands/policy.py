@@ -77,6 +77,151 @@ def run_lint(*, profile: str | None, all_profiles: bool) -> None:
     typer.secho(f"\nall {len(names)} profile(s) ok", fg=typer.colors.GREEN)
 
 
+def run_counters(*, account: str | None, as_json: bool) -> None:
+    """Print the current persisted counter state.
+
+    Without ``--account`` shows every account; otherwise just the
+    one. Always loads the file fresh (auto-rotates daily counters
+    if the day rolled).
+    """
+    from schwab_cli.order_policy import counters as _c
+    c = _c.load()
+
+    if as_json:
+        out = c.to_json()
+        if account:
+            scoped = {
+                "daily_order_count_total": {
+                    account: c.daily_total.get(account, 0),
+                },
+                "daily_order_count_per_ticker": {
+                    account: c.daily_per_ticker.get(account, {}),
+                },
+                "minutely_buckets": {
+                    account: c.minutely_buckets.get(account, {}),
+                },
+                "override_count_per_day": {
+                    account: c.override_count_per_day.get(account, 0),
+                },
+            }
+            out = {"date": c.et_date, "tz": "America/New_York",
+                   "counters": scoped}
+        typer.echo(_json.dumps(out, indent=2, sort_keys=True))
+        return
+
+    typer.echo(f"=== Counters (date: {c.et_date} ET) ".ljust(60, "="))
+    accounts = [account] if account else sorted(set(
+        list(c.daily_total.keys())
+        + list(c.daily_per_ticker.keys())
+        + list(c.minutely_buckets.keys())
+        + list(c.override_count_per_day.keys())
+    ))
+    if not accounts:
+        typer.echo("(no activity recorded)")
+        return
+    for acct in accounts:
+        tail = acct[-4:] if len(acct) >= 4 else acct
+        typer.echo(f"\nAccount ********{tail}")
+        typer.echo(f"  daily_order_count:   {c.daily_total.get(acct, 0)}")
+        per_ticker = c.daily_per_ticker.get(acct) or {}
+        if per_ticker:
+            typer.echo("  per-ticker:")
+            for sym, n in sorted(per_ticker.items()):
+                typer.echo(f"    {sym}: {n}")
+        minutely = c.minutely_buckets.get(acct) or {}
+        if minutely:
+            typer.echo(f"  minutely (last 5 min): {sum(minutely.values())} orders "
+                       f"across {len(minutely)} bucket(s)")
+        override_today = c.override_count_per_day.get(acct, 0)
+        if override_today:
+            typer.echo(f"  overrides today:     {override_today}")
+
+
+def run_audit(
+    *, since: str | None, account: str | None,
+    decision: str | None, limit: int | None, as_json: bool,
+) -> None:
+    """Tail the order audit log.
+
+    ``since`` accepts the same range tokens as ``order list --range``
+    (default last 24h). ``account`` and ``decision`` filter rows.
+    """
+    from schwab_cli import audit as audit_mod
+    from schwab_cli.history_spec import RangeSpecError, parse_range
+
+    if since is None:
+        since = "-1d..now"
+    try:
+        start, end = parse_range(since)
+    except RangeSpecError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    rows: list[dict] = []
+    base = audit_mod.DEFAULT_AUDIT_DIR
+    if not base.exists():
+        if as_json:
+            typer.echo(_json.dumps([], indent=2))
+        else:
+            typer.echo("(no audit log entries)")
+        return
+
+    # Walk one file per day in the range — files are
+    # YYYY-MM-DD.order.log.
+    cur = start.date()
+    last = end.date()
+    while cur <= last:
+        path = base / f"{cur.isoformat()}.order.log"
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                rows.append(row)
+        from datetime import timedelta as _td
+        cur = cur + _td(days=1)
+
+    # Filter.
+    def _ok(r: dict) -> bool:
+        ts = r.get("ts", "")
+        # Lexicographic compare works for ISO-8601 timestamps with the
+        # same offset; the ranges are tz-aware UTC.
+        if ts and not (start.isoformat() <= ts <= end.isoformat() + "z"):
+            # Be permissive on the upper bound — fall through.
+            pass
+        if account and r.get("account") not in (account, None):
+            # The audit row may carry account=<input> (e.g. "5678") OR
+            # account=<resolved 8-digit>; accept either.
+            if r.get("account") != account:
+                return False
+        if decision and r.get("decision") not in (None, decision):
+            if r.get("decision") != decision:
+                return False
+        return True
+
+    rows = [r for r in rows if _ok(r)]
+    if limit is not None:
+        rows = rows[-limit:]
+
+    if as_json:
+        typer.echo(_json.dumps(rows, indent=2, default=str))
+        return
+
+    if not rows:
+        typer.echo("(no matching audit entries)")
+        return
+    for r in rows:
+        ts = r.get("ts", "?")
+        sub = r.get("subcommand", "?")
+        stage = r.get("stage", "?")
+        acct = r.get("account") or ""
+        extra = r.get("decision") or r.get("order_id") or r.get("error") or ""
+        typer.echo(f"  {ts}  {sub:<8}  {stage:<22}  acct={acct:<10}  {extra}")
+
+
 def run_test(
     *, order_json_path: str, profile: str | None,
     account: str | None,

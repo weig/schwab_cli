@@ -777,6 +777,22 @@ def run_place(
         account=acct.account_number, order_id=order_id,
     )
 
+    # Phase 2c: increment counters on successful place. Best-effort;
+    # an OS error here doesn't undo the placement, so we audit and
+    # move on.
+    try:
+        from schwab_cli.order_policy import counters as _counters_mod
+        _counters_mod.record_place(
+            account_number=acct.account_number,
+            underlying=_underlying_from_body(body),
+        )
+    except Exception as e:  # noqa: BLE001
+        _audit(
+            sub, "counter_increment_failed",
+            account=acct.account_number, order_id=order_id,
+            error=f"{type(e).__name__}: {e}",
+        )
+
     if as_json:
         typer.echo(_json.dumps({"orderId": order_id}))
     else:
@@ -1046,6 +1062,8 @@ def _build_policy_context(
     quote_data: dict | None = None
     account_data: dict | None = None
     dividend_data: dict | None = None
+    counters_data = None
+    transactions_data: list[dict] | None = None
 
     cats_underlying = _underlying_from_body(body)
     is_option = _is_option_order(body)
@@ -1075,6 +1093,23 @@ def _build_policy_context(
             _audit(sub, "policy_dividend_fetch_failed",
                    account=account.account_number,
                    error=f"{type(e).__name__}: {e}")
+    if "counters" in needed:
+        try:
+            from schwab_cli.order_policy import counters as _counters_mod
+            counters_data = _counters_mod.load()
+        except Exception as e:  # noqa: BLE001
+            _audit(sub, "policy_counters_load_failed",
+                   account=account.account_number,
+                   error=f"{type(e).__name__}: {e}")
+    if "transactions" in needed:
+        try:
+            transactions_data = _fetch_transactions_safe(
+                client, account, hours=24,
+            )
+        except Exception as e:  # noqa: BLE001
+            _audit(sub, "policy_transactions_fetch_failed",
+                   account=account.account_number,
+                   error=f"{type(e).__name__}: {e}")
 
     return OrderContext(
         body=body,
@@ -1085,6 +1120,8 @@ def _build_policy_context(
         account_data=account_data,
         preview_data=preview_raw,
         dividend_data=dividend_data,
+        counters_data=counters_data,
+        transactions_data=transactions_data,
     )
 
 
@@ -1124,6 +1161,18 @@ def _fetch_quote_safe(client: SchwabClient, symbol: str) -> dict:
 def _fetch_account_safe(client: SchwabClient, account_number: str) -> dict:
     from schwab_cli.api.accounts import get_account
     return get_account(client, account_number)
+
+
+def _fetch_transactions_safe(
+    client: SchwabClient, account: AccountIds, *, hours: int = 24,
+) -> list[dict]:
+    from schwab_cli.api.transactions import get_transactions
+    end = datetime.now(tz=timezone.utc)
+    start = end - timedelta(hours=hours)
+    return get_transactions(
+        client, account.hash_value,
+        start=start, end=end, types="TRADE",
+    )
 
 
 def _fetch_dividend_safe(client: SchwabClient, symbol: str) -> dict:
