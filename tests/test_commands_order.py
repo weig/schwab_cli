@@ -994,10 +994,10 @@ def test_preview_fetches_quote_and_renders_underlying_section(monkeypatch, tmp_p
         _exit_all(patches)
     assert result.exit_code == 0, (result.stdout, result.stderr)
     assert quote_calls == [["AAPL"]]
-    # Underlying section + standard ("Quote") label, not the live one.
-    assert "Underlying" in result.stderr
-    assert "AAPL — Quote" in result.stderr
-    assert "AAPL — Live Quote" not in result.stderr
+    # Underlying section appears with the symbol; the panel shows a
+    # one-shot snapshot — "live" belongs to the ticker line above the
+    # prompt for real-place runs, not the panel header.
+    assert "Underlying  (AAPL)" in result.stderr
     assert "200.05" in result.stderr  # bid
     assert "1,500" in result.stderr   # bid size
 
@@ -1023,9 +1023,12 @@ def test_place_without_yes_fetches_live_quote(monkeypatch, tmp_path):
         ], input="\n")
     finally:
         _exit_all(patches)
-    # Quote was fetched once for the panel.
-    assert quote_calls == [["AAPL"]]
-    assert "AAPL — Live Quote" in result.stderr
+    # Quote was fetched at least once for the panel; the LiveTicker
+    # may also poll one or more times before the input arrives.
+    assert quote_calls and quote_calls[0] == ["AAPL"]
+    assert "Underlying  (AAPL)" in result.stderr
+    # The "Live <SYM>" ticker line is emitted above the prompt.
+    assert "Live AAPL" in result.stderr
     # Confirmation declined → no place call.
     assert place_calls == []
 

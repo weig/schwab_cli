@@ -102,8 +102,9 @@ class FetchAccountBalancesRule:
 class FetchUnderlyingQuoteRule:
     """Step 2b — one-shot underlying quote for the Underlying section.
 
-    Skipped on ``place --yes``. The is_live flag is set so the panel
-    label can read "Live Quote" for the place-without-yes path.
+    Skipped on ``place --yes``. Real-place runs additionally start a
+    LiveTicker around the confirm prompt that repaints a status line
+    above it — see :class:`ConfirmRule`.
     """
 
     name = "fetch_underlying_quote"
@@ -113,10 +114,7 @@ class FetchUnderlyingQuoteRule:
 
     def execute(self, ctx: OrderContext) -> RuleResult:
         from schwab_cli.commands.order import _fetch_underlying_quote_safe
-        q = _fetch_underlying_quote_safe(ctx.client, ctx.body)
-        if q is not None:
-            q["is_live"] = (not ctx.dry_run)
-        ctx.underlying_quote = q
+        ctx.underlying_quote = _fetch_underlying_quote_safe(ctx.client, ctx.body)
         return RuleResult()
 
 

@@ -322,12 +322,13 @@ def render_confirmation(
         return f"  {(label + ':').ljust(_w)}{value}"
 
     # Underlying quote (best-effort — caller passes None on miss).
-    # Header marks the snapshot as "Live Quote" for real-place reviews
-    # vs "Quote" for previews so the operator knows the freshness budget.
+    # The panel section is always a one-shot snapshot taken at panel-
+    # build time. For real-place runs the LiveTicker repaints a fresh
+    # status line above the confirmation prompt — that's where "live"
+    # belongs, not on the panel header which never updates.
     if underlying_quote:
         lines.append("")
-        kind = "Live Quote" if underlying_quote.get("is_live") else "Quote"
-        lines.append(f"Underlying  ({underlying_quote.get('symbol', '?')} — {kind})")
+        lines.append(f"Underlying  ({underlying_quote.get('symbol', '?')})")
         lines.append("-" * 62)
         last = underlying_quote.get("last")
         bid = underlying_quote.get("bid")
