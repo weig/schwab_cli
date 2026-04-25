@@ -25,10 +25,11 @@ confirmation step gated by either ``--yes`` or the typed ``yea``.
 from __future__ import annotations
 
 import json as _json
+import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 import typer
@@ -47,6 +48,14 @@ from schwab_cli.api.orders import (
     preview_order,
 )
 from schwab_cli.history_spec import RangeSpecError, parse_range
+from schwab_cli.order_policy import (
+    PolicyConfigError,
+    evaluate as policy_evaluate,
+    load_profile,
+)
+from schwab_cli.order_policy.decision import Decision
+from schwab_cli.order_policy.fields import OrderContext
+from schwab_cli.order_policy.loader import select_profile_name
 from schwab_cli.order_ticket import (
     ParsedLeg,
     ParsedTicket,
@@ -72,6 +81,7 @@ from schwab_cli.session import load as load_session
 EXIT_USAGE = 2
 EXIT_NETWORK = 1
 EXIT_REJECTED = 3
+EXIT_POLICY_REJECTED = 4
 
 # Synthetic --status categories → list of Schwab status enums.
 STATUS_CATEGORIES: dict[str, tuple[str, ...]] = {
@@ -137,6 +147,43 @@ def _audit(subcommand: str, stage: str, **fields: object) -> None:
     payload: dict[str, object] = {"subcommand": subcommand, "stage": stage}
     payload.update(fields)
     audit.write_event(payload)
+
+
+def _render_policy_decision(decision: Decision) -> None:
+    """Render the per-policy decision table to stderr."""
+    color = typer.colors.GREEN if decision.approved else typer.colors.RED
+    typer.secho(
+        f"\nPolicy Check  (profile: {decision.profile_name})",
+        fg=typer.colors.BRIGHT_WHITE, err=True,
+    )
+    typer.echo("-" * 50, err=True)
+    for ev in decision.evaluations:
+        if not ev.enabled:
+            typer.secho(f"  · {ev.name:<30}  disabled", err=True, dim=True)
+            continue
+        if not ev.matched:
+            typer.echo(f"  · {ev.name:<30}  skipped (no match)", err=True)
+            continue
+        glyph = "✓" if ev.satisfied else "✗"
+        glyph_color = typer.colors.GREEN if ev.satisfied else typer.colors.RED
+        suffix = "conditions ✓" if ev.satisfied else "conditions failed"
+        typer.secho(f"  {glyph} {ev.name:<30}  matched, {suffix}",
+                    fg=glyph_color, err=True)
+        for p in ev.predicates:
+            if not p.satisfied:
+                detail = (
+                    f"      {p.field} {p.op} {p.expected!r} "
+                    f"actual={p.actual!r}"
+                )
+                if p.error:
+                    detail += f"  [{p.error}]"
+                if p.unevaluatable:
+                    detail += "  [unavailable in current phase]"
+                typer.secho(detail, fg=typer.colors.RED, err=True)
+    typer.secho(
+        f"  Decision: {decision.decision.upper()}",
+        fg=color, bold=True, err=True,
+    )
 
 
 def _confirm_or_abort(*, yes: bool) -> None:
@@ -458,6 +505,7 @@ def run_place(
     dry_run: bool,
     yes: bool,
     as_json: bool,
+    profile: str | None = None,
 ) -> None:
     sub = "preview" if dry_run else "place"
     # Log the raw invocation BEFORE any validation so even bad-flag
@@ -465,6 +513,7 @@ def run_place(
     _audit(
         sub, "invoked",
         account=account,
+        profile=profile,
         flags={
             "symbol": symbol, "order_type": order_type, "price": price,
             "quantity": quantity, "side": side, "duration": duration,
@@ -571,6 +620,55 @@ def run_place(
         rejects=list(preview_summary.rejects),
     )
 
+    # ---- policy gate (Phase 2a) -----------------------------------------
+    profile_name = select_profile_name(
+        flag=profile, env=os.environ.get("SCHWAB_CLI_PROFILE"),
+    )
+    try:
+        prof = load_profile(profile_name)
+    except PolicyConfigError as e:
+        typer.secho(f"policy load failed: {e}", fg=typer.colors.RED, err=True)
+        _audit(
+            sub, "policy_load_failed",
+            account=acct.account_number, profile=profile_name, error=str(e),
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
+    decision = policy_evaluate(
+        prof,
+        OrderContext(
+            body=body, account_number=acct.account_number, today=date.today(),
+        ),
+    )
+    _audit(
+        sub,
+        "policy_evaluated" if decision.approved else "policy_rejected",
+        account=acct.account_number,
+        profile_name=prof.name,
+        decision=decision.decision,
+        rule=decision.rule_name,
+        phase=decision.rule_phase,
+        reason=decision.reason,
+        policy_evaluations=[
+            {
+                "policy": ev.name,
+                "matched": ev.matched,
+                "effect": ev.effect,
+                "satisfied": ev.satisfied if ev.matched else None,
+                "conditions": [
+                    {
+                        "field": p.field, "op": p.op,
+                        "expected": p.expected, "actual": p.actual,
+                        "satisfied": p.satisfied,
+                        "unevaluatable": p.unevaluatable,
+                    }
+                    for p in ev.predicates
+                ],
+            }
+            for ev in decision.evaluations
+        ],
+    )
+
     # Local analytics (max P/L, breakevens) — single-leg + vertical only in Phase 1.
     analytics = compute_analytics(
         strategy=spec.complex_strategy if spec.complex_strategy != "NONE" else None,
@@ -591,6 +689,7 @@ def run_place(
         preview_unavailable=preview_unavailable,
     )
     typer.echo(panel, err=True)
+    _render_policy_decision(decision)
     for warning in limits.warnings:
         typer.secho(
             f"limit warning [{warning.rule_name}]: {warning.message}",
@@ -603,8 +702,30 @@ def run_place(
         if as_json:
             typer.echo(_json.dumps({"order": body, "preview": preview_summary.__dict__}, default=str))
         else:
-            typer.echo("(dry-run: not sending placeOrder)", err=True)
+            if decision.approved:
+                typer.echo("(dry-run: not sending placeOrder)", err=True)
+            else:
+                # Preview-mode rejects are warnings, not blockers.
+                typer.secho(
+                    "WARNING: this order would be REJECTED by policy "
+                    f"{prof.name!r} during a real `order place`. "
+                    "Preview exits 0 anyway — informational only.",
+                    fg=typer.colors.YELLOW, err=True,
+                )
         return
+
+    # In real-place mode, a policy reject hard-blocks the wire call.
+    if not decision.approved:
+        typer.secho(
+            f"REJECTED by policy {prof.name!r}: {decision.reason}",
+            fg=typer.colors.RED, err=True,
+        )
+        typer.secho(
+            "(no order sent to Schwab. Use `--profile <other>` or pass "
+            "`--override` (Phase 2e) to bypass.)",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_POLICY_REJECTED)
 
     # _confirm_or_abort raises typer.Exit(0) when the user doesn't say
     # "yea". We want the abort to land in the audit log too, so wrap.

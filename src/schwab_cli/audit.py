@@ -25,14 +25,20 @@ diffs. Keys include at least ``ts`` (UTC ISO-8601), ``subcommand``,
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 DEFAULT_AUDIT_DIR = Path.home() / ".config" / "schwab_cli" / "audit"
+DEFAULT_HMAC_KEY_PATH = (
+    Path.home() / ".config" / "schwab_cli" / "audit_hmac.key"
+)
 
 
 def today_path(*, base_dir: Path | None = None, today: date | None = None) -> Path:
@@ -51,10 +57,16 @@ def write_event(
     base_dir: Path | None = None,
     now: datetime | None = None,
     today: date | None = None,
+    hmac_key_path: Path | None = None,
 ) -> None:
     """Append one event to today's audit log.
 
-    Always adds a ``ts`` field (UTC ISO-8601) if the caller didn't.
+    Always adds a ``ts`` field (UTC ISO-8601) if the caller didn't,
+    plus an ``audit_id`` HMAC-SHA256 over the row's stable
+    fingerprint (``ts | subcommand | stage | sha256(body)``) keyed off
+    the secret in ``audit_hmac.key`` (auto-generated on first
+    write).
+
     Errors writing the log are caught and surfaced as a one-line
     stderr warning so logging failures never break the command.
     """
@@ -62,6 +74,12 @@ def write_event(
     payload.setdefault(
         "ts", (now or datetime.now(tz=timezone.utc)).isoformat(),
     )
+
+    # Compute audit_id last so it covers every other field.
+    payload.setdefault("audit_id", _compute_audit_id(
+        payload, hmac_key_path=hmac_key_path,
+    ))
+
     line = json.dumps(payload, default=str, sort_keys=True) + "\n"
     path = today_path(base_dir=base_dir, today=today)
     try:
@@ -83,6 +101,56 @@ def write_event(
             f"warning: order audit log write failed ({type(e).__name__}: {e})",
             file=sys.stderr,
         )
+
+
+def _compute_audit_id(
+    payload: dict[str, Any], *, hmac_key_path: Path | None,
+) -> str:
+    """Return a stable HMAC-SHA256 hex digest over the row's
+    fingerprint. The fingerprint is JSON-serialised with sorted keys
+    over a stable subset (everything except ``audit_id`` itself).
+    Failures fall back to plain SHA-256 of the same bytes — still
+    tamper-evident under append-only assumptions, just not against a
+    well-resourced attacker who can rewrite past rows.
+    """
+    fingerprint = {k: v for k, v in payload.items() if k != "audit_id"}
+    msg = json.dumps(fingerprint, default=str, sort_keys=True).encode("utf-8")
+    try:
+        key = _ensure_hmac_key(hmac_key_path or DEFAULT_HMAC_KEY_PATH)
+        return hmac.new(key, msg, hashlib.sha256).hexdigest()
+    except OSError:
+        return hashlib.sha256(msg).hexdigest()
+
+
+def _ensure_hmac_key(path: Path) -> bytes:
+    """Read the HMAC key, creating it on first call.
+
+    The key is 32 random bytes hex-encoded (64 ASCII chars).
+    Permissions are set to ``0600`` immediately after write.
+    """
+    if path.exists():
+        return path.read_text(encoding="ascii").strip().encode("ascii")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    key_hex = secrets.token_hex(32)
+    # Atomic create + 0600 — write to a temp file then rename.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(
+        str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
+    )
+    try:
+        os.write(fd, key_hex.encode("ascii"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return key_hex.encode("ascii")
 
 
 def sanitise_body(body: dict[str, Any]) -> dict[str, Any]:

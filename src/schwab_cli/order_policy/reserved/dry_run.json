@@ -1,0 +1,8 @@
+{
+  "description": "Preview-only profile — passes the gate but the order command treats every place as a dry-run (calls previewOrder, never placeOrder).",
+  "default_action": "allow",
+  "allow_override": false,
+  "override_confirmation": "deny",
+  "notify_on_override": true,
+  "policies": []
+}

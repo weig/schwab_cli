@@ -1,0 +1,8 @@
+{
+  "description": "Kill switch — denies every place / preview. Cancel / get / list still work (they don't go through the gate).",
+  "default_action": "deny",
+  "allow_override": false,
+  "override_confirmation": "deny",
+  "notify_on_override": true,
+  "policies": []
+}

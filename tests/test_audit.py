@@ -201,14 +201,19 @@ def test_audit_preview_logs_invoke_preview_dry_run(monkeypatch, tmp_path):
     rows = _audit_rows(audit_dir)
     stages = _stages(rows)
     assert stages == [
-        "invoked", "body_built", "preview_ok", "dry_run_done",
+        "invoked", "body_built", "preview_ok",
+        "policy_evaluated", "dry_run_done",
     ]
-    invoked, _built, _prev, _dry = rows
+    invoked = rows[0]
+    _prev = rows[2]
+    pol = rows[3]
     assert invoked["subcommand"] == "preview"
     assert invoked["account"] == "5678"
     assert invoked["flags"]["price"] == 150
     assert _prev["commission"] == 1.30
     assert _prev["bp_effect"] == -86.35
+    assert pol["profile_name"] == "default"
+    assert pol["decision"] == "approve"
 
 
 # ---- placement: yes path -------------------------------------------------
@@ -230,12 +235,13 @@ def test_audit_place_with_yes_logs_full_lifecycle(monkeypatch, tmp_path):
     rows = _audit_rows(audit_dir)
     stages = _stages(rows)
     assert stages == [
-        "invoked", "body_built", "preview_ok", "confirmed", "placed",
+        "invoked", "body_built", "preview_ok",
+        "policy_evaluated", "confirmed", "placed",
     ]
     placed = rows[-1]
     assert placed["order_id"] == "987654"
     assert placed["account"] == "12345678"
-    confirmed = rows[3]
+    confirmed = rows[4]
     assert confirmed["via"] == "--yes"
 
 
@@ -287,7 +293,8 @@ def test_audit_logs_rejection_on_schwab_4xx(monkeypatch, tmp_path):
     rows = _audit_rows(audit_dir)
     stages = _stages(rows)
     assert stages == [
-        "invoked", "body_built", "preview_ok", "confirmed", "rejected",
+        "invoked", "body_built", "preview_ok",
+        "policy_evaluated", "confirmed", "rejected",
     ]
     rejected = rows[-1]
     assert "insufficient" in rejected["error"].lower()

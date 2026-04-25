@@ -11,6 +11,7 @@ from schwab_cli.commands import mcp as mcp_cmd
 from schwab_cli.commands import notify as notify_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import order as order_cmd
+from schwab_cli.commands import policy as policy_cmd
 from schwab_cli.commands import quote as quote_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import skew as skew_cmd
@@ -773,6 +774,10 @@ def order_place(
         False, "--json",
         help="Emit JSON on stdout (panel still goes to stderr).",
     ),
+    profile: str = typer.Option(
+        None, "--profile",
+        help="Policy profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     order_cmd.run_place(
@@ -782,6 +787,7 @@ def order_place(
         leg_specs=tuple(legs), complex_strategy=complex_strategy,
         special=special, parse_string=parse_string,
         dry_run=dry_run, yes=yes, as_json=as_json,
+        profile=profile,
     )
 
 
@@ -802,6 +808,10 @@ def order_preview(
     special: str = typer.Option(None, "--special"),
     parse_string: str = typer.Option(None, "--parse"),
     as_json: bool = typer.Option(False, "--json"),
+    profile: str = typer.Option(
+        None, "--profile",
+        help="Policy profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     order_cmd.run_place(
@@ -811,6 +821,7 @@ def order_preview(
         leg_specs=tuple(legs), complex_strategy=complex_strategy,
         special=special, parse_string=parse_string,
         dry_run=True, yes=False, as_json=as_json,
+        profile=profile,
     )
 
 
@@ -869,4 +880,64 @@ def order_cancel(
 ) -> None:
     order_cmd.run_cancel(
         order_id=order_id, account=account, yes=yes, as_json=as_json,
+    )
+
+
+# ---- policy subcommand group --------------------------------------------
+
+policy_app = typer.Typer(
+    help=(
+        "Manage order policy profiles. Profiles live as one JSON file "
+        "each under ~/.config/schwab_cli/profiles/order/; the policy "
+        "engine gates every `order place` / `order preview`."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(policy_app, name="policy")
+
+
+@policy_app.command("show", help="Print the resolved profile as JSON.")
+def policy_show(
+    profile: str = typer.Option(
+        None, "--profile",
+        help="Profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    policy_cmd.run_show(profile=profile)
+
+
+@policy_app.command("lint", help="Validate one or every profile file.")
+def policy_lint(
+    profile: str = typer.Option(
+        None, "--profile",
+        help="Profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
+    ),
+    all_profiles: bool = typer.Option(
+        False, "--all",
+        help="Validate every profile file in the profiles directory.",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    policy_cmd.run_lint(profile=profile, all_profiles=all_profiles)
+
+
+@policy_app.command("test", help="Dry-run evaluate a JSON order body.")
+def policy_test(
+    order_path: str = typer.Argument(
+        ...,
+        help="Path to JSON order body (Schwab POST shape). Use '-' for stdin.",
+    ),
+    profile: str = typer.Option(
+        None, "--profile",
+        help="Profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
+    ),
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Account number to use as the `account` field for matching.",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    policy_cmd.run_test(
+        order_json_path=order_path, profile=profile, account=account,
     )
