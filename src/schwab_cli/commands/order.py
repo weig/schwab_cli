@@ -48,10 +48,8 @@ from schwab_cli.api.orders import (
     preview_order,
 )
 from schwab_cli.history_spec import RangeSpecError, parse_range
-from schwab_cli.order_policy import (
-    PolicyConfigError,
-    evaluate as policy_evaluate,
-    load_profile,
+from schwab_cli.order_pipeline import (
+    DEFAULT_RULES, PipelineContext, PipelineExit, run_pipeline,
 )
 from schwab_cli.order_policy.decision import Decision
 from schwab_cli.order_policy.fields import OrderContext
@@ -65,10 +63,7 @@ from schwab_cli.order_ticket import (
     to_osi,
 )
 from schwab_cli.output.orders import (
-    OrderAnalytics,
     PreviewSummary,
-    compute_analytics,
-    render_confirmation,
     render_order_detail_human,
     render_order_detail_json,
     render_order_list_human,
@@ -764,301 +759,23 @@ def run_place(
         )
         raise typer.Exit(code=EXIT_USAGE)
 
-    # Always preview first to fetch BP / commission for the panel.
-    preview_summary, preview_unavailable, _raw_preview = _fetch_preview(
-        client, acct.hash_value, body,
-    )
-    _audit(
-        sub,
-        "preview_unavailable" if preview_unavailable else "preview_ok",
-        account=acct.account_number,
-        commission=preview_summary.commission,
-        fees=preview_summary.fees,
-        bp_after_stock=preview_summary.bp_after_stock,
-        bp_after_option=preview_summary.bp_after_option,
-        warnings=list(preview_summary.warnings),
-        rejects=list(preview_summary.rejects),
-    )
-    # Narrow diagnostic: capture the full orderValidationResult shape on
-    # any reject so we can later distinguish hard rejects (e.g. account
-    # not approved, BP would render bogus) from soft / bypassable ones
-    # (e.g. limit too far). Includes orderBalance + status fields so we
-    # can correlate; no PII (no positions, no auth).
-    if (not preview_unavailable
-            and _raw_preview is not None
-            and preview_summary.rejects):
-        _audit(
-            sub,
-            "preview_reject_shape",
-            account=acct.account_number,
-            validation=_raw_preview.get("orderValidationResult"),
-            order_status=(_raw_preview.get("orderStrategy") or {}).get("status"),
-            order_balance=(_raw_preview.get("orderStrategy") or {}).get("orderBalance"),
-        )
-
-    # ---- profile load (used by both policy and override paths) ---------
-    # `dry_run` is permissive about a missing profile — it's a read-only
-    # operation that should always show the panel (BP / commission /
-    # validation are still useful even if the policy gate can't run).
-    # `place` and `--override` keep the hard error so we never send an
-    # order without an explicit gate or bypass on file.
+    # Hand off to the rule pipeline (single shared flow for preview +
+    # place; rules opt in/out via applies()).
     profile_name = select_profile_name(
         flag=profile, env=os.environ.get("SCHWAB_CLI_PROFILE"),
     )
-    prof: object | None = None
-    try:
-        prof = load_profile(profile_name)
-    except PolicyConfigError as e:
-        _audit(
-            sub, "policy_load_failed",
-            account=acct.account_number, profile=profile_name, error=str(e),
-        )
-        if dry_run and not overriding:
-            # Preview without a profile: warn but proceed.
-            typer.secho(
-                f"warning: no policy profile resolved ({e})",
-                fg=typer.colors.YELLOW, err=True,
-            )
-            typer.secho(
-                "  preview will show the order detail + Schwab preview "
-                "but skip the policy gate.",
-                fg=typer.colors.YELLOW, err=True,
-            )
-        else:
-            typer.secho(f"policy load failed: {e}",
-                        fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=EXIT_USAGE)
-
-    # ---- compute analytics (shared by both paths) -----------------------
-    analytics = compute_analytics(
-        strategy=spec.complex_strategy if spec.complex_strategy != "NONE" else None,
-        side=spec.side,
-        option_type=spec.option_type,
-        strikes=spec.strikes,
-        quantity=spec.quantity,
-        price=spec.price,
+    pipe_ctx = PipelineContext(
+        spec=spec, body=body, account=acct, client=client, sub=sub,
+        dry_run=dry_run, yes=yes, overriding=overriding,
+        profile_name=profile_name, override_reason=override_reason,
+        as_json=as_json, limits=limits,
     )
-    # Side-fetch policy: when the panel will be reviewed (preview, or
-    # place without --yes), fetch the live quote + current account
-    # balances. Skip both on `place --yes` since the operator already
-    # committed and won't see the panel before submission.
-    if dry_run or not yes:
-        underlying_quote = _fetch_underlying_quote_safe(client, body)
-        if underlying_quote is not None:
-            underlying_quote["is_live"] = (not dry_run)
-        current_balances = _fetch_current_balances_safe(
-            client, acct.account_number,
-        )
-    else:
-        underlying_quote = None
-        current_balances = None
-    panel = render_confirmation(
-        body=body,
-        account_tail=acct.account_number[-4:],
-        strategy_label=spec.strategy_label,
-        is_naked_short=spec.is_naked_short,
-        analytics=analytics,
-        preview=preview_summary,
-        preview_unavailable=preview_unavailable,
-        underlying_quote=underlying_quote,
-        current_balances=current_balances,
-    )
-
-    # ---- override branch (Phase 2e) -------------------------------------
-    if overriding:
-        # The override path bypasses the policy gate entirely. Render the
-        # confirmation panel + run the single-ceremony override + place.
-        typer.echo(panel, err=True)
-        _run_override_path(
-            body=body, account=acct, prof=prof,
-            override_reason=override_reason or "",
-            sub=sub,
-        )
-        # Final yea prompt — override does not skip the standard
-        # confirmation. _confirm_or_abort raises Exit(0) on reject.
-        try:
-            _confirm_or_abort(yes=False)
-        except typer.Exit as exit_:
-            if int(exit_.exit_code or 0) == 0:
-                _audit(sub, "aborted", account=acct.account_number,
-                       override="aborted_at_yea")
-            raise
-        _audit(
-            sub, "confirmed",
-            account=acct.account_number, via="yea",
-            override=True,
-        )
-        # Fall through to the place block below.
-    else:
-        # Dry-run with no profile — render the panel + Schwab preview,
-        # skip the gate entirely. Real-place would have errored above.
-        if prof is None:
-            typer.echo(panel, err=True)
-            typer.secho(
-                "\nPolicy Check  (no profile loaded — gate skipped)",
-                fg=typer.colors.YELLOW, err=True,
-            )
-            for warning in limits.warnings:
-                typer.secho(
-                    f"limit warning [{warning.rule_name}]: {warning.message}",
-                    fg=typer.colors.YELLOW, err=True,
-                )
-            _audit(sub, "dry_run_done", account=acct.account_number,
-                   profile_name=None)
-            if as_json:
-                typer.echo(_json.dumps(
-                    {"order": body, "preview": preview_summary.__dict__},
-                    default=str,
-                ))
-            else:
-                typer.echo(
-                    "(dry-run: no profile evaluated; not sending placeOrder)",
-                    err=True,
-                )
-            return
-
-        # ---- standard policy gate (Phase 2a) ----------------------------
-        order_ctx = _build_policy_context(
-            client=client,
-            body=body,
-            account=acct,
-            prof=prof,
-            preview_raw=_raw_preview if not preview_unavailable else None,
-            sub=sub,
-        )
-        decision = policy_evaluate(prof, order_ctx)
-        _audit(
-            sub,
-            "policy_evaluated" if decision.approved else "policy_rejected",
-            account=acct.account_number,
-            profile_name=prof.name,
-            decision=decision.decision,
-            rule=decision.rule_name,
-            phase=decision.rule_phase,
-            reason=decision.reason,
-            policy_evaluations=[
-                {
-                    "policy": ev.name,
-                    "matched": ev.matched,
-                    "effect": ev.effect,
-                    "satisfied": ev.satisfied if ev.matched else None,
-                    "conditions": [
-                        {
-                            "field": p.field, "op": p.op,
-                            "expected": p.expected, "actual": p.actual,
-                            "satisfied": p.satisfied,
-                            "unevaluatable": p.unevaluatable,
-                        }
-                        for p in ev.predicates
-                    ],
-                }
-                for ev in decision.evaluations
-            ],
-        )
-
-        typer.echo(panel, err=True)
-        _render_policy_decision(decision)
-        for warning in limits.warnings:
-            typer.secho(
-                f"limit warning [{warning.rule_name}]: {warning.message}",
-                fg=typer.colors.YELLOW, err=True,
-            )
-
-        if dry_run:
-            _audit(sub, "dry_run_done", account=acct.account_number)
-            # Surface the body on stdout when --json is set so it's pipeable.
-            if as_json:
-                typer.echo(_json.dumps({"order": body, "preview": preview_summary.__dict__}, default=str))
-            else:
-                if decision.approved:
-                    typer.echo("(dry-run: not sending placeOrder)", err=True)
-                else:
-                    # Preview-mode rejects are warnings, not blockers.
-                    typer.secho(
-                        "WARNING: this order would be REJECTED by policy "
-                        f"{prof.name!r} during a real `order place`. "
-                        "Preview exits 0 anyway — informational only.",
-                        fg=typer.colors.YELLOW, err=True,
-                    )
-            return
-
-        # In real-place mode, a policy reject hard-blocks the wire call.
-        if not decision.approved:
-            typer.secho(
-                f"REJECTED by policy {prof.name!r}: {decision.reason}",
-                fg=typer.colors.RED, err=True,
-            )
-            typer.secho(
-                "(no order sent to Schwab. Use `--profile <other>` or pass "
-                "`--override REASON --override-confirm` to bypass.)",
-                fg=typer.colors.RED, err=True,
-            )
-            raise typer.Exit(code=EXIT_POLICY_REJECTED)
-
-        # _confirm_or_abort raises typer.Exit(0) when the user doesn't say
-        # "yea". We want the abort to land in the audit log too, so wrap.
-        try:
-            _confirm_or_abort(yes=yes)
-        except typer.Exit as exit_:
-            if int(exit_.exit_code or 0) == 0:
-                _audit(sub, "aborted", account=acct.account_number)
-            raise
-        _audit(
-            sub, "confirmed",
-            account=acct.account_number,
-            via="--yes" if yes else "yea",
-        )
-
     try:
-        order_id, _resp = _safe_place(
-            client, acct, body, audit_subcommand=sub,
-        )
-    except ApiError as e:
-        # Distinguish 4xx (order rejected) from 5xx/network.
-        msg = str(e)
-        is_4xx = msg.startswith(("400", "401", "403", "404", "409"))
-        stage = "rejected" if (is_4xx and "auth" not in msg.lower()) else "place_failed"
-        _audit(
-            sub, stage,
-            account=acct.account_number, error=msg,
-        )
-        if stage == "rejected":
-            _handle_api_error(e, code=EXIT_REJECTED)
-        else:
-            _handle_api_error(e, code=EXIT_NETWORK)
-    except SessionExpired as e:
-        _audit(sub, "place_failed", account=acct.account_number, error=str(e))
-        _handle_api_error(e, code=EXIT_NETWORK)
-
-    _audit(
-        sub, "placed",
-        account=acct.account_number, order_id=order_id,
-    )
-
-    # Phase 2c: increment counters on successful place. Best-effort;
-    # an OS error here doesn't undo the placement, so we audit and
-    # move on.
-    try:
-        from schwab_cli.order_policy import counters as _counters_mod
-        _counters_mod.record_place(
-            account_number=acct.account_number,
-            underlying=_underlying_from_body(body),
-        )
-        # Phase 2f-1 dropped the per-profile override cap, so we no
-        # longer bump record_override on a successful override place.
-        # The counter file's override_count_per_day field is left in
-        # place (harmless) for a future re-add.
-    except Exception as e:  # noqa: BLE001
-        _audit(
-            sub, "counter_increment_failed",
-            account=acct.account_number, order_id=order_id,
-            error=f"{type(e).__name__}: {e}",
-        )
-
-    if as_json:
-        typer.echo(_json.dumps({"orderId": order_id}))
-    else:
-        typer.echo(f"placed order {order_id}", err=True)
+        run_pipeline(DEFAULT_RULES, pipe_ctx)
+    except PipelineExit as halt:
+        if halt.exit_code:
+            raise typer.Exit(code=halt.exit_code)
+        return
 
 
 def _safe_place(

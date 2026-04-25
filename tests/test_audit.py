@@ -259,14 +259,16 @@ def test_audit_place_with_yes_logs_full_lifecycle(monkeypatch, tmp_path):
     assert result.exit_code == 0
     rows = _audit_rows(audit_dir)
     stages = _stages(rows)
+    # `place --yes` skips Schwab previewOrder (operator already
+    # committed; no panel review). Audit reflects that.
     assert stages == [
-        "invoked", "body_built", "preview_ok",
+        "invoked", "body_built",
         "policy_evaluated", "confirmed", "placed",
     ]
     placed = rows[-1]
     assert placed["order_id"] == "987654"
     assert placed["account"] == "12345678"
-    confirmed = rows[4]
+    confirmed = rows[3]
     assert confirmed["via"] == "--yes"
 
 
@@ -317,8 +319,9 @@ def test_audit_logs_rejection_on_schwab_4xx(monkeypatch, tmp_path):
     assert result.exit_code == 3, result.stderr  # EXIT_REJECTED
     rows = _audit_rows(audit_dir)
     stages = _stages(rows)
+    # `place --yes` skips previewOrder.
     assert stages == [
-        "invoked", "body_built", "preview_ok",
+        "invoked", "body_built",
         "policy_evaluated", "confirmed", "rejected",
     ]
     rejected = rows[-1]
