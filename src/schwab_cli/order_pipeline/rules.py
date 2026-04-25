@@ -203,6 +203,15 @@ class RenderPanelRule:
         preview = ctx.preview_summary or PreviewSummary(
             None, None, None, None, (), (),
         )
+        # Skip the Underlying section in the panel when the LiveTicker
+        # will run — the ticker line above the prompt is the single
+        # source of "this is updating right now". The panel section
+        # would otherwise sit far above the prompt as a stale snapshot.
+        ticker_will_run = (
+            not ctx.dry_run and not ctx.yes
+            and ctx.underlying_quote is not None
+        )
+        panel_underlying = None if ticker_will_run else ctx.underlying_quote
         ctx.panel_text = render_confirmation(
             body=ctx.body,
             account_tail=ctx.account.account_number[-4:],
@@ -211,7 +220,7 @@ class RenderPanelRule:
             analytics=ctx.analytics,
             preview=preview,
             preview_unavailable=ctx.preview_unavailable,
-            underlying_quote=ctx.underlying_quote,
+            underlying_quote=panel_underlying,
             current_balances=ctx.current_balances,
         )
         return RuleResult()
@@ -517,9 +526,15 @@ class ConfirmRule:
 
 
 def _format_live_line(q: dict) -> str:
-    """One-line status: "Live <SYM>  $last  bid $bx ×N  ask $ax ×N  vol".
+    """One-line live status above the confirm prompt.
 
-    Stays under 78 chars on typical terminals.
+    Format::
+
+        Live NVDA  $208.10  (-$0.31)  bid $208.05 ×1,500  ask $208.10 ×300  vol 12.3M
+
+    Replaces the panel's Underlying section for real-place runs (the
+    static section is hidden when the ticker is active), so this line
+    must carry every datum the operator needs at decision time.
     """
     sym = q.get("symbol", "?")
     last = q.get("last")
@@ -527,6 +542,7 @@ def _format_live_line(q: dict) -> str:
     ask = q.get("ask")
     bid_size = q.get("bid_size")
     ask_size = q.get("ask_size")
+    volume = q.get("volume")
     net_change = q.get("net_change")
 
     def _money(v: float | None) -> str:
@@ -548,10 +564,26 @@ def _format_live_line(q: dict) -> str:
         except (TypeError, ValueError):
             return "—"
 
+    def _vol(v: float | int | None) -> str:
+        if v is None:
+            return "—"
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return "—"
+        if n >= 1_000_000_000:
+            return f"{n / 1e9:.2f}B"
+        if n >= 1_000_000:
+            return f"{n / 1e6:.2f}M"
+        if n >= 1_000:
+            return f"{n / 1e3:.1f}K"
+        return f"{n}"
+
     return (
         f"  Live {sym}  {_money(last)}{_signed(net_change)}  "
         f"bid {_money(bid)} ×{_qty(bid_size)}  "
-        f"ask {_money(ask)} ×{_qty(ask_size)}"
+        f"ask {_money(ask)} ×{_qty(ask_size)}  "
+        f"vol {_vol(volume)}"
     )
 
 

@@ -1026,8 +1026,10 @@ def test_place_without_yes_fetches_live_quote(monkeypatch, tmp_path):
     # Quote was fetched at least once for the panel; the LiveTicker
     # may also poll one or more times before the input arrives.
     assert quote_calls and quote_calls[0] == ["AAPL"]
-    assert "Underlying  (AAPL)" in result.stderr
-    # The "Live <SYM>" ticker line is emitted above the prompt.
+    # When the ticker is active, the panel's static Underlying section
+    # is suppressed — the ticker line above the prompt is the single
+    # live source instead.
+    assert "Underlying  (AAPL)" not in result.stderr
     assert "Live AAPL" in result.stderr
     # Confirmation declined → no place call.
     assert place_calls == []
