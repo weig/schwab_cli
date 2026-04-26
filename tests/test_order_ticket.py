@@ -347,6 +347,36 @@ def test_two_markers_rejected_as_ambiguous():
         )
 
 
+def test_per_leg_marker_applies_in_body_order():
+    """``[TO CLOSE/AUTO]`` on a 2-leg vertical: leg[0] closes, leg[1]
+    stays at default OPEN. Body leg order matches input strike order
+    (descending-input is the common case)."""
+    t = parse_ticket(
+        "BUY +1 VERTICAL AMZN 100 1 MAY 26 260/255 CALL @0.85 LMT "
+        "[TO CLOSE/AUTO]"
+    )
+    assert t.legs[0].strike == 260.0
+    assert t.legs[0].instruction == "BUY_TO_CLOSE"
+    assert t.legs[1].strike == 255.0
+    assert t.legs[1].instruction == "SELL_TO_OPEN"
+
+
+def test_per_leg_marker_count_must_match_legs():
+    with pytest.raises(TicketParseError, match="must match number of option legs"):
+        parse_ticket(
+            "BUY +1 VERTICAL AMZN 100 1 MAY 26 260/255 CALL @0.85 LMT "
+            "[TO CLOSE/AUTO/TO OPEN]"
+        )
+
+
+def test_per_leg_marker_with_all_open_keeps_default():
+    t = parse_ticket(
+        "BUY +1 VERTICAL AMZN 100 1 MAY 26 260/255 CALL @0.85 LMT "
+        "[TO OPEN/TO OPEN]"
+    )
+    assert all(l.instruction.endswith("_TO_OPEN") for l in t.legs)
+
+
 def test_marker_on_equity_is_ignored():
     """Marker has no leg-level effect on equity (no open/close concept).
     Parser just accepts and drops it so a copy/pasted TOS string with a

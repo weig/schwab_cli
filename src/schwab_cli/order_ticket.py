@@ -99,9 +99,21 @@ _PHASE2_STRATEGIES = {
 
 
 _PE_MARKER_RE = re.compile(
-    r"\[\s*(TO\s+OPEN|TO\s+CLOSE|AUTO)\s*\]",
+    r"\[\s*((?:TO\s+OPEN|TO\s+CLOSE|AUTO)"
+    r"(?:\s*/\s*(?:TO\s+OPEN|TO\s+CLOSE|AUTO))*)\s*\]",
     re.IGNORECASE,
 )
+
+
+def _normalize_pe_token(raw: str) -> str:
+    """``"TO OPEN"`` → ``"open"``, ``"TO CLOSE"`` → ``"close"``,
+    ``"AUTO"`` → ``"auto"``. Whitespace-tolerant, case-insensitive."""
+    norm = re.sub(r"\s+", "_", raw.strip().upper())
+    if norm == "TO_OPEN":
+        return "open"
+    if norm == "TO_CLOSE":
+        return "close"
+    return "auto"
 
 
 def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
@@ -131,23 +143,20 @@ def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
     # Strip out parenthetical decorations like "(Weeklys)" or "(Monthly)"
     # — they're informational on TOS strings and don't affect the body.
     raw = re.sub(r"\([^)]*\)", " ", raw)
-    # Pull out the optional [TO OPEN] / [TO CLOSE] / [AUTO] marker.
+    # Pull out the optional position-effect marker. Two forms accepted:
+    #   [TO OPEN] / [TO CLOSE] / [AUTO]            — uniform across legs
+    #   [TO OPEN/AUTO/TO CLOSE]                    — per-leg (count must
+    #                                                 match leg count)
     # Reject multiple markers as ambiguous.
     pe_matches = _PE_MARKER_RE.findall(raw)
     if len(pe_matches) > 1:
         raise TicketParseError(
             f"multiple position-effect markers in ticket: {s!r}"
         )
-    pe_marker: str | None = None
+    pe_tokens: list[str] | None = None
     if pe_matches:
-        word = re.sub(r"\s+", "_", pe_matches[0].strip().upper())
-        # word is "TO_OPEN", "TO_CLOSE", or "AUTO"
-        if word == "TO_CLOSE":
-            pe_marker = "close"
-        elif word == "TO_OPEN":
-            pe_marker = "open"
-        else:
-            pe_marker = "auto"
+        parts = [p for p in pe_matches[0].split("/") if p.strip()]
+        pe_tokens = [_normalize_pe_token(p) for p in parts]
         raw = _PE_MARKER_RE.sub(" ", raw).strip()
 
     tokens = raw.split()
@@ -218,7 +227,7 @@ def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
     if looks_like_option:
         return _finish_option(
             s, side, quantity, strategy, underlying, tokens, cursor,
-            pe_marker=pe_marker,
+            pe_tokens=pe_tokens,
         )
     return _finish_equity(s, side, quantity, underlying, tokens, cursor, strategy)
 
@@ -232,7 +241,7 @@ def _finish_option(
     tokens: list[str],
     cursor: int,
     *,
-    pe_marker: str | None = None,
+    pe_tokens: list[str] | None = None,
 ) -> ParsedTicket:
     # ---- EXPIRY: "D MON YY" ----
     if cursor + 2 >= len(tokens):
@@ -340,13 +349,35 @@ def _finish_option(
     # ---- expand legs ----
     legs = _expand_legs(side, quantity, strategy, underlying, expiry, option_type, strikes)
 
-    # Apply [TO CLOSE] marker by rewriting each leg's instruction. The
-    # OPEN / AUTO cases keep the default *_TO_OPEN — DetectOpenCloseRule
-    # may still rewrite to *_TO_CLOSE based on existing positions.
-    if pe_marker == "close":
-        legs = tuple(
-            _replace_leg_effect(leg, "close") for leg in legs
-        )
+    # Apply the position-effect marker(s).
+    #
+    # * Uniform (single token): apply to every leg.
+    # * Per-leg list: count must match exactly. Tokens applied in body
+    #   leg order (which == ticket input order for descending-strike
+    #   verticals — the common case).
+    #
+    # ``open`` and ``auto`` leave legs at the default ``*_TO_OPEN``;
+    # ``close`` rewrites to ``*_TO_CLOSE``. AUTO is a parse-time
+    # signal — DetectOpenCloseRule may still rewrite to CLOSE later
+    # based on existing positions.
+    if pe_tokens is not None:
+        if len(pe_tokens) == 1:
+            tok = pe_tokens[0]
+            if tok == "close":
+                legs = tuple(_replace_leg_effect(l, "close") for l in legs)
+        else:
+            if len(pe_tokens) != len(legs):
+                raise TicketParseError(
+                    f"position-effect markers ({len(pe_tokens)}) "
+                    f"must match number of option legs ({len(legs)})"
+                )
+            new_legs = []
+            for leg, tok in zip(legs, pe_tokens):
+                if tok == "close":
+                    new_legs.append(_replace_leg_effect(leg, "close"))
+                else:
+                    new_legs.append(leg)
+            legs = tuple(new_legs)
 
     return ParsedTicket(
         side=side,

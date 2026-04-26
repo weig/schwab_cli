@@ -189,6 +189,67 @@ def test_unparseable_osi_returns_none():
     assert render_order_ticket(body, underlying="X") is None
 
 
+def test_vertical_mixed_open_close_renders_per_leg_marker():
+    """Per-leg slash form when one leg opens and the other closes —
+    matches Schwab's ``[A/B/...]`` shape."""
+    body = {
+        "orderType": "NET_DEBIT", "duration": "DAY",
+        "orderLegCollection": [
+            {"instruction": "BUY_TO_CLOSE", "quantity": 1,
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501C00260000"}},
+            {"instruction": "SELL_TO_OPEN", "quantity": 1,
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501C00255000"}},
+        ],
+        "price": "0.40",
+    }
+    out = render_order_ticket(body, underlying="AMZN")
+    assert out is not None
+    assert out.endswith("[TO CLOSE/TO OPEN]")
+
+
+def test_vertical_all_open_omits_marker():
+    body = {
+        "orderType": "NET_DEBIT", "duration": "DAY",
+        "orderLegCollection": [
+            {"instruction": "BUY_TO_OPEN", "quantity": 1,
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501P00270000"}},
+            {"instruction": "SELL_TO_OPEN", "quantity": 1,
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501P00265000"}},
+        ],
+        "price": "1.50",
+    }
+    out = render_order_ticket(body, underlying="AMZN")
+    assert out is not None
+    assert "[" not in out  # no marker at all when uniform OPEN
+
+
+def test_round_trip_per_leg_marker():
+    """End-to-end: render a vertical with mixed effects, parse the
+    output, render again. The marker token must be preserved."""
+    from schwab_cli.order_ticket import parse_ticket
+    body = {
+        "orderType": "NET_DEBIT", "duration": "DAY",
+        "orderLegCollection": [
+            {"instruction": "BUY_TO_CLOSE", "quantity": 1,
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501C00260000"}},
+            {"instruction": "SELL_TO_OPEN", "quantity": 1,
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501C00255000"}},
+        ],
+        "price": "0.40",
+    }
+    rendered = render_order_ticket(body, underlying="AMZN")
+    assert rendered is not None
+    t = parse_ticket(rendered)
+    assert t.legs[0].instruction == "BUY_TO_CLOSE"
+    assert t.legs[1].instruction == "SELL_TO_OPEN"
+
+
 def test_market_multi_leg_returns_none():
     """Multi-leg without an explicit limit price isn't a valid Schwab
     order-entry string — render_ticket gives up rather than guess."""

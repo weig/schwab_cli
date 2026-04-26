@@ -614,7 +614,7 @@ def render_order_ticket(body: dict, *, underlying: str) -> str | None:
         return None  # MARKET multi-leg — Schwab UI doesn't accept @MKT here
     abs_net = abs(float(price))
     price_tok = f"@{abs_net:.2f} LMT"
-    close_tag = " [TO CLOSE]" if all(p["is_close"] for p in parsed) else ""
+    close_tag = _close_marker([p["is_close"] for p in parsed])
 
     # Single-leg option — hand-build the Schwab string.
     if len(parsed) == 1:
@@ -637,9 +637,6 @@ def render_order_ticket(body: dict, *, underlying: str) -> str | None:
     from schwab_cli.analytics.strategy_legs import Leg
     from schwab_cli.analytics.strategy_ticket import render_ticket
 
-    is_buy_net = order_type == "NET_DEBIT" or (
-        order_type == "NET_CREDIT" and False
-    )
     # Determine side from the *order* type — NET_DEBIT means we pay
     # (BUY), NET_CREDIT means we receive (SELL).
     target_sign = -1 if order_type == "NET_DEBIT" else (
@@ -672,6 +669,28 @@ def render_order_ticket(body: dict, *, underlying: str) -> str | None:
     except Exception:  # noqa: BLE001 — best-effort; fall through to None
         return None
     return ticket + close_tag
+
+
+def _close_marker(is_close: list[bool]) -> str:
+    """Build the trailing position-effect marker.
+
+    * Empty input or every leg open → ``""`` (omit).
+    * Every leg close → ``" [TO CLOSE]"`` (uniform shorthand).
+    * Mixed → ``" [TO OPEN/TO CLOSE]"`` per leg, in body order, matching
+      the order strikes appear in the rendered ticket (which is already
+      body order for descending-input verticals).
+
+    AUTO is a parse-time signal only — at render time every leg is
+    concretely OPEN or CLOSE, so AUTO never appears in the output.
+    """
+    if not is_close:
+        return ""
+    if not any(is_close):
+        return ""
+    if all(is_close):
+        return " [TO CLOSE]"
+    parts = ["TO CLOSE" if c else "TO OPEN" for c in is_close]
+    return " [" + "/".join(parts) + "]"
 
 
 def _parse_osi(sym: str) -> tuple[str, datetime, str, float] | None:
