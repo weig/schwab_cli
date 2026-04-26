@@ -2,6 +2,11 @@
 
 We exercise the dispatcher directly (no SSE / stdio transport),
 asserting the tool returns properly-shaped JSON content.
+
+WAL isolation: SQLite's WAL journal mode allows readers to see a
+consistent snapshot as of their connection open time, so a concurrent
+uncommitted write is not visible to a second, independent reader
+connection (test_concurrent_write_and_read_safe).
 """
 from __future__ import annotations
 
