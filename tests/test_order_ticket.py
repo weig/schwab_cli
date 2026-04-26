@@ -377,6 +377,42 @@ def test_per_leg_marker_with_all_open_keeps_default():
     assert all(l.instruction.endswith("_TO_OPEN") for l in t.legs)
 
 
+def test_explicit_to_open_flags_legs_as_explicit():
+    """``[TO OPEN]`` should mark every leg as ``effect_explicit=True``
+    so the order pipeline's auto-detection skips them."""
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [TO OPEN]"
+    )
+    assert t.legs[0].effect_explicit is True
+
+
+def test_auto_marker_does_not_flag_legs_as_explicit():
+    """``[AUTO]`` is "let the pipeline decide" — legs stay non-
+    explicit so DetectOpenCloseRule may rewrite based on positions."""
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [AUTO]"
+    )
+    assert t.legs[0].effect_explicit is False
+
+
+def test_no_marker_does_not_flag_legs_as_explicit():
+    """Same as [AUTO]: omitting the bracket means default behavior."""
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT"
+    )
+    assert t.legs[0].effect_explicit is False
+
+
+def test_per_leg_with_auto_only_some_legs_flagged():
+    """Mixed [TO CLOSE/AUTO] flags only the CLOSE leg."""
+    t = parse_ticket(
+        "BUY +1 VERTICAL AMZN 100 1 MAY 26 260/255 CALL @0.85 LMT "
+        "[TO CLOSE/AUTO]"
+    )
+    assert t.legs[0].effect_explicit is True
+    assert t.legs[1].effect_explicit is False
+
+
 def test_marker_on_equity_is_ignored():
     """Marker has no leg-level effect on equity (no open/close concept).
     Parser just accepts and drops it so a copy/pasted TOS string with a

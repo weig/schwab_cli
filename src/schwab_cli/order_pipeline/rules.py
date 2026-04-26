@@ -165,6 +165,12 @@ class DetectOpenCloseRule:
             inst = leg.get("instrument") or {}
             if inst.get("assetType") != "OPTION":
                 continue
+            # Honor user-stated effect: if ``positionEffect`` is already
+            # set on the leg, the operator wrote ``[TO OPEN]`` /
+            # ``[TO CLOSE]`` (or the ``--leg ...c`` suffix) — auto-detect
+            # never overrides explicit intent.
+            if leg.get("positionEffect"):
+                continue
             sym = inst.get("symbol")
             pos = next(
                 (p for p in positions

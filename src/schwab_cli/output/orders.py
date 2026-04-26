@@ -604,17 +604,29 @@ def render_order_ticket(body: dict, *, underlying: str) -> str | None:
         instr = leg.get("instruction", "BUY_TO_OPEN")
         sign = 1 if instr.startswith("BUY") else -1
         qty = sign * int(leg.get("quantity", 1))
-        is_close = instr.endswith("_CLOSE")
+        # Per-leg effect token. ``positionEffect`` (set when the user
+        # was explicit) wins; otherwise infer from instruction. Legs
+        # carrying ``*_TO_OPEN`` and no positionEffect are "auto" — the
+        # default that the pipeline left untouched.
+        pe = leg.get("positionEffect")
+        if pe == "CLOSING":
+            effect_tok = "close"
+        elif pe == "OPENING":
+            effect_tok = "open"
+        elif instr.endswith("_TO_CLOSE"):
+            effect_tok = "close"
+        else:
+            effect_tok = "auto"
         parsed.append({
             "qty": qty, "side": side, "expiry": expiry, "strike": strike,
-            "is_close": is_close,
+            "effect_tok": effect_tok,
         })
 
     if price is None:
         return None  # MARKET multi-leg — Schwab UI doesn't accept @MKT here
     abs_net = abs(float(price))
     price_tok = f"@{abs_net:.2f} LMT"
-    close_tag = _close_marker([p["is_close"] for p in parsed])
+    close_tag = _close_marker([p["effect_tok"] for p in parsed])
 
     # Single-leg option — hand-build the Schwab string.
     if len(parsed) == 1:
@@ -671,25 +683,38 @@ def render_order_ticket(body: dict, *, underlying: str) -> str | None:
     return ticket + close_tag
 
 
-def _close_marker(is_close: list[bool]) -> str:
-    """Build the trailing position-effect marker.
+def _close_marker(effects: list[str]) -> str:
+    """Build the trailing position-effect marker from a per-leg list of
+    effect tokens (each ``"open"``, ``"close"``, or ``"auto"``).
 
-    * Empty input or every leg open → ``""`` (omit).
-    * Every leg close → ``" [TO CLOSE]"`` (uniform shorthand).
-    * Mixed → ``" [TO OPEN/TO CLOSE]"`` per leg, in body order, matching
-      the order strikes appear in the rendered ticket (which is already
-      body order for descending-input verticals).
+    Rules (mirrors Schwab/TOS conventions):
 
-    AUTO is a parse-time signal only — at render time every leg is
-    concretely OPEN or CLOSE, so AUTO never appears in the output.
+    * Empty input → ``""``.
+    * Every leg "auto" (default — pipeline never touched the leg) →
+      ``""`` (omit; the default form has no bracket).
+    * Every leg the same explicit value → ``" [TO OPEN]"`` /
+      ``" [TO CLOSE]"`` (uniform shorthand).
+    * Otherwise → ``" [t1/t2/.../tN]"`` per leg, in body order.
+      Tokens render as ``TO OPEN``, ``TO CLOSE``, or ``AUTO``.
     """
-    if not is_close:
+    if not effects:
         return ""
-    if not any(is_close):
+    if all(e == "auto" for e in effects):
         return ""
-    if all(is_close):
-        return " [TO CLOSE]"
-    parts = ["TO CLOSE" if c else "TO OPEN" for c in is_close]
+    if all(e == effects[0] for e in effects):
+        if effects[0] == "open":
+            return " [TO OPEN]"
+        if effects[0] == "close":
+            return " [TO CLOSE]"
+        # Already handled above for "auto".
+    parts = []
+    for e in effects:
+        if e == "open":
+            parts.append("TO OPEN")
+        elif e == "close":
+            parts.append("TO CLOSE")
+        else:
+            parts.append("AUTO")
     return " [" + "/".join(parts) + "]"
 
 

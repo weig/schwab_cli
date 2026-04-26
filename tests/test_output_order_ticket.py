@@ -190,12 +190,37 @@ def test_unparseable_osi_returns_none():
 
 
 def test_vertical_mixed_open_close_renders_per_leg_marker():
-    """Per-leg slash form when one leg opens and the other closes —
-    matches Schwab's ``[A/B/...]`` shape."""
+    """Per-leg slash form when one leg explicitly closes and the other
+    explicitly opens. Both legs carry positionEffect (set by parser
+    on explicit user markers), so the renderer emits both tokens."""
     body = {
         "orderType": "NET_DEBIT", "duration": "DAY",
         "orderLegCollection": [
             {"instruction": "BUY_TO_CLOSE", "quantity": 1,
+             "positionEffect": "CLOSING",
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501C00260000"}},
+            {"instruction": "SELL_TO_OPEN", "quantity": 1,
+             "positionEffect": "OPENING",
+             "instrument": {"assetType": "OPTION",
+                            "symbol": "AMZN  260501C00255000"}},
+        ],
+        "price": "0.40",
+    }
+    out = render_order_ticket(body, underlying="AMZN")
+    assert out is not None
+    assert out.endswith("[TO CLOSE/TO OPEN]")
+
+
+def test_vertical_close_with_auto_on_other_leg_renders_AUTO():
+    """When only one leg has been resolved to CLOSE (e.g. by
+    DetectOpenCloseRule) and the other is still default OPEN, the
+    marker uses AUTO for the unresolved leg."""
+    body = {
+        "orderType": "NET_DEBIT", "duration": "DAY",
+        "orderLegCollection": [
+            {"instruction": "BUY_TO_CLOSE", "quantity": 1,
+             "positionEffect": "CLOSING",
              "instrument": {"assetType": "OPTION",
                             "symbol": "AMZN  260501C00260000"}},
             {"instruction": "SELL_TO_OPEN", "quantity": 1,
@@ -206,7 +231,7 @@ def test_vertical_mixed_open_close_renders_per_leg_marker():
     }
     out = render_order_ticket(body, underlying="AMZN")
     assert out is not None
-    assert out.endswith("[TO CLOSE/TO OPEN]")
+    assert out.endswith("[TO CLOSE/AUTO]")
 
 
 def test_vertical_all_open_omits_marker():

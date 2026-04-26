@@ -374,8 +374,10 @@ def _equity_leg(side: str, quantity: int, symbol: str) -> dict:
 def _option_leg(
     instruction: str, quantity: int,
     underlying: str, expiry, option_type: str, strike: float,
+    *,
+    position_effect_explicit: bool = False,
 ) -> dict:
-    return {
+    leg: dict = {
         "instruction": instruction,
         "quantity": quantity,
         "instrument": {
@@ -383,6 +385,14 @@ def _option_leg(
             "symbol": to_osi(underlying, expiry, option_type, strike),
         },
     }
+    if position_effect_explicit:
+        # User-driven OPEN/CLOSE — set Schwab's positionEffect field so
+        # the value is on the wire AND so DetectOpenCloseRule treats
+        # the leg as "do not auto-rewrite".
+        leg["positionEffect"] = (
+            "OPENING" if instruction.endswith("_TO_OPEN") else "CLOSING"
+        )
+    return leg
 
 
 def _spec_from_ticket(t: ParsedTicket) -> _NormalizedOrder:
@@ -409,6 +419,7 @@ def _spec_from_ticket(t: ParsedTicket) -> _NormalizedOrder:
             _option_leg(
                 leg.instruction, leg.quantity,
                 leg.underlying, leg.expiry, leg.option_type, leg.strike,
+                position_effect_explicit=leg.effect_explicit,
             )
         )
 
@@ -493,6 +504,7 @@ def _spec_from_flags(
             _option_leg(
                 l.instruction, abs(l.qty), underlying,
                 l.expiry, "CALL" if l.side == "C" else "PUT", l.strike,
+                position_effect_explicit=l.effect_explicit,
             )
             for l in parsed_legs
         )

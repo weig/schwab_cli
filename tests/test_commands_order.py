@@ -1252,6 +1252,43 @@ def test_buy_against_existing_short_rewrites_to_close(monkeypatch, tmp_path):
     assert "BTC  AMZN" in result.stderr
 
 
+def test_explicit_to_open_blocks_auto_rewrite(monkeypatch, tmp_path):
+    """User explicitly typed [TO OPEN] — auto-detection must NOT
+    second-guess them, even when a matching short position exists.
+    Schwab will reject the order itself if the side combination is
+    impossible; that's not our place to override the operator."""
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    patches.append(patch(
+        "schwab_cli.api.accounts.get_account",
+        return_value=_account_with_short_put(),
+    ))
+    seen_bodies: list[dict] = []
+    def _spy_preview(client, account_hash, body):
+        seen_bodies.append(body)
+        return _PREVIEW_PAYLOAD
+    patches = [p for p in patches if p.attribute != "preview_order"]
+    patches.append(
+        patch("schwab_cli.commands.order.preview_order",
+              side_effect=_spy_preview),
+    )
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "--account", "5678",
+            "--parse",
+            "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [TO OPEN]",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    leg = seen_bodies[0]["orderLegCollection"][0]
+    # The user's explicit OPEN must survive even though a short put
+    # exists — without [TO OPEN] the rule would have rewritten it.
+    assert leg["instruction"] == "BUY_TO_OPEN"
+    assert leg.get("positionEffect") == "OPENING"
+
+
 def test_sell_against_existing_long_rewrites_to_close(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     patches = _patches()

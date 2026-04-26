@@ -63,6 +63,11 @@ class Leg:
     expiry: date
     strike: float
     effect: Effect = "o"
+    # True when the ``o``/``c`` suffix was present in the source token.
+    # Distinguishes user-stated effect from the default — the order
+    # pipeline's auto-detection skips legs flagged explicit so it
+    # doesn't second-guess the operator.
+    effect_explicit: bool = False
 
     @property
     def is_long(self) -> bool:
@@ -185,14 +190,19 @@ def parse_leg(token: str) -> Leg:
     effect_raw = m.group("effect").lower()
     if effect_raw == "":
         effect: Effect = "o"
+        effect_explicit = False
     elif effect_raw in ("o", "c"):
         effect = effect_raw  # type: ignore[assignment]
+        effect_explicit = True
     else:
         raise LegParseError(
             f"{token!r}: open/close suffix must be 'o' or 'c', got {m.group('effect')!r}"
         )
 
-    return Leg(qty=qty, side=side_raw, expiry=expiry, strike=strike, effect=effect)
+    return Leg(
+        qty=qty, side=side_raw, expiry=expiry, strike=strike,
+        effect=effect, effect_explicit=effect_explicit,
+    )
 
 
 def _diagnose_after_at(token: str, rest: str) -> None:

@@ -54,6 +54,12 @@ class ParsedLeg:
     expiry: date
     option_type: OptionType
     strike: float
+    # True when the user explicitly wrote [TO OPEN] or [TO CLOSE] for
+    # this leg. False when the leg came from the default (no marker)
+    # or from an explicit [AUTO] — the pipeline's position-aware
+    # detection should run on those and may rewrite *_TO_OPEN to
+    # *_TO_CLOSE if a matching position exists.
+    effect_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -361,23 +367,25 @@ def _finish_option(
     # signal — DetectOpenCloseRule may still rewrite to CLOSE later
     # based on existing positions.
     if pe_tokens is not None:
-        if len(pe_tokens) == 1:
-            tok = pe_tokens[0]
+        # Expand a single uniform token to a per-leg list so the rest
+        # of the loop is the common path.
+        tokens = pe_tokens * len(legs) if len(pe_tokens) == 1 else pe_tokens
+        if len(tokens) != len(legs):
+            raise TicketParseError(
+                f"position-effect markers ({len(pe_tokens)}) "
+                f"must match number of option legs ({len(legs)})"
+            )
+        new_legs = []
+        for leg, tok in zip(legs, tokens):
             if tok == "close":
-                legs = tuple(_replace_leg_effect(l, "close") for l in legs)
-        else:
-            if len(pe_tokens) != len(legs):
-                raise TicketParseError(
-                    f"position-effect markers ({len(pe_tokens)}) "
-                    f"must match number of option legs ({len(legs)})"
-                )
-            new_legs = []
-            for leg, tok in zip(legs, pe_tokens):
-                if tok == "close":
-                    new_legs.append(_replace_leg_effect(leg, "close"))
-                else:
-                    new_legs.append(leg)
-            legs = tuple(new_legs)
+                new_legs.append(_replace_leg_effect(leg, "close", explicit=True))
+            elif tok == "open":
+                # Already *_TO_OPEN by default; mark as explicit so the
+                # pipeline's auto-detection skips this leg.
+                new_legs.append(_replace_leg_effect(leg, "open", explicit=True))
+            else:  # "auto"
+                new_legs.append(leg)  # default OPEN, NOT explicit
+        legs = tuple(new_legs)
 
     return ParsedTicket(
         side=side,
@@ -497,12 +505,16 @@ def _parse_price_type_duration(
     return price, order_type, duration
 
 
-def _replace_leg_effect(leg: ParsedLeg, effect: str) -> ParsedLeg:
+def _replace_leg_effect(
+    leg: ParsedLeg, effect: str, *, explicit: bool = False,
+) -> ParsedLeg:
     """Return a copy of ``leg`` with its instruction's open/close
     suffix replaced.
 
     ``effect`` is "open" or "close". Idempotent: a leg already in the
-    requested effect comes back unchanged.
+    requested effect comes back unchanged. ``explicit`` flags the
+    rewrite as user-driven so :class:`DetectOpenCloseRule` won't
+    second-guess it.
     """
     target = "_TO_CLOSE" if effect == "close" else "_TO_OPEN"
     base = leg.instruction.split("_TO_", 1)[0]  # "BUY" or "SELL"
@@ -513,6 +525,7 @@ def _replace_leg_effect(leg: ParsedLeg, effect: str) -> ParsedLeg:
         expiry=leg.expiry,
         option_type=leg.option_type,
         strike=leg.strike,
+        effect_explicit=explicit or leg.effect_explicit,
     )
 
 
