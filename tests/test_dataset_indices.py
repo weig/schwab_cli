@@ -88,3 +88,49 @@ def test_ssga_parses_xlsx_and_normalizes_dashes():
 def test_ssga_rejects_unknown_index():
     with pytest.raises(ValueError, match="not supported by SSGA"):
         fetch_ssga_members("NQ", client=httpx.Client())
+
+
+from schwab_cli.dataset.indices import fetch_index_members
+
+
+def test_fetch_index_members_uses_primary_when_ok():
+    calls = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        return httpx.Response(200, content=_csv_bytes())
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, timeout=10.0) as client:
+        out = fetch_index_members("SPX", client=client)
+    assert "stockanalysis.com" in calls
+    assert "ssga.com" not in str(calls)
+    assert "AAPL" in out
+
+
+def test_fetch_index_members_falls_back_to_ssga_for_spx():
+    xlsx_bytes = (_FIX / "ssga_spy_sample.xlsx").read_bytes()
+    calls = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        if "stockanalysis" in request.url.host:
+            return httpx.Response(503)
+        return httpx.Response(200, content=xlsx_bytes)
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, timeout=10.0) as client:
+        out = fetch_index_members("SPX", client=client)
+    assert any("stockanalysis" in h for h in calls)
+    assert any("ssga" in h for h in calls)
+    assert "AAPL" in out
+
+
+def test_fetch_index_members_no_fallback_for_nq_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, timeout=10.0) as client:
+        with pytest.raises(RuntimeError, match="all providers failed"):
+            fetch_index_members("NQ", client=client)
+
+
+def test_fetch_index_members_rut_not_supported():
+    with pytest.raises(NotImplementedError, match="RUT"):
+        fetch_index_members("RUT", client=httpx.Client())
