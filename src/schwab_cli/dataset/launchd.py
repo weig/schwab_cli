@@ -79,7 +79,13 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
 INDICES_LABEL    = "com.schwab-cli.dataset.indices"
 VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
 
-_DEFAULT_DIR = Path.home() / "Library" / "LaunchAgents"
+def _default_dir() -> Path:
+    """Return the LaunchAgents directory, evaluated at call time.
+
+    This is a function rather than a module-level constant so that
+    tests can monkeypatch HOME before the path is resolved.
+    """
+    return Path.home() / "Library" / "LaunchAgents"
 
 
 @dataclass
@@ -108,7 +114,7 @@ class DatasetPlistSpec:
 
     @property
     def plist_path(self) -> Path:
-        return _DEFAULT_DIR / f"{self.label}.plist"
+        return _default_dir() / f"{self.label}.plist"
 
 
 def build_dataset_plist(spec: DatasetPlistSpec) -> bytes:
@@ -139,7 +145,7 @@ def install_plist(spec: DatasetPlistSpec) -> Path:
 def uninstall_plist(kind: str) -> Path:
     """``launchctl unload`` then remove the plist file."""
     label = INDICES_LABEL if kind == "indices" else VOLATILITY_LABEL
-    path = _DEFAULT_DIR / f"{label}.plist"
+    path = _default_dir() / f"{label}.plist"
     if path.exists():
         subprocess.run(
             ["launchctl", "unload", str(path)],

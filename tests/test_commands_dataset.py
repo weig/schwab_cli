@@ -134,3 +134,53 @@ def test_update_group_volatility_calls_orchestrator(runner, monkeypatch):
 def test_update_requires_indices_or_group(runner):
     result = runner.invoke(app, ["dataset", "update"])
     assert result.exit_code != 0
+
+
+def test_cron_install_indices_writes_plist(runner, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    calls = []
+    def fake_install(spec):
+        calls.append((spec.kind, spec.cron, spec.binary_path))
+        spec.plist_path.parent.mkdir(parents=True, exist_ok=True)
+        spec.plist_path.write_bytes(b"<plist></plist>")
+        return spec.plist_path
+    monkeypatch.setattr(
+        "schwab_cli.commands.dataset.install_plist", fake_install
+    )
+
+    result = runner.invoke(app, ["dataset", "cron", "install", "--indices"])
+    assert result.exit_code == 0
+    assert calls[0][0] == "indices"
+    assert calls[0][1] == "0 6 * * 0"
+    plist = tmp_path / "Library" / "LaunchAgents" / \
+            "com.schwab-cli.dataset.indices.plist"
+    assert plist.exists()
+
+
+def test_cron_uninstall_volatility(runner, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    plist = tmp_path / "Library" / "LaunchAgents" / \
+            "com.schwab-cli.dataset.volatility.plist"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_bytes(b"<plist></plist>")
+
+    captured = []
+    def fake_uninstall(kind):
+        captured.append(kind)
+        plist.unlink()
+        return plist
+    monkeypatch.setattr(
+        "schwab_cli.commands.dataset.uninstall_plist", fake_uninstall
+    )
+
+    result = runner.invoke(app, [
+        "dataset", "cron", "uninstall", "--group", "volatility",
+    ])
+    assert result.exit_code == 0
+    assert captured == ["volatility"]
+    assert not plist.exists()
+
+
+def test_cron_install_requires_kind(runner):
+    result = runner.invoke(app, ["dataset", "cron", "install"])
+    assert result.exit_code != 0
