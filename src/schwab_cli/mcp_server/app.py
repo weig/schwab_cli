@@ -159,6 +159,68 @@ class SchwabMcpServer:
                     ),
                     inputSchema={"type": "object", "properties": {}},
                 ),
+                Tool(
+                    name="dataset.status",
+                    description=(
+                        "Get current dataset subscription state (tier, "
+                        "sources, first/last data date, days). Read-only."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "group":  {"type": "string"},
+                            "tier":   {"type": "string"},
+                            "source": {"type": "string"},
+                            "symbol": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="dataset.history",
+                    description=(
+                        "Get historical volatility snapshots for one "
+                        "symbol. Returns up to lookback_days rows "
+                        "(default 252, max 730)."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["symbol"],
+                        "properties": {
+                            "symbol": {"type": "string"},
+                            "lookback_days": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 730,
+                            },
+                            "fields": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="dataset.iv_rank",
+                    description=(
+                        "Get IV rank/percentile for one symbol. "
+                        "Read-only — uses the most recently stored "
+                        "value, never triggers a backfill or chain pull."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["symbol"],
+                        "properties": {
+                            "symbol":   {"type": "string"},
+                            "lookback": {
+                                "type": "integer",
+                                "minimum": 30,
+                            },
+                        },
+                    },
+                ),
             ]
 
         @server.call_tool()
@@ -177,6 +239,9 @@ class SchwabMcpServer:
                     return await self._tool_stream_quote(arguments)
                 if name == "server_status":
                     return await self._tool_server_status()
+                if name.startswith("dataset."):
+                    text = dispatch_dataset_tool(name, arguments=arguments)
+                    return [TextContent(type="text", text=text)]
                 return [TextContent(
                     type="text",
                     text=f"unknown tool: {name}",
@@ -580,6 +645,64 @@ class SchwabMcpServer:
 
 
 # ---- helpers ----------------------------------------------------------
+
+
+def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
+    """Read-only dispatcher for dataset.* MCP tools.
+
+    Returns a JSON string the Starlette/MCP wrapper hands back as
+    TextContent. No writes — the cron is the only writer.
+    """
+    import json as _json
+    from schwab_cli.storage import vol_history
+    from schwab_cli.dataset.store import read_status_rows
+
+    if name == "dataset.status":
+        with vol_history.connect() as conn:
+            rows = read_status_rows(
+                conn,
+                group_name=arguments.get("group", "volatility"),
+                tier=arguments.get("tier"),
+                source=arguments.get("source"),
+                symbols=arguments.get("symbol"),
+            )
+        return _json.dumps(rows, indent=2, default=str)
+
+    if name == "dataset.history":
+        symbol = arguments["symbol"]
+        lookback = min(int(arguments.get("lookback_days", 252)), 730)
+        fields = arguments.get("fields") or ["atm_iv_30d", "hv_30d"]
+        cols = "captured_at_ms, archive_date, " + ", ".join(fields)
+        with vol_history.connect() as conn:
+            rows = conn.execute(
+                f"SELECT {cols} FROM vol_snapshots "
+                f"WHERE symbol = ? "
+                f"ORDER BY captured_at_ms DESC LIMIT ?",
+                (symbol, lookback),
+            ).fetchall()
+        return _json.dumps([dict(r) for r in rows], indent=2, default=str)
+
+    if name == "dataset.iv_rank":
+        from schwab_cli.commands.vol import compute_iv_rank_and_percentile
+        with vol_history.connect() as conn:
+            recent = conn.execute(
+                "SELECT atm_iv_30d, atm_iv FROM vol_snapshots "
+                "WHERE symbol = ? ORDER BY captured_at_ms DESC LIMIT 1",
+                (arguments["symbol"],),
+            ).fetchone()
+            if recent is None:
+                return _json.dumps({"ivr": None, "ivp": None,
+                                    "low_history": True})
+            out = compute_iv_rank_and_percentile(
+                conn, symbol=arguments["symbol"],
+                today_iv_30d=recent["atm_iv_30d"],
+                today_atm_iv=recent["atm_iv"],
+                lookback=int(arguments.get("lookback", 252)),
+                backfill_callable=None,
+            )
+        return _json.dumps(out, indent=2)
+
+    raise ValueError(f"unknown dataset tool: {name}")
 
 
 def _redact(args: dict[str, Any]) -> dict[str, Any]:
