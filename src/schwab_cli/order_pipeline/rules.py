@@ -292,7 +292,9 @@ class RenderPanelRule:
         return ctx.dry_run or not ctx.yes
 
     def execute(self, ctx: OrderContext) -> RuleResult:
-        from schwab_cli.output.orders import PreviewSummary, render_confirmation
+        from schwab_cli.output.orders import (
+            PreviewSummary, render_confirmation, render_order_ticket,
+        )
         # Even when preview was skipped (shouldn't happen with current
         # applies() set, but be defensive), render with an empty summary.
         preview = ctx.preview_summary or PreviewSummary(
@@ -307,6 +309,14 @@ class RenderPanelRule:
             and ctx.underlying_quote is not None
         )
         panel_underlying = None if ticker_will_run else ctx.underlying_quote
+        # Schwab/TOS-style ticket string for copy/paste-back into Schwab
+        # — best-effort, falls through to None for shapes we don't render.
+        try:
+            schwab_ticket = render_order_ticket(
+                ctx.body, underlying=ctx.spec.underlying,
+            )
+        except Exception:  # noqa: BLE001 — never block the panel
+            schwab_ticket = None
         ctx.panel_text = render_confirmation(
             body=ctx.body,
             account_tail=ctx.account.account_number[-4:],
@@ -317,6 +327,7 @@ class RenderPanelRule:
             preview_unavailable=ctx.preview_unavailable,
             underlying_quote=panel_underlying,
             current_balances=ctx.current_balances,
+            schwab_ticket=schwab_ticket,
         )
         return RuleResult()
 

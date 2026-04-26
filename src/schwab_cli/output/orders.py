@@ -283,6 +283,7 @@ def render_confirmation(
     preview_unavailable: bool = False,
     underlying_quote: dict | None = None,
     current_balances: dict | None = None,
+    schwab_ticket: str | None = None,
 ) -> str:
     """Render the TOS-style confirmation panel as a string.
 
@@ -314,6 +315,15 @@ def render_confirmation(
     lines.append("-" * 62)
     for leg in body.get("orderLegCollection", []):
         lines.append(_format_leg_line(leg))
+
+    # Schwab ticket — copy/paste-back into Schwab's order entry. Inverse
+    # of ``--parse``. Caller is responsible for building the string;
+    # rendered as its own section so it's easy to mouse-select.
+    if schwab_ticket:
+        lines.append("")
+        lines.append("Schwab Ticket")
+        lines.append("-" * 62)
+        lines.append(f"  {schwab_ticket}")
 
     # Width fits the longest current label ("Buying Power (Option):" =
     # 22 chars) plus a 2-char minimum gap to the value column. Wider
@@ -532,6 +542,193 @@ def _fmt_money(
         # is requested — keeps signed columns visually balanced.
         sign = "+"
     return f"{sign}${v:,.2f}"
+
+
+# ---- Schwab ticket renderer (inverse of --parse) -------------------------
+
+
+_TICKET_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+
+def render_order_ticket(body: dict, *, underlying: str) -> str | None:
+    """Build a Schwab/TOS-style order string from an order body.
+
+    Inverse of ``--parse``. Returns a string the operator can copy and
+    paste into Schwab's order-entry box, or ``None`` for shapes we
+    don't render yet.
+
+    Examples produced::
+
+        BUY +1 NVDA @207.00 LMT
+        SELL -1 AMZN 100 1 MAY 26 192.5 PUT @1.65 LMT
+        BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [TO CLOSE]
+        SELL -1 VERTICAL AMZN 100 1 MAY 26 260/255 CALL @0.85 LMT
+
+    Multi-leg cases reuse :func:`analytics.strategy_ticket.render_ticket`
+    by synthesizing per-leg premiums that sum (with sign) to the order's
+    net debit/credit price.
+    """
+    legs = body.get("orderLegCollection") or []
+    if not legs:
+        return None
+    order_type = (body.get("orderType") or "").upper()
+    price = body.get("price")
+    duration = (body.get("duration") or "").upper()
+
+    # ---- single equity leg --------------------------------------------
+    if len(legs) == 1 and (legs[0].get("instrument") or {}).get("assetType") == "EQUITY":
+        leg = legs[0]
+        instr = leg.get("instruction", "BUY")
+        side = "BUY" if instr in ("BUY", "BUY_TO_COVER") else "SELL"
+        sign = "+" if side == "BUY" else "-"
+        qty = int(leg.get("quantity", 1))
+        sym = (leg.get("instrument") or {}).get("symbol", underlying)
+        suffix = _ticket_price_suffix(order_type, price, duration)
+        return f"{side} {sign}{qty} {sym}{suffix}"
+
+    # ---- option legs (single or multi) --------------------------------
+    if not all(
+        (leg.get("instrument") or {}).get("assetType") == "OPTION"
+        for leg in legs
+    ):
+        return None  # mixed equity+option not supported in TOS-style yet
+
+    parsed = []
+    for leg in legs:
+        sym = (leg.get("instrument") or {}).get("symbol", "")
+        info = _parse_osi(sym)
+        if info is None:
+            return None
+        _und, expiry, side, strike = info
+        instr = leg.get("instruction", "BUY_TO_OPEN")
+        sign = 1 if instr.startswith("BUY") else -1
+        qty = sign * int(leg.get("quantity", 1))
+        is_close = instr.endswith("_CLOSE")
+        parsed.append({
+            "qty": qty, "side": side, "expiry": expiry, "strike": strike,
+            "is_close": is_close,
+        })
+
+    if price is None:
+        return None  # MARKET multi-leg — Schwab UI doesn't accept @MKT here
+    abs_net = abs(float(price))
+    price_tok = f"@{abs_net:.2f} LMT"
+    close_tag = " [TO CLOSE]" if all(p["is_close"] for p in parsed) else ""
+
+    # Single-leg option — hand-build the Schwab string.
+    if len(parsed) == 1:
+        p = parsed[0]
+        sign = "+" if p["qty"] > 0 else "-"
+        side_word = "BUY" if p["qty"] > 0 else "SELL"
+        date_tok = _fmt_ticket_date(p["expiry"])
+        weeklys = " (Weeklys)" if not _is_third_friday(p["expiry"]) else ""
+        return (
+            f"{side_word} {sign}{abs(p['qty'])} {underlying} 100"
+            f"{weeklys} {date_tok} {_fmt_ticket_strike(p['strike'])} "
+            f"{'CALL' if p['side'] == 'C' else 'PUT'} {price_tok}{close_tag}"
+        )
+
+    # Multi-leg — delegate to the existing render_ticket. Synthesize
+    # premiums on leg[0] so _net_premium ends up at ±abs_net matching
+    # the order's NET_DEBIT (BUY) / NET_CREDIT (SELL).
+    from schwab_cli.analytics.strategy import PricedLeg
+    from schwab_cli.analytics.strategy_classify import classify
+    from schwab_cli.analytics.strategy_legs import Leg
+    from schwab_cli.analytics.strategy_ticket import render_ticket
+
+    is_buy_net = order_type == "NET_DEBIT" or (
+        order_type == "NET_CREDIT" and False
+    )
+    # Determine side from the *order* type — NET_DEBIT means we pay
+    # (BUY), NET_CREDIT means we receive (SELL).
+    target_sign = -1 if order_type == "NET_DEBIT" else (
+        1 if order_type == "NET_CREDIT" else (
+            # Plain LIMIT multi-leg: use sign of first leg.
+            -1 if parsed[0]["qty"] > 0 else 1
+        )
+    )
+    # render_ticket's _net_premium = -sum(qty*premium); we want it to
+    # equal target_sign * abs_net. So sum(qty*premium) = -target_sign*abs_net.
+    needed_sum = -target_sign * abs_net
+    head = parsed[0]
+    head_premium = (
+        needed_sum / head["qty"] if head["qty"] != 0 else 0.0
+    )
+    priced = []
+    for i, p in enumerate(parsed):
+        premium = head_premium if i == 0 else 0.0
+        priced.append(PricedLeg(
+            qty=p["qty"], side=p["side"], expiry=p["expiry"],
+            strike=p["strike"], premium=premium,
+        ))
+    cls_legs = [
+        Leg(qty=p["qty"], side=p["side"], expiry=p["expiry"], strike=p["strike"])
+        for p in parsed
+    ]
+    try:
+        cls = classify(cls_legs)
+        ticket = render_ticket(priced, cls, symbol=underlying)
+    except Exception:  # noqa: BLE001 — best-effort; fall through to None
+        return None
+    return ticket + close_tag
+
+
+def _parse_osi(sym: str) -> tuple[str, datetime, str, float] | None:
+    """Parse a 21-char OSI option symbol into (underlying, expiry, side, strike)."""
+    s = sym or ""
+    if len(s) < 15:
+        return None
+    body = s[:6]
+    underlying = body.strip()
+    yymmdd = s[6:12]
+    side = s[12]
+    strike_field = s[13:21]
+    if not (yymmdd.isdigit() and side in ("C", "P")
+            and strike_field.isdigit()):
+        return None
+    try:
+        expiry = datetime(
+            2000 + int(yymmdd[:2]),
+            int(yymmdd[2:4]),
+            int(yymmdd[4:6]),
+        )
+    except ValueError:
+        return None
+    strike = int(strike_field) / 1000.0
+    return underlying, expiry, side, strike
+
+
+def _fmt_ticket_date(d) -> str:
+    """``D MON YY`` (no leading zero on day)."""
+    return f"{d.day} {_TICKET_MONTHS[d.month - 1]} {d.year % 100:02d}"
+
+
+def _fmt_ticket_strike(strike: float) -> str:
+    if strike == int(strike):
+        return str(int(strike))
+    return f"{strike:.4f}".rstrip("0").rstrip(".")
+
+
+def _is_third_friday(d) -> bool:
+    return d.weekday() == 4 and 15 <= d.day <= 21
+
+
+def _ticket_price_suffix(order_type: str, price, duration: str) -> str:
+    if order_type == "MARKET":
+        return " @MKT"
+    if price is None:
+        return ""
+    suffix = f" @{float(price):.2f}"
+    if order_type == "LIMIT":
+        suffix += " LMT"
+    elif order_type == "STOP":
+        suffix += " STP"
+    elif order_type == "STOP_LIMIT":
+        suffix += " STP LMT"
+    if duration in ("GOOD_TILL_CANCEL", "GTC"):
+        suffix += " GTC"
+    return suffix
 
 
 # ---- order list -----------------------------------------------------------

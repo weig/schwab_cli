@@ -1347,6 +1347,24 @@ def test_place_yes_skips_account_when_profile_does_not_need_it(
     assert len(place_calls) == 1
 
 
+def test_panel_includes_schwab_ticket_section(monkeypatch, tmp_path):
+    """End-to-end: the confirm panel carries a "Schwab Ticket" section
+    with a copy/paste-back string that mirrors --parse output."""
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "preview", "AAPL", "--account", "5678",
+            "--type", "LIMIT", "--price", "207.00", "--side", "BUY",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert "Schwab Ticket" in result.stderr
+    assert "BUY +1 AAPL @207.00 LMT" in result.stderr
+
+
 def test_quantity_with_leg_is_rejected(monkeypatch, tmp_path):
     """``--quantity`` is ambiguous when paired with ``--leg`` (each leg
     already carries its own signed N). Reject before doing anything."""
