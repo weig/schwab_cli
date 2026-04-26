@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -100,6 +100,45 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE vol_snapshots "
             "ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'"
+        )
+
+    # v2 → v3: add interpolated tenors, 25Δ wings, hv_30d, raw chain summary,
+    # and a generated `archive_date` for fast trading-day lookups.
+    v3_columns = {
+        "atm_iv_30d":        "REAL",
+        "atm_iv_60d":        "REAL",
+        "atm_iv_90d":        "REAL",
+        "iv_25d_put_30d":    "REAL",
+        "iv_25d_call_30d":   "REAL",
+        "iv_25d_put_60d":    "REAL",
+        "iv_25d_call_60d":   "REAL",
+        "iv_25d_put_90d":    "REAL",
+        "iv_25d_call_90d":   "REAL",
+        "hv_30d":             "REAL",
+        "raw_chain_summary":  "TEXT",
+    }
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(vol_snapshots)"
+    ).fetchall()}
+    for name, sql_type in v3_columns.items():
+        if name not in cols:
+            conn.execute(
+                f"ALTER TABLE vol_snapshots ADD COLUMN {name} {sql_type}"
+            )
+    # Generated columns don't appear in PRAGMA table_info — use table_xinfo.
+    all_cols = {r[1] for r in conn.execute(
+        "PRAGMA table_xinfo(vol_snapshots)"
+    ).fetchall()}
+    if "archive_date" not in all_cols:
+        # SQLite generated column (virtual). Uses UTC epoch → UTC date;
+        # 'localtime' is rejected by SQLite as non-deterministic in
+        # generated columns, so we omit it. The application-layer
+        # read_recent_per_day() already handles NY-TZ bucketing in
+        # Python, so a UTC date here is sufficient for index lookups.
+        conn.execute(
+            "ALTER TABLE vol_snapshots "
+            "ADD COLUMN archive_date AS ("
+            "date(captured_at_ms / 1000, 'unixepoch'))"
         )
 
     if current is None:
