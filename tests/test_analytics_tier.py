@@ -146,3 +146,70 @@ def test_frozen_is_terminal():
         thr=_thr(),
     )
     assert next_state.tier == "FROZEN"
+
+
+from schwab_cli.analytics.tier import transition_position_clock
+
+
+def test_position_active_when_holding():
+    state = TierState(tier="ACTIVE", tier_since=_now(),
+                      consecutive_days_below=0)
+    next_state = transition_position_clock(
+        state, now=_now() + timedelta(days=5),
+        has_active_position=True,
+        last_close_at=None,
+        thr=_thr(),
+    )
+    assert next_state.tier == "ACTIVE"
+
+
+def test_position_active_for_thirty_calendar_days_after_close():
+    last_close = _now()
+    state = TierState(tier="ACTIVE", tier_since=last_close,
+                      consecutive_days_below=0)
+    next_state = transition_position_clock(
+        state, now=last_close + timedelta(days=29),
+        has_active_position=False,
+        last_close_at=last_close,
+        thr=_thr(),
+    )
+    assert next_state.tier == "ACTIVE"
+
+
+def test_position_demotes_to_watch_after_thirty_days():
+    last_close = _now()
+    state = TierState(tier="ACTIVE", tier_since=last_close,
+                      consecutive_days_below=0)
+    next_state = transition_position_clock(
+        state, now=last_close + timedelta(days=30),
+        has_active_position=False,
+        last_close_at=last_close,
+        thr=_thr(),
+    )
+    assert next_state.tier == "WATCH"
+
+
+def test_position_demotes_to_frozen_after_ninety_days():
+    last_close = _now()
+    state = TierState(tier="WATCH", tier_since=last_close + timedelta(days=30),
+                      consecutive_days_below=0)
+    next_state = transition_position_clock(
+        state, now=last_close + timedelta(days=90),
+        has_active_position=False,
+        last_close_at=last_close,
+        thr=_thr(),
+    )
+    assert next_state.tier == "FROZEN"
+
+
+def test_position_revives_to_active_when_reopened():
+    last_close = _now()
+    state = TierState(tier="FROZEN", tier_since=last_close + timedelta(days=90),
+                      consecutive_days_below=0)
+    next_state = transition_position_clock(
+        state, now=last_close + timedelta(days=120),
+        has_active_position=True,
+        last_close_at=last_close,
+        thr=_thr(),
+    )
+    assert next_state.tier == "ACTIVE"
