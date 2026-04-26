@@ -130,6 +130,45 @@ The first HTTP 401 from Schwab's API triggers an automatic token refresh and a
 single retry — no user action needed as long as the 7-day refresh token is
 still valid. After it expires, re-run `schwab_cli auth --force`.
 
+## `dataset` — cached volatility data
+
+Maintain a daily-refreshed series so `vol SYMBOL` returns fast,
+tenor-consistent IVR / IVP. One-time setup:
+
+```bash
+# Subscribe individual tickers (always tracked).
+schwab_cli dataset subscribe NVDA,AMZN,SPY
+
+# Or follow an index — members auto-sync weekly.
+schwab_cli dataset subscribe SPX --indices
+
+# Or follow your account's option-bearing positions.
+schwab_cli dataset subscribe --account <accountHash>
+
+# Schedule the cron jobs (weekly index sync + daily vol sample).
+schwab_cli dataset cron install --indices
+schwab_cli dataset cron install --group volatility
+
+# Inspect.
+schwab_cli dataset status
+```
+
+After the first ~120 days of cron runs, `vol NVDA` shows IVR / IVP
+sourced from the clean `atm_iv_30d` series. Until then, it falls
+back to the legacy series (with a one-shot BS-reconstructed
+backfill if needed).
+
+To stop tracking:
+
+```bash
+schwab_cli dataset unsubscribe NVDA
+schwab_cli dataset cron uninstall --indices
+schwab_cli dataset cron uninstall --group volatility
+```
+
+Supported indices: SPX, DJI, NQ. RUT is recognized but not yet
+populated by an upstream provider.
+
 ## Run tests
 
 ```bash
