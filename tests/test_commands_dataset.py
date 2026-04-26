@@ -86,3 +86,51 @@ def test_status_json_output(runner):
     parsed = json.loads(result.stdout)
     assert parsed[0]["symbol"] == "NVDA"
     assert parsed[0]["tier"] == "GRACE"
+
+
+def test_update_indices_calls_orchestrator(runner, monkeypatch):
+    runner.invoke(app, ["dataset", "subscribe", "SPX", "--indices"])
+
+    calls = []
+    def fake_run(conn, *, http_client, group_name, now_ms):
+        calls.append("indices")
+        return {"SPX": {"added": ["AAPL"], "removed": [], "total": 1}}
+
+    monkeypatch.setattr(
+        "schwab_cli.commands.dataset.run_indices_update", fake_run
+    )
+
+    result = runner.invoke(app, ["dataset", "update", "--indices"])
+    assert result.exit_code == 0
+    assert calls == ["indices"]
+    assert "SPX" in result.stdout
+
+
+def test_update_group_volatility_calls_orchestrator(runner, monkeypatch):
+    calls = []
+    def fake_run(conn, *, client, group_name, now_ms, accounts):
+        calls.append("vol")
+        return {"sampled": ["NVDA"], "skipped": [],
+                "transitions": [], "errors": [], "positions": {}}
+
+    # Provide stub config + session so update doesn't bail early.
+    monkeypatch.setattr(
+        "schwab_cli.commands.dataset.run_volatility_update", fake_run
+    )
+    # Stub auth/session loaders.
+    import schwab_cli.config as cfg_mod
+    import schwab_cli.session as sess_mod
+    monkeypatch.setattr(cfg_mod, "load", lambda: object())
+    monkeypatch.setattr(sess_mod, "load", lambda: object())
+    # Stub SchwabClient ctor — it's invoked but the fake_run ignores it.
+    import schwab_cli.api.client as client_mod
+    monkeypatch.setattr(client_mod, "SchwabClient", lambda c, s: object())
+
+    result = runner.invoke(app, ["dataset", "update", "--group", "volatility"])
+    assert result.exit_code == 0
+    assert calls == ["vol"]
+
+
+def test_update_requires_indices_or_group(runner):
+    result = runner.invoke(app, ["dataset", "update"])
+    assert result.exit_code != 0
