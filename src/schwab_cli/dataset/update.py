@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from schwab_cli.api.accounts import get_account
 from schwab_cli.dataset.indices import fetch_index_members
 from schwab_cli.dataset.store import (
     list_active_index_subscriptions,
@@ -96,5 +97,92 @@ def _current_index_members(
           AND group_name = ? AND unsubscribed_at IS NULL
         """,
         (index_name, group_name),
+    ).fetchall()
+    return {r["symbol"] for r in rows}
+
+
+# ---- account position reconciliation ----------------------------------
+
+
+def _last4(hash_str: str) -> str:
+    return hash_str[-4:]
+
+
+def sync_account_positions(
+    conn: sqlite3.Connection,
+    *,
+    client: Any,
+    account_hash: str,
+    group_name: str,
+    now_ms: int,
+) -> dict[str, list[str]]:
+    """Pull account positions and reconcile with ``subscriptions``.
+
+    Inserts new option-bearing underlyings, soft-deletes ones no longer
+    held. Underlyings are deduplicated — multiple option contracts on
+    the same underlying produce one ``subscriptions`` row.
+
+    Returns ``{'added': [...], 'closed': [...]}`` for the run summary.
+    """
+    suffix = _last4(account_hash)
+
+    try:
+        acct = get_account(client, account_hash)
+    except Exception as e:
+        return {"added": [], "closed": [], "error": str(e)}
+
+    positions = (acct.get("securitiesAccount") or {}).get("positions") or []
+    upstream: set[str] = set()
+    for p in positions:
+        instr = p.get("instrument") or {}
+        if instr.get("assetType") != "OPTION":
+            continue
+        und = instr.get("underlyingSymbol")
+        if und:
+            upstream.add(und)
+
+    current = _current_position_underlyings(conn, suffix, group_name)
+    added = sorted(upstream - current)
+    closed = sorted(current - upstream)
+
+    for sym in added:
+        conn.execute(
+            """
+            INSERT INTO subscriptions
+              (symbol, group_name, source, source_key,
+               subscribed_at, unsubscribed_at)
+            VALUES (?, ?, 'position', ?, ?, NULL)
+            ON CONFLICT (symbol, group_name, source, source_key) DO UPDATE SET
+              subscribed_at = excluded.subscribed_at,
+              unsubscribed_at = NULL
+            """,
+            (sym, group_name, suffix, now_ms),
+        )
+    for sym in closed:
+        conn.execute(
+            """
+            UPDATE subscriptions SET unsubscribed_at = ?
+            WHERE symbol = ? AND group_name = ?
+              AND source = 'position' AND source_key = ?
+              AND unsubscribed_at IS NULL
+            """,
+            (now_ms, sym, group_name, suffix),
+        )
+
+    return {"added": added, "closed": closed}
+
+
+def _current_position_underlyings(
+    conn: sqlite3.Connection,
+    source_key: str,
+    group_name: str,
+) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT symbol FROM subscriptions
+        WHERE source = 'position' AND source_key = ?
+          AND group_name = ? AND unsubscribed_at IS NULL
+        """,
+        (source_key, group_name),
     ).fetchall()
     return {r["symbol"] for r in rows}
