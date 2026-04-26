@@ -213,3 +213,72 @@ def test_position_revives_to_active_when_reopened():
         thr=_thr(),
     )
     assert next_state.tier == "ACTIVE"
+
+
+from schwab_cli.analytics.tier import resolve_tier
+
+
+def test_explicit_equity_always_active():
+    state = TierState(tier="WATCH", tier_since=_now(),
+                      consecutive_days_below=99)
+    next_state = resolve_tier(
+        state,
+        sources={"equity"},
+        now=_now() + timedelta(days=1),
+        threshold_pass=False,
+        is_trading_day=True,
+        has_active_position=False,
+        last_close_at=None,
+        thr=_thr(),
+    )
+    assert next_state.tier == "ACTIVE"
+
+
+def test_active_position_overrides_indices_demote():
+    state = TierState(tier="WATCH", tier_since=_now(),
+                      consecutive_days_below=7)
+    next_state = resolve_tier(
+        state,
+        sources={"position", "indices"},
+        now=_now() + timedelta(days=1),
+        threshold_pass=False,
+        is_trading_day=True,
+        has_active_position=True,
+        last_close_at=None,
+        thr=_thr(),
+    )
+    assert next_state.tier == "ACTIVE"
+
+
+def test_indices_only_uses_indices_clock():
+    state = TierState(tier="ACTIVE", tier_since=_now(),
+                      consecutive_days_below=6)
+    next_state = resolve_tier(
+        state,
+        sources={"indices"},
+        now=_now() + timedelta(days=1),
+        threshold_pass=False,
+        is_trading_day=True,
+        has_active_position=False,
+        last_close_at=None,
+        thr=_thr(),
+    )
+    assert next_state.tier == "WATCH"
+    assert next_state.consecutive_days_below == 7
+
+
+def test_closed_position_only_uses_position_clock():
+    last_close = _now()
+    state = TierState(tier="ACTIVE", tier_since=last_close,
+                      consecutive_days_below=0)
+    next_state = resolve_tier(
+        state,
+        sources={"position"},
+        now=last_close + timedelta(days=30),
+        threshold_pass=False,
+        is_trading_day=True,
+        has_active_position=False,
+        last_close_at=last_close,
+        thr=_thr(),
+    )
+    assert next_state.tier == "WATCH"
