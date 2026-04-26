@@ -171,6 +171,46 @@ def pick_atm_contract(
     return None
 
 
+# ---- ATM curve builder ------------------------------------------------
+
+
+def pick_atm_curve(
+    expiries: list[dict],
+    spot: float,
+    *,
+    min_volume: int = 100,
+) -> list[tuple[int, float]]:
+    """Build the ``[(dte, atm_iv), ...]`` curve from a chain.
+
+    Skips expiries whose total contract volume is < ``min_volume``
+    (defends against zero-volume weeklies with stale quotes — same
+    rule as :func:`pick_atm_contract`). For each kept expiry, picks
+    the strike closest to ``spot`` and returns the call/put IV
+    midpoint (or single side if the other lacks IV). Sorted by DTE.
+    """
+    out: list[tuple[int, float]] = []
+    for exp in expiries:
+        contracts = exp.get("contracts") or []
+        total = sum((c.get("volume") or 0) for c in contracts)
+        if total < min_volume:
+            continue
+        by_strike: dict[float, list[dict]] = {}
+        for c in contracts:
+            s = c.get("strike")
+            if s is None:
+                continue
+            by_strike.setdefault(s, []).append(c)
+        if not by_strike:
+            continue
+        atm = min(by_strike.keys(), key=lambda s: abs(s - spot))
+        ivs = [c["iv"] for c in by_strike[atm] if c.get("iv") is not None]
+        if not ivs:
+            continue
+        out.append((int(exp.get("dte") or 0), sum(ivs) / len(ivs)))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 # ---- term-structure interpolation -------------------------------------
 
 

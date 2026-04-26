@@ -62,3 +62,51 @@ def test_single_point_curve_returns_none_unless_exact():
     curve = [(30, 0.30)]
     assert interp_iv_in_variance(curve, 30) == pytest.approx(0.30)
     assert interp_iv_in_variance(curve, 45) is None
+
+
+from schwab_cli.analytics.vol import pick_atm_curve
+
+
+def _expiry(dte, total_vol, strikes):
+    """Helper: build an expiry dict with (strike, vol, call_iv, put_iv) tuples."""
+    contracts = []
+    for strike, vol, civ, piv in strikes:
+        contracts.append({"strike": strike, "side": "C",
+                          "volume": vol // 2, "iv": civ})
+        contracts.append({"strike": strike, "side": "P",
+                          "volume": vol // 2, "iv": piv})
+    return {"expiry": "2026-01-01", "dte": dte, "contracts": contracts}
+
+
+def test_pick_atm_curve_skips_low_volume():
+    expiries = [
+        _expiry(7, total_vol=10, strikes=[(100, 5, 0.35, 0.36)]),  # < 100
+        _expiry(30, total_vol=200, strikes=[(100, 200, 0.30, 0.32)]),
+    ]
+    out = pick_atm_curve(expiries, spot=100.0)
+    assert len(out) == 1
+    assert out[0] == (30, pytest.approx(0.31))  # midpoint
+
+
+def test_pick_atm_curve_picks_closest_strike():
+    expiries = [_expiry(30, total_vol=500, strikes=[
+        (90, 200, 0.40, 0.42),
+        (100, 200, 0.30, 0.32),
+        (110, 100, 0.50, 0.52),
+    ])]
+    out = pick_atm_curve(expiries, spot=101.0)
+    assert out == [(30, pytest.approx(0.31))]   # 100 strike, midpoint
+
+
+def test_pick_atm_curve_uses_single_side_when_only_one_iv():
+    expiries = [_expiry(30, total_vol=500, strikes=[(100, 500, None, 0.33)])]
+    out = pick_atm_curve(expiries, spot=100.0)
+    assert out == [(30, pytest.approx(0.33))]
+
+
+def test_pick_atm_curve_sorted_by_dte():
+    e1 = _expiry(60, 500, [(100, 500, 0.30, 0.30)])
+    e2 = _expiry(7,  500, [(100, 500, 0.40, 0.40)])
+    e3 = _expiry(30, 500, [(100, 500, 0.35, 0.35)])
+    out = pick_atm_curve([e1, e2, e3], spot=100.0)
+    assert [d for d, _ in out] == [7, 30, 60]
