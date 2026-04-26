@@ -3,6 +3,7 @@ import typer
 from schwab_cli._doc import doc_option
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
+from schwab_cli.commands import dataset as dataset_cmd
 from schwab_cli.commands import dividends as dividends_cmd
 from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
@@ -367,6 +368,7 @@ mcp_app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
+app.add_typer(dataset_cmd.app, name="dataset")
 app.add_typer(mcp_app, name="mcp")
 
 
