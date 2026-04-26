@@ -142,7 +142,13 @@ def test_concurrent_write_and_read_safe(monkeypatch, tmp_path):
 
 def test_mcp_lists_dataset_tools(monkeypatch, tmp_path):
     """The Tool list returned by the MCP server's tool builder must
-    include the three dataset.* tools."""
+    include the three dataset.* tools.
+
+    The tools are registered inside an async ``list_tools`` closure
+    (not a module-level constant), so no static ``_ALL_TOOLS`` /
+    ``TOOLS`` attribute exists. The source-grep fallback is therefore
+    the expected path for this project layout.
+    """
     monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -157,6 +163,8 @@ def test_mcp_lists_dataset_tools(monkeypatch, tmp_path):
         names = {t.name for t in static_tools}
     else:
         # Fall back to grepping the source for our tool names.
+        # This is the expected code path: tools are wired inside an async
+        # list_tools() closure, not stored in a module-level constant.
         src = open(app_mod.__file__).read()
         assert "dataset.status" in src
         assert "dataset.history" in src
