@@ -161,3 +161,51 @@ def test_last_close_at_none_when_active(conn):
     out = last_close_at_for_symbol(conn, symbol="NVDA",
                                    group_name="volatility")
     assert out is None
+
+
+from schwab_cli.dataset.store import (
+    read_ticker_state, write_ticker_state, list_ticker_states,
+)
+
+
+def test_read_ticker_state_returns_none_for_missing(conn):
+    out = read_ticker_state(conn, symbol="X", group_name="volatility")
+    assert out is None
+
+
+def test_write_then_read_round_trip(conn):
+    write_ticker_state(
+        conn, symbol="NVDA", group_name="volatility",
+        tier="ACTIVE", tier_since=1000,
+        consecutive_days_below=3, last_evaluated_at=2000,
+    )
+    out = read_ticker_state(conn, symbol="NVDA", group_name="volatility")
+    assert out["tier"] == "ACTIVE"
+    assert out["consecutive_days_below"] == 3
+
+
+def test_write_ticker_state_is_upsert(conn):
+    write_ticker_state(
+        conn, symbol="NVDA", group_name="volatility",
+        tier="GRACE", tier_since=1000,
+        consecutive_days_below=0, last_evaluated_at=1000,
+    )
+    write_ticker_state(
+        conn, symbol="NVDA", group_name="volatility",
+        tier="ACTIVE", tier_since=2000,
+        consecutive_days_below=0, last_evaluated_at=2000,
+    )
+    out = read_ticker_state(conn, symbol="NVDA", group_name="volatility")
+    assert out["tier"] == "ACTIVE"
+    assert out["tier_since"] == 2000
+
+
+def test_list_ticker_states_filters_by_tier(conn):
+    for sym, tier in [("A", "ACTIVE"), ("B", "WATCH"), ("C", "ACTIVE")]:
+        write_ticker_state(
+            conn, symbol=sym, group_name="volatility",
+            tier=tier, tier_since=0,
+            consecutive_days_below=0, last_evaluated_at=0,
+        )
+    actives = list_ticker_states(conn, group_name="volatility", tier="ACTIVE")
+    assert {r["symbol"] for r in actives} == {"A", "C"}

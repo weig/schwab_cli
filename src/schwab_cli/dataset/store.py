@@ -249,3 +249,64 @@ def last_close_at_for_symbol(
     closes = [r["unsubscribed_at"] for r in rows
               if r["unsubscribed_at"] is not None]
     return max(closes) if closes else None
+
+
+# ---- ticker_state -----------------------------------------------------
+
+
+def read_ticker_state(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM ticker_state WHERE symbol = ? AND group_name = ?",
+        (symbol, group_name),
+    ).fetchone()
+
+
+def write_ticker_state(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+    tier: str,
+    tier_since: int,
+    consecutive_days_below: int,
+    last_evaluated_at: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO ticker_state
+          (symbol, group_name, tier, tier_since,
+           consecutive_days_below, last_evaluated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (symbol, group_name) DO UPDATE SET
+          tier                   = excluded.tier,
+          tier_since             = excluded.tier_since,
+          consecutive_days_below = excluded.consecutive_days_below,
+          last_evaluated_at      = excluded.last_evaluated_at
+        """,
+        (symbol, group_name, tier, tier_since,
+         consecutive_days_below, last_evaluated_at),
+    )
+
+
+def list_ticker_states(
+    conn: sqlite3.Connection,
+    *,
+    group_name: str,
+    tier: str | None = None,
+) -> list[sqlite3.Row]:
+    if tier is None:
+        return conn.execute(
+            "SELECT * FROM ticker_state WHERE group_name = ? "
+            "ORDER BY symbol",
+            (group_name,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM ticker_state WHERE group_name = ? AND tier = ? "
+        "ORDER BY symbol",
+        (group_name, tier),
+    ).fetchall()
