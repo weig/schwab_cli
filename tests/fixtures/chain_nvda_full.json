@@ -1,0 +1,32 @@
+{
+  "underlying": {"last": 200.0},
+  "expiries": [
+    {
+      "expiry": "2026-05-15", "dte": 30,
+      "contracts": [
+        {"strike": 195.0, "side": "P", "delta": -0.25, "iv": 0.36, "volume": 200},
+        {"strike": 200.0, "side": "C", "delta":  0.50, "iv": 0.34, "volume": 200},
+        {"strike": 200.0, "side": "P", "delta": -0.50, "iv": 0.34, "volume": 200},
+        {"strike": 205.0, "side": "C", "delta":  0.25, "iv": 0.32, "volume": 200}
+      ]
+    },
+    {
+      "expiry": "2026-06-15", "dte": 60,
+      "contracts": [
+        {"strike": 190.0, "side": "P", "delta": -0.25, "iv": 0.38, "volume": 150},
+        {"strike": 200.0, "side": "C", "delta":  0.50, "iv": 0.36, "volume": 150},
+        {"strike": 200.0, "side": "P", "delta": -0.50, "iv": 0.36, "volume": 150},
+        {"strike": 210.0, "side": "C", "delta":  0.25, "iv": 0.34, "volume": 150}
+      ]
+    },
+    {
+      "expiry": "2026-07-15", "dte": 90,
+      "contracts": [
+        {"strike": 185.0, "side": "P", "delta": -0.25, "iv": 0.40, "volume": 100},
+        {"strike": 200.0, "side": "C", "delta":  0.50, "iv": 0.38, "volume": 100},
+        {"strike": 200.0, "side": "P", "delta": -0.50, "iv": 0.38, "volume": 100},
+        {"strike": 215.0, "side": "C", "delta":  0.25, "iv": 0.36, "volume": 100}
+      ]
+    }
+  ]
+}
