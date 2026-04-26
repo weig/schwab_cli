@@ -80,3 +80,24 @@ def test_index_subscriptions_table_exists(monkeypatch, tmp_path):
     assert cols == {
         "index_name", "group_name", "subscribed_at", "unsubscribed_at",
     }
+
+
+def test_ticker_state_table_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    with vol_history.connect() as conn:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(ticker_state)"
+        ).fetchall()}
+    assert cols == {
+        "symbol", "group_name", "tier", "tier_since",
+        "consecutive_days_below", "last_evaluated_at",
+    }
+
+
+def test_archive_date_index_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    with vol_history.connect() as conn:
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()}
+    assert "idx_vol_archive_date" in names

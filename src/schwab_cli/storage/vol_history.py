@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS index_subscriptions (
     unsubscribed_at  INTEGER,
     PRIMARY KEY (index_name, group_name)
 );
+
+CREATE TABLE IF NOT EXISTS ticker_state (
+    symbol                  TEXT    NOT NULL,
+    group_name              TEXT    NOT NULL,
+    tier                    TEXT    NOT NULL,
+    tier_since              INTEGER NOT NULL,
+    consecutive_days_below  INTEGER NOT NULL DEFAULT 0,
+    last_evaluated_at       INTEGER NOT NULL,
+    PRIMARY KEY (symbol, group_name)
+);
 """
 
 # Allowed values for the `source` column.
@@ -162,6 +172,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ADD COLUMN archive_date AS ("
             "date(captured_at_ms / 1000, 'unixepoch'))"
         )
+
+    # Create index on (symbol, archive_date) after the generated column is
+    # guaranteed to exist. This cannot live in _SCHEMA_DDL because that
+    # script runs before the ALTER TABLE above adds archive_date on fresh DBs.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vol_archive_date "
+        "ON vol_snapshots (symbol, archive_date)"
+    )
 
     if current is None:
         conn.execute(
