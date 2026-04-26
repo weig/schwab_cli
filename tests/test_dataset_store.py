@@ -115,3 +115,49 @@ def test_unsubscribe_position_only_targets_one_account(conn):
     active = list_active_subscriptions(conn, group_name="volatility")
     assert len(active) == 1
     assert active[0]["source_key"] == "5678"
+
+
+from schwab_cli.dataset.store import (
+    last_close_at_for_symbol,
+    sources_for_symbol,
+)
+
+
+def test_sources_for_symbol_aggregates(conn):
+    subscribe_equity(conn, symbol="AMZN", group_name="volatility",
+                     captured_at_ms=1)
+    subscribe_position(conn, symbol="AMZN", group_name="volatility",
+                       account_hash_last4="1234", captured_at_ms=2)
+    out = sources_for_symbol(conn, symbol="AMZN", group_name="volatility")
+    assert out == {"equity", "position"}
+
+
+def test_sources_excludes_unsubscribed(conn):
+    subscribe_equity(conn, symbol="AMZN", group_name="volatility",
+                     captured_at_ms=1)
+    unsubscribe_equity(conn, symbol="AMZN", group_name="volatility",
+                       captured_at_ms=5)
+    out = sources_for_symbol(conn, symbol="AMZN", group_name="volatility")
+    assert out == set()
+
+
+def test_last_close_at_picks_most_recent(conn):
+    subscribe_position(conn, symbol="NVDA", group_name="volatility",
+                       account_hash_last4="aaaa", captured_at_ms=1)
+    unsubscribe_position(conn, symbol="NVDA", group_name="volatility",
+                         account_hash_last4="aaaa", captured_at_ms=100)
+    subscribe_position(conn, symbol="NVDA", group_name="volatility",
+                       account_hash_last4="bbbb", captured_at_ms=50)
+    unsubscribe_position(conn, symbol="NVDA", group_name="volatility",
+                         account_hash_last4="bbbb", captured_at_ms=200)
+    out = last_close_at_for_symbol(conn, symbol="NVDA",
+                                   group_name="volatility")
+    assert out == 200
+
+
+def test_last_close_at_none_when_active(conn):
+    subscribe_position(conn, symbol="NVDA", group_name="volatility",
+                       account_hash_last4="aaaa", captured_at_ms=1)
+    out = last_close_at_for_symbol(conn, symbol="NVDA",
+                                   group_name="volatility")
+    assert out is None

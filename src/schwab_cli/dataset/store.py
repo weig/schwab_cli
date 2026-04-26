@@ -209,3 +209,43 @@ def unsubscribe_position(
         """,
         (captured_at_ms, symbol, group_name, account_hash_last4),
     )
+
+
+def sources_for_symbol(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+) -> set[str]:
+    """Return the set of distinct active source labels for a symbol."""
+    rows = conn.execute(
+        "SELECT DISTINCT source FROM subscriptions "
+        "WHERE symbol = ? AND group_name = ? AND unsubscribed_at IS NULL",
+        (symbol, group_name),
+    ).fetchall()
+    return {r["source"] for r in rows}
+
+
+def last_close_at_for_symbol(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+) -> int | None:
+    """Return ms timestamp of the most recent position-source close.
+
+    Returns None if any position-source row for this symbol is still
+    active (i.e., the position is currently open).
+    """
+    rows = conn.execute(
+        "SELECT unsubscribed_at FROM subscriptions "
+        "WHERE symbol = ? AND group_name = ? AND source = 'position'",
+        (symbol, group_name),
+    ).fetchall()
+    if not rows:
+        return None
+    if any(r["unsubscribed_at"] is None for r in rows):
+        return None
+    closes = [r["unsubscribed_at"] for r in rows
+              if r["unsubscribed_at"] is not None]
+    return max(closes) if closes else None
