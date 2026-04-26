@@ -49,3 +49,62 @@ def test_rejects_wrong_field_count():
 def test_field_value_out_of_range():
     with pytest.raises(ValueError, match="hour"):
         crontab_to_calendar_interval("0 25 * * *")
+
+
+import plistlib
+
+from schwab_cli.dataset.launchd import (
+    build_dataset_plist, DatasetPlistSpec,
+    INDICES_LABEL, VOLATILITY_LABEL,
+)
+
+
+def test_indices_plist_label_and_program_args():
+    spec = DatasetPlistSpec(
+        binary_path="/usr/local/bin/schwab_cli",
+        cron="0 6 * * 0",
+        kind="indices",
+    )
+    blob = build_dataset_plist(spec)
+    parsed = plistlib.loads(blob)
+    assert parsed["Label"] == INDICES_LABEL
+    assert parsed["ProgramArguments"] == [
+        "/usr/local/bin/schwab_cli", "dataset", "update", "--indices",
+    ]
+    assert parsed["StartCalendarInterval"] == [
+        {"Hour": 6, "Minute": 0, "Weekday": 0}
+    ]
+    assert parsed["RunAtLoad"] is False
+    assert parsed["KeepAlive"] is False
+
+
+def test_volatility_plist_args():
+    spec = DatasetPlistSpec(
+        binary_path="/x/schwab_cli",
+        cron="0 22 * * *",
+        kind="volatility",
+    )
+    blob = build_dataset_plist(spec)
+    parsed = plistlib.loads(blob)
+    assert parsed["Label"] == VOLATILITY_LABEL
+    assert parsed["ProgramArguments"] == [
+        "/x/schwab_cli", "dataset", "update", "--group", "volatility",
+    ]
+
+
+def test_log_paths_attached_when_provided():
+    spec = DatasetPlistSpec(
+        binary_path="/x/schwab_cli",
+        cron="0 22 * * *",
+        kind="volatility",
+        log_file="/tmp/dataset.log",
+    )
+    parsed = plistlib.loads(build_dataset_plist(spec))
+    assert parsed["StandardOutPath"] == "/tmp/dataset.log"
+    assert parsed["StandardErrorPath"] == "/tmp/dataset.log"
+
+
+def test_unsupported_kind_rejected():
+    with pytest.raises(ValueError, match="unsupported plist kind"):
+        DatasetPlistSpec(binary_path="/x", cron="0 22 * * *",
+                        kind="other")

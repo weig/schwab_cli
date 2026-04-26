@@ -8,6 +8,10 @@ form rather than wonder why their job didn't fire.
 """
 from __future__ import annotations
 
+import plistlib
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -70,3 +74,76 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
             )
         out[_FIELD_TO_LAUNCHD_KEY[name]] = n
     return [out]
+
+
+INDICES_LABEL    = "com.schwab-cli.dataset.indices"
+VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
+
+_DEFAULT_DIR = Path.home() / "Library" / "LaunchAgents"
+
+
+@dataclass
+class DatasetPlistSpec:
+    binary_path: str
+    cron:        str
+    kind:        str  # 'indices' or 'volatility'
+    log_file:    str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("indices", "volatility"):
+            raise ValueError(
+                f"unsupported plist kind: {self.kind!r} "
+                f"(expected 'indices' or 'volatility')"
+            )
+
+    @property
+    def label(self) -> str:
+        return INDICES_LABEL if self.kind == "indices" else VOLATILITY_LABEL
+
+    @property
+    def program_args(self) -> list[str]:
+        if self.kind == "indices":
+            return [self.binary_path, "dataset", "update", "--indices"]
+        return [self.binary_path, "dataset", "update", "--group", "volatility"]
+
+    @property
+    def plist_path(self) -> Path:
+        return _DEFAULT_DIR / f"{self.label}.plist"
+
+
+def build_dataset_plist(spec: DatasetPlistSpec) -> bytes:
+    plist: dict[str, Any] = {
+        "Label":                 spec.label,
+        "ProgramArguments":      spec.program_args,
+        "StartCalendarInterval": crontab_to_calendar_interval(spec.cron),
+        "RunAtLoad":             False,
+        "KeepAlive":             False,
+    }
+    if spec.log_file:
+        plist["StandardOutPath"] = spec.log_file
+        plist["StandardErrorPath"] = spec.log_file
+    return plistlib.dumps(plist, fmt=plistlib.FMT_XML, sort_keys=True)
+
+
+def install_plist(spec: DatasetPlistSpec) -> Path:
+    """Write the plist and ``launchctl load`` it (G13.2 — one verb)."""
+    spec.plist_path.parent.mkdir(parents=True, exist_ok=True)
+    spec.plist_path.write_bytes(build_dataset_plist(spec))
+    subprocess.run(
+        ["launchctl", "load", "-w", str(spec.plist_path)],
+        check=True,
+    )
+    return spec.plist_path
+
+
+def uninstall_plist(kind: str) -> Path:
+    """``launchctl unload`` then remove the plist file."""
+    label = INDICES_LABEL if kind == "indices" else VOLATILITY_LABEL
+    path = _DEFAULT_DIR / f"{label}.plist"
+    if path.exists():
+        subprocess.run(
+            ["launchctl", "unload", str(path)],
+            check=False,  # already-unloaded is fine
+        )
+        path.unlink()
+    return path
