@@ -64,3 +64,27 @@ def test_index_slug_table_covers_three_indices():
 
 def test_ssga_etf_table_covers_two_indices():
     assert INDEX_TO_SSGA_ETF == {"SPX": "spy", "DJI": "dia"}
+
+
+from schwab_cli.dataset.indices import fetch_ssga_members
+
+
+def test_ssga_parses_xlsx_and_normalizes_dashes():
+    xlsx_bytes = (_FIX / "ssga_spy_sample.xlsx").read_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=xlsx_bytes)
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, timeout=10.0) as client:
+        out = fetch_ssga_members("SPX", client=client)
+    assert "AAPL" in out
+    assert "BRK.B" in out      # dash → dot
+    assert "BRK-B" not in out
+    # Cash component / blank rows skipped.
+    assert "USD" not in out
+    assert "" not in out
+
+
+def test_ssga_rejects_unknown_index():
+    with pytest.raises(ValueError, match="not supported by SSGA"):
+        fetch_ssga_members("NQ", client=httpx.Client())

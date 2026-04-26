@@ -15,6 +15,7 @@ dependencies = [
     "websockets>=13.0",
     "uvicorn>=0.30",
     "starlette>=0.37",
+    "openpyxl>=3.1",
 ]
 
 [project.scripts]
