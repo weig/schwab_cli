@@ -98,6 +98,12 @@ _PHASE2_STRATEGIES = {
 }
 
 
+_PE_MARKER_RE = re.compile(
+    r"\[\s*(TO\s+OPEN|TO\s+CLOSE|AUTO)\s*\]",
+    re.IGNORECASE,
+)
+
+
 def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
     """Parse a Schwab/TOS ticket string into a :class:`ParsedTicket`.
 
@@ -106,6 +112,14 @@ def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
     year (which it does as ``2000 + YY``, so ``today`` is currently
     unused — kept as a parameter so we can switch to a sliding
     window later without an API change).
+
+    Optional bracketed position-effect marker may appear at the end of
+    the ticket: ``[TO OPEN]``, ``[TO CLOSE]``, or ``[AUTO]`` (case-
+    insensitive). Mirrors the trailing tag emitted by TOS / our own
+    ``render_order_ticket``. ``[TO CLOSE]`` rewrites every option
+    leg's instruction to ``*_TO_CLOSE``; ``[TO OPEN]`` and ``[AUTO]``
+    leave legs at their default (opening) instruction so the
+    pipeline's position-aware rewrite can decide.
     """
     if not s or not s.strip():
         raise TicketParseError("ticket is empty")
@@ -117,6 +131,25 @@ def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
     # Strip out parenthetical decorations like "(Weeklys)" or "(Monthly)"
     # — they're informational on TOS strings and don't affect the body.
     raw = re.sub(r"\([^)]*\)", " ", raw)
+    # Pull out the optional [TO OPEN] / [TO CLOSE] / [AUTO] marker.
+    # Reject multiple markers as ambiguous.
+    pe_matches = _PE_MARKER_RE.findall(raw)
+    if len(pe_matches) > 1:
+        raise TicketParseError(
+            f"multiple position-effect markers in ticket: {s!r}"
+        )
+    pe_marker: str | None = None
+    if pe_matches:
+        word = re.sub(r"\s+", "_", pe_matches[0].strip().upper())
+        # word is "TO_OPEN", "TO_CLOSE", or "AUTO"
+        if word == "TO_CLOSE":
+            pe_marker = "close"
+        elif word == "TO_OPEN":
+            pe_marker = "open"
+        else:
+            pe_marker = "auto"
+        raw = _PE_MARKER_RE.sub(" ", raw).strip()
+
     tokens = raw.split()
     if len(tokens) < 4:
         raise TicketParseError(
@@ -185,6 +218,7 @@ def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
     if looks_like_option:
         return _finish_option(
             s, side, quantity, strategy, underlying, tokens, cursor,
+            pe_marker=pe_marker,
         )
     return _finish_equity(s, side, quantity, underlying, tokens, cursor, strategy)
 
@@ -197,6 +231,8 @@ def _finish_option(
     underlying: str,
     tokens: list[str],
     cursor: int,
+    *,
+    pe_marker: str | None = None,
 ) -> ParsedTicket:
     # ---- EXPIRY: "D MON YY" ----
     if cursor + 2 >= len(tokens):
@@ -303,6 +339,14 @@ def _finish_option(
 
     # ---- expand legs ----
     legs = _expand_legs(side, quantity, strategy, underlying, expiry, option_type, strikes)
+
+    # Apply [TO CLOSE] marker by rewriting each leg's instruction. The
+    # OPEN / AUTO cases keep the default *_TO_OPEN — DetectOpenCloseRule
+    # may still rewrite to *_TO_CLOSE based on existing positions.
+    if pe_marker == "close":
+        legs = tuple(
+            _replace_leg_effect(leg, "close") for leg in legs
+        )
 
     return ParsedTicket(
         side=side,
@@ -420,6 +464,25 @@ def _parse_price_type_duration(
         )
 
     return price, order_type, duration
+
+
+def _replace_leg_effect(leg: ParsedLeg, effect: str) -> ParsedLeg:
+    """Return a copy of ``leg`` with its instruction's open/close
+    suffix replaced.
+
+    ``effect`` is "open" or "close". Idempotent: a leg already in the
+    requested effect comes back unchanged.
+    """
+    target = "_TO_CLOSE" if effect == "close" else "_TO_OPEN"
+    base = leg.instruction.split("_TO_", 1)[0]  # "BUY" or "SELL"
+    return ParsedLeg(
+        instruction=f"{base}{target}",
+        quantity=leg.quantity,
+        underlying=leg.underlying,
+        expiry=leg.expiry,
+        option_type=leg.option_type,
+        strike=leg.strike,
+    )
 
 
 def _expand_legs(

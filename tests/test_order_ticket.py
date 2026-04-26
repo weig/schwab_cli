@@ -280,3 +280,78 @@ def test_osi_strike_rounds_cents():
     a = to_osi("AMZN", date(2026, 5, 1), "PUT", 262.500001)
     b = to_osi("AMZN", date(2026, 5, 1), "PUT", 262.5)
     assert a == b
+
+
+# ---- optional [TO OPEN] / [TO CLOSE] / [AUTO] marker --------------------
+
+
+def test_to_close_marker_rewrites_instruction_to_close():
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [TO CLOSE]"
+    )
+    assert t.legs[0].instruction == "BUY_TO_CLOSE"
+
+
+def test_to_open_marker_keeps_default_open():
+    """[TO OPEN] is informational — the default already produces *_TO_OPEN
+    so this just round-trips the instruction unchanged."""
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [TO OPEN]"
+    )
+    assert t.legs[0].instruction == "BUY_TO_OPEN"
+
+
+def test_auto_marker_keeps_default_open():
+    """[AUTO] is the explicit "let the pipeline decide" marker — same
+    effect as omitting the bracket entirely."""
+    t = parse_ticket(
+        "SELL -1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [AUTO]"
+    )
+    assert t.legs[0].instruction == "SELL_TO_OPEN"
+
+
+def test_marker_is_case_insensitive():
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [to close]"
+    )
+    assert t.legs[0].instruction == "BUY_TO_CLOSE"
+
+
+def test_to_close_marker_applies_to_every_leg_of_a_vertical():
+    t = parse_ticket(
+        "BUY +1 VERTICAL AMZN 100 1 MAY 26 260/255 CALL @0.85 LMT [TO CLOSE]"
+    )
+    instructions = {leg.instruction for leg in t.legs}
+    assert instructions == {"BUY_TO_CLOSE", "SELL_TO_CLOSE"}
+
+
+def test_marker_with_extra_inner_whitespace_accepted():
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [  TO   CLOSE  ]"
+    )
+    assert t.legs[0].instruction == "BUY_TO_CLOSE"
+
+
+def test_no_marker_is_default_open():
+    """Sanity check: no bracket → unchanged behavior."""
+    t = parse_ticket(
+        "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT"
+    )
+    assert t.legs[0].instruction == "BUY_TO_OPEN"
+
+
+def test_two_markers_rejected_as_ambiguous():
+    with pytest.raises(TicketParseError, match="multiple position-effect"):
+        parse_ticket(
+            "BUY +1 AMZN 100 15 JAN 27 190 PUT @5.70 LMT [TO CLOSE] [AUTO]"
+        )
+
+
+def test_marker_on_equity_is_ignored():
+    """Marker has no leg-level effect on equity (no open/close concept).
+    Parser just accepts and drops it so a copy/pasted TOS string with a
+    stray marker doesn't error out."""
+    t = parse_ticket("BUY +100 NVDA @200 LMT [TO CLOSE]")
+    assert t.order_type == "LIMIT"
+    assert t.quantity == 100
+    assert t.legs == ()  # equity tickets carry no option legs
