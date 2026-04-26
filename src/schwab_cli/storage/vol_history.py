@@ -370,3 +370,33 @@ def record_extended_snapshot(
             hv_30d, summary_blob,
         ),
     )
+
+
+def read_atm_iv_30d_per_day(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    lookback_days: int,
+) -> list[float]:
+    """Like :func:`read_recent_per_day` but reads ``atm_iv_30d`` and
+    skips NULL rows.
+
+    Same NY-trading-day bucketing — last write wins. Returned in
+    chronological order, trimmed to ``lookback_days`` entries.
+    """
+    rows = conn.execute(
+        """
+        SELECT captured_at_ms, atm_iv_30d
+        FROM vol_snapshots
+        WHERE symbol = ? AND atm_iv_30d IS NOT NULL
+        ORDER BY captured_at_ms ASC
+        """,
+        (symbol,),
+    ).fetchall()
+    per_day: dict[str, float] = {}
+    for row in rows:
+        ts = datetime.fromtimestamp(row["captured_at_ms"] / 1000, tz=timezone.utc)
+        day = ts.astimezone(_NY).date().isoformat()
+        per_day[day] = row["atm_iv_30d"]
+    days = sorted(per_day.keys())[-lookback_days:]
+    return [per_day[d] for d in days]

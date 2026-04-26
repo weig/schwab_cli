@@ -173,3 +173,48 @@ def test_record_extended_snapshot_writes_all_v3_fields(monkeypatch, tmp_path):
     assert row["atm_iv_30d"] == 0.35
     assert row["hv_30d"] == 0.28
     assert json.loads(row["raw_chain_summary"])["atm"]["30d"]["strike"] == 200.0
+
+
+def test_read_atm_iv_30d_per_day_dedupes_by_archive_date(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    from schwab_cli.storage.vol_history import (
+        record_extended_snapshot, read_atm_iv_30d_per_day,
+    )
+    with vol_history.connect() as conn:
+        # Two writes same NY day — last wins.
+        record_extended_snapshot(
+            conn, symbol="NVDA", spot=200.0, atm_iv=0.34,
+            atm_strike=200.0, atm_expiry="2026-05-15", atm_dte=30,
+            captured_at_ms=1700000000000,  # day 1 morning
+            atm_iv_30d=0.30,
+        )
+        record_extended_snapshot(
+            conn, symbol="NVDA", spot=201.0, atm_iv=0.34,
+            atm_strike=200.0, atm_expiry="2026-05-15", atm_dte=30,
+            captured_at_ms=1700010000000,  # day 1 evening (same NY day)
+            atm_iv_30d=0.32,
+        )
+        rows = read_atm_iv_30d_per_day(
+            conn, symbol="NVDA", lookback_days=10,
+        )
+    # Same NY day collapses to one entry.
+    assert len(rows) == 1
+    assert rows[0] == pytest.approx(0.32)
+
+
+def test_read_atm_iv_30d_skips_null(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    from schwab_cli.storage.vol_history import (
+        record_extended_snapshot, read_atm_iv_30d_per_day,
+    )
+    with vol_history.connect() as conn:
+        record_extended_snapshot(
+            conn, symbol="NVDA", spot=200.0, atm_iv=0.34,
+            atm_strike=200.0, atm_expiry="2026-05-15", atm_dte=30,
+            captured_at_ms=1700000000000,
+            atm_iv_30d=None,  # no v3 data
+        )
+        rows = read_atm_iv_30d_per_day(
+            conn, symbol="NVDA", lookback_days=10,
+        )
+    assert rows == []
