@@ -232,3 +232,58 @@ def _md(env: dict[str, Any]) -> str:
     lines.append(f"| IVP | {ivp_val} | {ivp_note} |")
     lines.append("")
     return "\n".join(lines) + "\n"
+
+
+# ---- v3 human renderer --------------------------------------------------
+
+
+def render_vol_human(snap: dict) -> str:
+    """Human-readable v3 vol snapshot — term structure, HV, skew,
+    plus IVR/IVP source annotation.
+
+    ``snap`` is the dict returned by the v3 vol command (after the
+    3-tier fallback computes ``ivr_ivp``).
+    """
+    lines = [
+        f"{snap['symbol']}  vol snapshot — {snap['as_of']} (NY)",
+        f"  Spot:        {snap['spot']:.2f}",
+        f"  Front IV:    {snap['atm_iv']*100:.2f}% (DTE {snap.get('atm_dte', '—')})",
+    ]
+    for tenor in (30, 60, 90):
+        v = snap.get(f"atm_iv_{tenor}d")
+        if v is not None:
+            lines.append(f"  ATM IV {tenor}d:  {v*100:.2f}%")
+        else:
+            lines.append(f"  ATM IV {tenor}d:  —")
+    hv = snap.get("hv_30d")
+    if hv is not None:
+        lines.append(f"  HV  30d:     {hv*100:.2f}%")
+    else:
+        lines.append(f"  HV  30d:     —")
+    rr = snap.get("ivr_ivp", {})
+    if rr.get("ivr") is not None:
+        suffix = " ⚠ backfilled" if rr.get("backfilled") else ""
+        lines.append(
+            f"  IV Rank:     {rr['ivr']:.1f}%        "
+            f"(252d, {rr['source']}, {rr['n_days']} days{suffix})"
+        )
+        lines.append(
+            f"  IV %ile:     {rr['ivp']:.1f}%        "
+            f"(252d, {rr['source']}, {rr['n_days']} days{suffix})"
+        )
+    else:
+        lines.append("  IV Rank:     — (low history)")
+        lines.append("  IV %ile:     — (low history)")
+    for tenor in (30, 60, 90):
+        p = snap.get(f"iv_25d_put_{tenor}d")
+        c = snap.get(f"iv_25d_call_{tenor}d")
+        if p is not None and c is not None:
+            pts = (p - c) * 100
+            sign = "+" if pts >= 0 else "−"
+            lines.append(
+                f"  Skew  {tenor}d:   {sign}{abs(pts):.1f} vol pts "
+                f"(25Δ put − 25Δ call)"
+            )
+        else:
+            lines.append(f"  Skew  {tenor}d:   —")
+    return "\n".join(lines)
