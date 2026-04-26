@@ -169,3 +169,40 @@ def pick_atm_contract(
             "iv": sum(ivs) / len(ivs),
         }
     return None
+
+
+# ---- term-structure interpolation -------------------------------------
+
+
+def interp_iv_in_variance(
+    curve: list[tuple[int, float]],
+    target_dte: int,
+) -> float | None:
+    """Variance-linear interpolation between bracketing expiries.
+
+    ``curve`` is ``[(dte, iv), ...]`` sorted by ``dte``; ``iv`` is a
+    decimal (0.34 = 34%). Returns ``None`` if ``target_dte`` is outside
+    ``[curve[0][0], curve[-1][0]]`` — we never extrapolate.
+
+    The interpolation is linear in implied variance ``v(t) = iv² · t``.
+    At target ``t``: ``v(t) = lerp(v(d_lo), v(d_hi), t)``, then
+    ``iv(t) = sqrt(v(t) / t)``. This is the standard term-structure
+    interpolation; linear-in-IV biases the front.
+    """
+    if not curve:
+        return None
+    if target_dte < curve[0][0] or target_dte > curve[-1][0]:
+        return None
+    for i in range(len(curve)):
+        d, iv = curve[i]
+        if d == target_dte:
+            return iv
+        if i == 0:
+            continue
+        d_prev, iv_prev = curve[i - 1]
+        if d_prev <= target_dte <= d:
+            v_lo = iv_prev * iv_prev * d_prev
+            v_hi = iv * iv * d
+            v_t = v_lo + (v_hi - v_lo) * (target_dte - d_prev) / (d - d_prev)
+            return math.sqrt(v_t / target_dte)
+    return None
