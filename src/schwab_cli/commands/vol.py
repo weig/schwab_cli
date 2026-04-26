@@ -23,8 +23,10 @@ from schwab_cli import config as config_module
 from schwab_cli.analytics.bs import implied_vol
 from schwab_cli.analytics.vol import (
     aggregate_pc,
+    interp_iv_in_variance,
     percentile_rank,
     pick_atm_contract,
+    pick_atm_curve,
     realized_vol,
     rolling_realized_vol,
 )
@@ -246,9 +248,17 @@ def run(
     # from the HV calculation.
     ivp_series_tagged: list[tuple[float, str]] = []
     storage_error: str | None = None
+    ivr_ivp: dict = {
+        "ivr": None, "ivp": None, "n_days": 0,
+        "source": "insufficient", "backfilled": False, "low_history": True,
+    }
     # What gets recorded as "today's observation" must match the reference
     # contract the backfill uses; otherwise the IVP series mixes tenors.
     snapshot_contract = ivp_ref if (ivp_ref and ivp_ref.get("iv") is not None) else atm
+    # Compute the 30-day constant-maturity ATM IV from today's chain for
+    # the tier-1 IVR/IVP path.
+    atm_curve = pick_atm_curve(expiries, spot)
+    interp_30d = interp_iv_in_variance(atm_curve, 30)
     try:
         with vol_store_connect() as conn:
             if (
@@ -302,6 +312,17 @@ def run(
             ivp_series_tagged = read_recent_per_day_with_source(
                 conn, symbol=under, lookback_days=ivp_lookback
             )
+            # 3-tier IVR/IVP: prefer atm_iv_30d series; fall back to
+            # legacy atm_iv; tier-3 delegates backfill to the same
+            # function used above (no-op if already ran this invocation).
+            ivr_ivp = compute_iv_rank_and_percentile(
+                conn,
+                symbol=under,
+                today_iv_30d=interp_30d,
+                today_atm_iv=atm["iv"] if atm and atm.get("iv") is not None else None,
+                lookback=ivp_lookback,
+                backfill_callable=None,  # backfill already handled above
+            )
     except sqlite3.Error as e:
         storage_error = str(e)
 
@@ -351,6 +372,7 @@ def run(
         },
         "pc": pc,
         "ivp": ivp,
+        "ivr_ivp": ivr_ivp,
     }
 
     if storage_error:
