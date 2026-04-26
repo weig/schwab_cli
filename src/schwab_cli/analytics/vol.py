@@ -211,6 +211,27 @@ def pick_atm_curve(
     return out
 
 
+# ---- wing tenor selector ---------------------------------------------
+
+
+def closest_dte_expiry(
+    expiries: list[dict],
+    target_dte: int,
+) -> dict | None:
+    """Pick the expiry whose ``dte`` is closest to ``target_dte``.
+
+    Used for 25Δ wing selection (we don't interpolate wings — picking
+    25Δ across two interpolated tenors gets murky). Ties broken by
+    lower DTE (more liquid).
+    """
+    if not expiries:
+        return None
+    return min(
+        expiries,
+        key=lambda e: (abs((e.get("dte") or 0) - target_dte), e.get("dte") or 0),
+    )
+
+
 # ---- term-structure interpolation -------------------------------------
 
 

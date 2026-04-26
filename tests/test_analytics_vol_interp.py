@@ -110,3 +110,30 @@ def test_pick_atm_curve_sorted_by_dte():
     e3 = _expiry(30, 500, [(100, 500, 0.35, 0.35)])
     out = pick_atm_curve([e1, e2, e3], spot=100.0)
     assert [d for d, _ in out] == [7, 30, 60]
+
+
+from schwab_cli.analytics.vol import closest_dte_expiry
+
+
+def test_closest_dte_picks_nearest():
+    expiries = [
+        {"expiry": "a", "dte": 7, "contracts": []},
+        {"expiry": "b", "dte": 32, "contracts": []},
+        {"expiry": "c", "dte": 60, "contracts": []},
+    ]
+    assert closest_dte_expiry(expiries, target_dte=30)["expiry"] == "b"
+    assert closest_dte_expiry(expiries, target_dte=90)["expiry"] == "c"
+    assert closest_dte_expiry(expiries, target_dte=1)["expiry"] == "a"
+
+
+def test_closest_dte_breaks_tie_by_dte_ascending():
+    expiries = [
+        {"expiry": "x", "dte": 25, "contracts": []},
+        {"expiry": "y", "dte": 35, "contracts": []},
+    ]
+    # Both 5 days off — pick lower DTE (more liquid front side).
+    assert closest_dte_expiry(expiries, target_dte=30)["expiry"] == "x"
+
+
+def test_closest_dte_empty_returns_none():
+    assert closest_dte_expiry([], target_dte=30) is None
