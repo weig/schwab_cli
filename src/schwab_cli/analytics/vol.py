@@ -22,6 +22,7 @@ from statistics import stdev
 from typing import Any
 
 _TRADING_DAYS_PER_YEAR = 252
+_RISK_FREE_RATE_FALLBACK = 0.05  # 3-month T-bill approximation
 
 
 # ---- log returns + HV ---------------------------------------------------
@@ -267,3 +268,81 @@ def interp_iv_in_variance(
             v_t = v_lo + (v_hi - v_lo) * (target_dte - d_prev) / (d - d_prev)
             return math.sqrt(v_t / target_dte)
     return None
+
+
+# ---- 25Δ wing picker --------------------------------------------------
+
+
+def pick_25d_wing(
+    expiry: dict,
+    *,
+    side: str,
+    target_delta: float,
+    spot: float | None = None,
+    atm_iv: float | None = None,
+    max_delta_distance: float = 0.10,
+) -> dict | None:
+    """Pick the contract on ``side`` whose delta is closest to ``target_delta``.
+
+    Reads delta from each contract directly. If a contract lacks delta
+    AND ``spot`` and ``atm_iv`` are provided, BS-derive it (rate
+    approximation taken from the existing :data:`vol._RISK_FREE_RATE_FALLBACK`).
+    The fallback path is rarely needed — Schwab returns deltas.
+
+    Returns ``{strike, expiry, dte, iv, delta}`` or ``None`` if no
+    contract on ``side`` has ``|delta - target_delta| < max_delta_distance``.
+    """
+    contracts = expiry.get("contracts") or []
+    candidates = [c for c in contracts if c.get("side") == side]
+    scored: list[tuple[float, dict]] = []
+    for c in candidates:
+        delta = c.get("delta")
+        if delta is None and spot is not None and atm_iv is not None:
+            delta = _bs_delta_fallback(
+                c, spot=spot, atm_iv=atm_iv,
+                dte=expiry.get("dte") or 30,
+                side=side,
+            )
+        if delta is None:
+            continue
+        scored.append((abs(delta - target_delta), {
+            "strike":  c.get("strike"),
+            "expiry":  expiry.get("expiry"),
+            "dte":     expiry.get("dte"),
+            "iv":      c.get("iv"),
+            "delta":   delta,
+        }))
+    if not scored:
+        return None
+    distance, best = min(scored, key=lambda x: x[0])
+    if distance >= max_delta_distance:
+        return None
+    return best
+
+
+def _bs_delta_fallback(
+    contract: dict,
+    *,
+    spot: float,
+    atm_iv: float,
+    dte: int,
+    side: str,
+) -> float | None:
+    """BS delta with rate=_RISK_FREE_RATE_FALLBACK, dividend=0.
+
+    Worst-case bias for a high-yielder is ~0.005 in delta — tolerable
+    for picking the 25Δ wing, which has natural ±0.05 strike-spacing
+    granularity anyway.
+    """
+    strike = contract.get("strike")
+    if strike is None or strike <= 0 or spot <= 0 or atm_iv <= 0 or dte <= 0:
+        return None
+    t = dte / 365.0
+    sigma_sqrt_t = atm_iv * math.sqrt(t)
+    if sigma_sqrt_t <= 0:
+        return None
+    rate = _RISK_FREE_RATE_FALLBACK
+    d1 = (math.log(spot / strike) + (rate + 0.5 * atm_iv ** 2) * t) / sigma_sqrt_t
+    # N(d1) via erfc.
+    n_d1 = 0.5 * math.erfc(-d1 / math.sqrt(2.0))
+    return n_d1 if side == "C" else (n_d1 - 1.0)

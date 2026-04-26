@@ -137,3 +137,55 @@ def test_closest_dte_breaks_tie_by_dte_ascending():
 
 def test_closest_dte_empty_returns_none():
     assert closest_dte_expiry([], target_dte=30) is None
+
+
+from schwab_cli.analytics.vol import pick_25d_wing
+
+
+def test_pick_25d_wing_uses_provided_delta():
+    expiry = {
+        "expiry": "x", "dte": 30,
+        "contracts": [
+            {"strike": 90, "side": "P", "delta": -0.10, "iv": 0.40},
+            {"strike": 95, "side": "P", "delta": -0.25, "iv": 0.35},  # winner
+            {"strike": 98, "side": "P", "delta": -0.40, "iv": 0.32},
+        ],
+    }
+    out = pick_25d_wing(expiry, side="P", target_delta=-0.25, spot=100.0)
+    assert out["strike"] == 95
+    assert out["iv"] == pytest.approx(0.35)
+
+
+def test_pick_25d_wing_picks_closest_delta():
+    expiry = {
+        "expiry": "x", "dte": 30,
+        "contracts": [
+            {"strike": 110, "side": "C", "delta": +0.20, "iv": 0.31},
+            {"strike": 108, "side": "C", "delta": +0.27, "iv": 0.30},  # closest to 0.25
+            {"strike": 105, "side": "C", "delta": +0.40, "iv": 0.29},
+        ],
+    }
+    out = pick_25d_wing(expiry, side="C", target_delta=+0.25, spot=100.0)
+    assert out["strike"] == 108
+
+
+def test_pick_25d_wing_returns_none_when_no_side_match():
+    expiry = {"expiry": "x", "dte": 30,
+              "contracts": [{"strike": 95, "side": "P", "delta": None, "iv": 0.35}]}
+    # No deltas at all and no spot/atm_iv to BS-derive.
+    out = pick_25d_wing(expiry, side="P", target_delta=-0.25,
+                        spot=None, atm_iv=None)
+    assert out is None
+
+
+def test_pick_25d_wing_filters_too_far():
+    """If no contract has |delta - target| < 0.10 the wing is too thin.
+    Return None rather than picking a useless 0.05Δ contract."""
+    expiry = {
+        "expiry": "x", "dte": 30,
+        "contracts": [
+            {"strike": 80, "side": "P", "delta": -0.05, "iv": 0.50},
+        ],
+    }
+    out = pick_25d_wing(expiry, side="P", target_delta=-0.25, spot=100.0)
+    assert out is None
