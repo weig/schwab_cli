@@ -87,3 +87,125 @@ def list_active_subscriptions(
             (group_name,),
         ).fetchall()
     return rows
+
+
+# ---- supported indices ------------------------------------------------
+
+SUPPORTED_INDICES = frozenset({"SPX", "DJI", "NQ", "RUT"})
+
+
+# ---- index_subscriptions ----------------------------------------------
+
+
+def subscribe_index(
+    conn: sqlite3.Connection,
+    *,
+    index_name: str,
+    group_name: str,
+    captured_at_ms: int | None = None,
+) -> None:
+    if index_name not in SUPPORTED_INDICES:
+        raise ValueError(
+            f"{index_name!r} not in supported index set "
+            f"{sorted(SUPPORTED_INDICES)}"
+        )
+    if captured_at_ms is None:
+        captured_at_ms = _now_ms()
+    conn.execute(
+        """
+        INSERT INTO index_subscriptions
+          (index_name, group_name, subscribed_at, unsubscribed_at)
+        VALUES (?, ?, ?, NULL)
+        ON CONFLICT (index_name, group_name) DO UPDATE SET
+          subscribed_at   = excluded.subscribed_at,
+          unsubscribed_at = NULL
+        WHERE index_subscriptions.unsubscribed_at IS NOT NULL
+        """,
+        (index_name, group_name, captured_at_ms),
+    )
+
+
+def unsubscribe_index(
+    conn: sqlite3.Connection,
+    *,
+    index_name: str,
+    group_name: str,
+    captured_at_ms: int | None = None,
+) -> None:
+    if captured_at_ms is None:
+        captured_at_ms = _now_ms()
+    conn.execute(
+        """
+        UPDATE index_subscriptions SET unsubscribed_at = ?
+        WHERE index_name = ? AND group_name = ?
+          AND unsubscribed_at IS NULL
+        """,
+        (captured_at_ms, index_name, group_name),
+    )
+
+
+def list_active_index_subscriptions(
+    conn: sqlite3.Connection,
+    *,
+    group_name: str | None = None,
+) -> list[sqlite3.Row]:
+    if group_name is None:
+        return conn.execute(
+            "SELECT * FROM index_subscriptions WHERE unsubscribed_at IS NULL "
+            "ORDER BY index_name"
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM index_subscriptions "
+        "WHERE unsubscribed_at IS NULL AND group_name = ? "
+        "ORDER BY index_name",
+        (group_name,),
+    ).fetchall()
+
+
+# ---- position subscriptions -------------------------------------------
+
+
+def subscribe_position(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+    account_hash_last4: str,
+    captured_at_ms: int | None = None,
+) -> None:
+    if captured_at_ms is None:
+        captured_at_ms = _now_ms()
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+          (symbol, group_name, source, source_key,
+           subscribed_at, unsubscribed_at)
+        VALUES (?, ?, 'position', ?, ?, NULL)
+        ON CONFLICT (symbol, group_name, source, source_key) DO UPDATE SET
+          subscribed_at   = excluded.subscribed_at,
+          unsubscribed_at = NULL
+        WHERE subscriptions.unsubscribed_at IS NOT NULL
+        """,
+        (symbol, group_name, account_hash_last4, captured_at_ms),
+    )
+
+
+def unsubscribe_position(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+    account_hash_last4: str,
+    captured_at_ms: int | None = None,
+) -> None:
+    if captured_at_ms is None:
+        captured_at_ms = _now_ms()
+    conn.execute(
+        """
+        UPDATE subscriptions SET unsubscribed_at = ?
+        WHERE symbol = ? AND group_name = ?
+          AND source = 'position' AND source_key = ?
+          AND unsubscribed_at IS NULL
+        """,
+        (captured_at_ms, symbol, group_name, account_hash_last4),
+    )
