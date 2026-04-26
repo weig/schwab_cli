@@ -36,3 +36,47 @@ def test_v3_schema_version_bumped(monkeypatch, tmp_path):
     with vol_history.connect() as conn:
         v = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     assert v == 3
+
+
+import pytest
+
+
+def test_subscriptions_table_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    with vol_history.connect() as conn:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(subscriptions)"
+        ).fetchall()}
+    assert cols == {
+        "symbol", "group_name", "source", "source_key",
+        "subscribed_at", "unsubscribed_at",
+    }
+
+
+def test_subscriptions_pk_is_composite(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    with vol_history.connect() as conn:
+        # Same composite PK ⇒ 2nd insert must IGNORE.
+        conn.execute(
+            "INSERT INTO subscriptions VALUES (?,?,?,?,?,?)",
+            ("NVDA", "volatility", "equity", "", 1000, None),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO subscriptions VALUES (?,?,?,?,?,?)",
+            ("NVDA", "volatility", "equity", "", 2000, None),
+        )
+        n = conn.execute(
+            "SELECT COUNT(*) FROM subscriptions WHERE symbol='NVDA'"
+        ).fetchone()[0]
+    assert n == 1
+
+
+def test_index_subscriptions_table_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    with vol_history.connect() as conn:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(index_subscriptions)"
+        ).fetchall()}
+    assert cols == {
+        "index_name", "group_name", "subscribed_at", "unsubscribed_at",
+    }

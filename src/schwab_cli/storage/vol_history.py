@@ -48,6 +48,28 @@ CREATE TABLE IF NOT EXISTS vol_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_vol_lookup
     ON vol_snapshots (symbol, captured_at_ms);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+    symbol           TEXT    NOT NULL,
+    group_name       TEXT    NOT NULL,
+    source           TEXT    NOT NULL,
+    source_key       TEXT    NOT NULL DEFAULT '',
+    subscribed_at    INTEGER NOT NULL,
+    unsubscribed_at  INTEGER,
+    PRIMARY KEY (symbol, group_name, source, source_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_subs_active
+    ON subscriptions (group_name)
+    WHERE unsubscribed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS index_subscriptions (
+    index_name       TEXT    NOT NULL,
+    group_name       TEXT    NOT NULL,
+    subscribed_at    INTEGER NOT NULL,
+    unsubscribed_at  INTEGER,
+    PRIMARY KEY (index_name, group_name)
+);
 """
 
 # Allowed values for the `source` column.
