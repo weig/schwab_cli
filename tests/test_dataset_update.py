@@ -115,7 +115,7 @@ def test_indices_update_skips_rut_with_todo_log(conn, monkeypatch):
     assert "TODO" in summary["RUT"]["error"]
 
 
-from schwab_cli.dataset.update import sync_account_positions
+from schwab_cli.dataset.update import sync_account_positions, run_volatility_update
 
 
 def test_sync_account_positions_inserts_new_holdings(conn, monkeypatch):
@@ -178,3 +178,119 @@ def test_sync_account_positions_soft_deletes_closed(conn, monkeypatch):
         "WHERE symbol='OLD' AND source='position'"
     ).fetchone()
     assert closed_row["unsubscribed_at"] == 2000
+
+
+# ---- run_volatility_update tests --------------------------------------
+
+from datetime import datetime, timezone
+from pathlib import Path
+import json
+
+from schwab_cli.dataset.store import write_ticker_state, read_ticker_state
+
+
+def _ms(year, month, day, hour=22):
+    return int(datetime(year, month, day, hour, tzinfo=timezone.utc)
+               .timestamp() * 1000)
+
+
+def test_run_volatility_update_samples_active_writes_row(
+    conn, monkeypatch
+):
+    from schwab_cli.dataset.store import subscribe_equity
+    subscribe_equity(conn, symbol="NVDA", group_name="volatility",
+                     captured_at_ms=_ms(2026, 1, 1))
+    write_ticker_state(
+        conn, symbol="NVDA", group_name="volatility",
+        tier="GRACE", tier_since=_ms(2026, 1, 1),
+        consecutive_days_below=0, last_evaluated_at=_ms(2026, 1, 1),
+    )
+
+    fake_chain = json.loads(
+        (Path(__file__).parent / "fixtures" / "chain_nvda_full.json")
+        .read_text()
+    )
+
+    def fake_get_chain(client, symbol, **kwargs):
+        return fake_chain
+
+    def fake_get_history(client, symbol, **kwargs):
+        return {"candles": [{"close": 200.0 + i * 0.1}
+                           for i in range(60)]}
+
+    monkeypatch.setattr(
+        "schwab_cli.dataset.update.get_chain", fake_get_chain
+    )
+    monkeypatch.setattr(
+        "schwab_cli.dataset.update.get_history", fake_get_history
+    )
+
+    summary = run_volatility_update(
+        conn, client=None, group_name="volatility",
+        now_ms=_ms(2026, 1, 5),
+        accounts=[],
+    )
+    assert summary["sampled"] == ["NVDA"]
+    assert summary["skipped"] == []
+
+    row = conn.execute(
+        "SELECT * FROM vol_snapshots WHERE symbol='NVDA'"
+    ).fetchone()
+    assert row is not None
+    assert row["atm_iv_30d"] is not None
+
+
+def test_run_volatility_update_skips_frozen(conn, monkeypatch):
+    from schwab_cli.dataset.store import subscribe_equity
+    subscribe_equity(conn, symbol="NVDA", group_name="volatility")
+    write_ticker_state(
+        conn, symbol="NVDA", group_name="volatility",
+        tier="FROZEN", tier_since=_ms(2026, 1, 1),
+        consecutive_days_below=99, last_evaluated_at=_ms(2026, 1, 1),
+    )
+
+    summary = run_volatility_update(
+        conn, client=None, group_name="volatility",
+        now_ms=_ms(2026, 4, 15),
+        accounts=[],
+    )
+    assert "NVDA" in summary["skipped"]
+    assert summary["sampled"] == []
+
+
+def test_run_volatility_update_watch_only_on_monday(conn, monkeypatch):
+    from schwab_cli.dataset.store import subscribe_equity
+    subscribe_equity(conn, symbol="NVDA", group_name="volatility")
+    write_ticker_state(
+        conn, symbol="NVDA", group_name="volatility",
+        tier="WATCH", tier_since=_ms(2026, 1, 1),
+        consecutive_days_below=8, last_evaluated_at=_ms(2026, 1, 1),
+    )
+
+    # Tuesday 2026-04-14 — WATCH should be skipped.
+    summary = run_volatility_update(
+        conn, client=None, group_name="volatility",
+        now_ms=_ms(2026, 4, 14),
+        accounts=[],
+    )
+    assert summary["skipped"] == ["NVDA"]
+
+    # Monday 2026-04-13 — WATCH gets sampled.
+    fake_chain = json.loads(
+        (Path(__file__).parent / "fixtures" / "chain_nvda_full.json")
+        .read_text()
+    )
+    monkeypatch.setattr(
+        "schwab_cli.dataset.update.get_chain",
+        lambda client, sym, **kw: fake_chain,
+    )
+    monkeypatch.setattr(
+        "schwab_cli.dataset.update.get_history",
+        lambda client, sym, **kw: {"candles": [{"close": 200.0}] * 60},
+    )
+    summary = run_volatility_update(
+        conn, client=None, group_name="volatility",
+        now_ms=_ms(2026, 4, 13),
+        accounts=[],
+    )
+    assert summary["sampled"] == ["NVDA"]

@@ -12,15 +12,28 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from schwab_cli.api.accounts import get_account
+from schwab_cli.api.chains import get_chain
+from schwab_cli.api.history import get_history
+from schwab_cli.analytics.tier import TierState, Thresholds, resolve_tier
+from schwab_cli.dataset.config import load_config_or_default
 from schwab_cli.dataset.indices import fetch_index_members
 from schwab_cli.dataset.store import (
     list_active_index_subscriptions,
+    list_active_subscriptions,
+    read_ticker_state,
+    write_ticker_state,
+    sources_for_symbol,
+    last_close_at_for_symbol,
 )
+from schwab_cli.dataset.volatility import sample_volatility
+from schwab_cli.storage.vol_history import record_extended_snapshot
 
 
 _log = logging.getLogger(__name__)
@@ -186,3 +199,189 @@ def _current_position_underlyings(
         (source_key, group_name),
     ).fetchall()
     return {r["symbol"] for r in rows}
+
+
+# ---- daily volatility cron --------------------------------------------
+
+_NY = ZoneInfo("America/New_York")
+
+# How far back to fetch price history for HV computation.
+_HISTORY_LOOKBACK_DAYS = 110  # ~90 trading days + buffer
+
+
+def run_volatility_update(
+    conn: sqlite3.Connection,
+    *,
+    client: Any,
+    group_name: str = "volatility",
+    now_ms: int,
+    accounts: list[str],
+) -> dict[str, Any]:
+    """Daily volatility cron.
+
+    Steps:
+      1. Sync each account's position rows.
+      2. Build the working set from active subscriptions.
+      3. Decide what to sample (skip FROZEN; WATCH only Monday NY).
+      4. Sample — write extended snapshot + return bundle.
+      5. Re-evaluate tier; persist.
+    """
+    cfg = load_config_or_default()
+
+    # Step 1 — reconcile account positions.
+    pos_summary: dict[str, dict] = {}
+    for acct in accounts:
+        pos_summary[acct] = sync_account_positions(
+            conn, client=client, account_hash=acct,
+            group_name=group_name, now_ms=now_ms,
+        )
+
+    # Step 2 — build working set.
+    active_rows = list_active_subscriptions(conn, group_name=group_name)
+    symbols = sorted({r["symbol"] for r in active_rows})
+
+    # Step 3 — partition.
+    now_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    is_monday = now_dt.astimezone(_NY).weekday() == 0
+    is_trading_day = now_dt.astimezone(_NY).weekday() < 5
+
+    sampled: list[str] = []
+    skipped: list[str] = []
+    transitions: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+
+    for sym in symbols:
+        state_row = read_ticker_state(conn, symbol=sym, group_name=group_name)
+        if state_row is None:
+            tier = "GRACE"
+            tier_since = now_ms
+            cdb = 0
+        else:
+            tier = state_row["tier"]
+            tier_since = state_row["tier_since"]
+            cdb = state_row["consecutive_days_below"]
+
+        if tier == "FROZEN":
+            skipped.append(sym)
+            continue
+        if tier == "WATCH" and not is_monday:
+            skipped.append(sym)
+            continue
+
+        # Step 4 — sample.
+        try:
+            chain = get_chain(client, sym, contract_type="ALL", strike_count=60)
+            hist_end = now_dt
+            hist_start = hist_end - timedelta(days=_HISTORY_LOOKBACK_DAYS)
+            hist = get_history(
+                client, sym,
+                frequency_type="daily",
+                frequency=1,
+                start=hist_start,
+                end=hist_end,
+            )
+            closes = [
+                c["close"] for c in (hist.get("candles") or [])
+                if c.get("close") is not None
+            ]
+            bundle = sample_volatility(chain=chain, underlying_closes=closes)
+        except Exception as e:
+            errors.append({"symbol": sym, "error": str(e)})
+            continue
+
+        record_extended_snapshot(
+            conn,
+            symbol=sym,
+            spot=bundle["spot"],
+            atm_iv=bundle["atm_iv"] or 0.0,
+            atm_strike=bundle["atm_strike"] or bundle["spot"],
+            atm_expiry=bundle["atm_expiry"] or "",
+            atm_dte=bundle["atm_dte"] or 30,
+            captured_at_ms=now_ms,
+            atm_iv_30d=bundle["atm_iv_30d"],
+            atm_iv_60d=bundle["atm_iv_60d"],
+            atm_iv_90d=bundle["atm_iv_90d"],
+            iv_25d_put_30d=bundle.get("iv_25d_put_30d"),
+            iv_25d_call_30d=bundle.get("iv_25d_call_30d"),
+            iv_25d_put_60d=bundle.get("iv_25d_put_60d"),
+            iv_25d_call_60d=bundle.get("iv_25d_call_60d"),
+            iv_25d_put_90d=bundle.get("iv_25d_put_90d"),
+            iv_25d_call_90d=bundle.get("iv_25d_call_90d"),
+            hv_30d=bundle.get("hv_30d"),
+            raw_chain_summary=bundle.get("raw_chain_summary"),
+        )
+        sampled.append(sym)
+
+        # Step 5 — tier re-evaluation.
+        chain_volume = _today_chain_volume(chain)
+        front2_oi = _front2_oi(chain)
+        threshold_pass = (
+            chain_volume >= cfg["thresholds"]["indices"]["active_min_chain_volume"]
+            or front2_oi >= cfg["thresholds"]["indices"]["active_min_front2_oi"]
+        )
+        sources = sources_for_symbol(conn, symbol=sym, group_name=group_name)
+        last_close_ms = last_close_at_for_symbol(
+            conn, symbol=sym, group_name=group_name
+        )
+        last_close_dt = (
+            datetime.fromtimestamp(last_close_ms / 1000, tz=timezone.utc)
+            if last_close_ms is not None else None
+        )
+        thr = Thresholds(
+            active_min_chain_volume=cfg["thresholds"]["indices"]["active_min_chain_volume"],
+            active_min_front2_oi=cfg["thresholds"]["indices"]["active_min_front2_oi"],
+            watch_demote_after_trading_days=cfg["thresholds"]["indices"]["watch_demote_after_trading_days"],
+            frozen_demote_after_calendar_days=cfg["thresholds"]["indices"]["frozen_demote_after_calendar_days"],
+            position_watch_days=cfg["thresholds"]["position"]["watch_demote_after_calendar_days"],
+            position_frozen_days=cfg["thresholds"]["position"]["frozen_demote_after_calendar_days"],
+            grace_trading_days=cfg["thresholds"]["grace_trading_days"],
+        )
+        old = TierState(
+            tier=tier,
+            tier_since=datetime.fromtimestamp(tier_since / 1000, tz=timezone.utc),
+            consecutive_days_below=cdb,
+        )
+        new = resolve_tier(
+            old, sources=sources, now=now_dt,
+            threshold_pass=threshold_pass, is_trading_day=is_trading_day,
+            has_active_position=("position" in sources and last_close_dt is None),
+            last_close_at=last_close_dt, thr=thr,
+        )
+        if new.tier != old.tier:
+            transitions.append({"symbol": sym, "from": old.tier, "to": new.tier})
+        write_ticker_state(
+            conn,
+            symbol=sym, group_name=group_name,
+            tier=new.tier,
+            tier_since=int(new.tier_since.timestamp() * 1000),
+            consecutive_days_below=new.consecutive_days_below,
+            last_evaluated_at=now_ms,
+        )
+
+    return {
+        "sampled":     sampled,
+        "skipped":     skipped,
+        "transitions": transitions,
+        "errors":      errors,
+        "positions":   pos_summary,
+    }
+
+
+def _today_chain_volume(chain: dict) -> int:
+    total = 0
+    for exp in chain.get("expiries") or []:
+        for c in (exp.get("contracts") or []):
+            total += int(c.get("volume") or 0)
+    return total
+
+
+def _front2_oi(chain: dict) -> int:
+    expiries = sorted(
+        chain.get("expiries") or [],
+        key=lambda e: e.get("dte") or 99999,
+    )[:2]
+    total = 0
+    for exp in expiries:
+        for c in (exp.get("contracts") or []):
+            total += int(c.get("openInterest") or 0)
+    return total
