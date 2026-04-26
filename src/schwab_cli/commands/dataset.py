@@ -73,7 +73,7 @@ def subscribe(
                 subscribe_index(conn, index_name=target_str.strip().upper(),
                                 group_name=group)
         except ValueError as e:
-            typer.secho(str(e), fg=typer.colors.RED, err=True)
+            typer.secho(str(e), fg=typer.colors.RED)
             raise typer.Exit(code=2)
         typer.secho(
             f"subscribed index {target_str!r} → group={group}; "
