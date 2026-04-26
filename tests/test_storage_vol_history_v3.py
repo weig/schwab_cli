@@ -101,3 +101,48 @@ def test_archive_date_index_exists(monkeypatch, tmp_path):
             "SELECT name FROM sqlite_master WHERE type='index'"
         ).fetchall()}
     assert "idx_vol_archive_date" in names
+
+
+def test_wal_mode_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    with vol_history.connect() as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+
+
+def test_v2_data_survives_v3_migration(monkeypatch, tmp_path):
+    """A pre-existing v2 DB (legacy schema, source column added) should
+    keep its rows visible after v3 migrations."""
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    db_file = tmp_path / "vol_history.db"
+    # Hand-build a v2 DB.
+    conn = sqlite3.connect(str(db_file))
+    conn.executescript("""
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (2);
+        CREATE TABLE vol_snapshots (
+            captured_at_ms INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            spot REAL NOT NULL,
+            atm_iv REAL NOT NULL,
+            atm_strike REAL NOT NULL,
+            atm_expiry TEXT NOT NULL,
+            atm_dte INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'observed',
+            PRIMARY KEY (captured_at_ms, symbol)
+        );
+        INSERT INTO vol_snapshots VALUES
+          (1000, 'NVDA', 200.0, 0.34, 200.0, '2026-05-15', 30, 'observed');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Re-open via vol_history.connect() — runs v3 migration.
+    with vol_history.connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol, atm_iv, atm_iv_30d FROM vol_snapshots"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "NVDA"
+    assert rows[0]["atm_iv"] == 0.34
+    assert rows[0]["atm_iv_30d"] is None  # new column, not backfilled

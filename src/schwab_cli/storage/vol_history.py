@@ -105,6 +105,7 @@ def connect() -> Iterator[sqlite3.Connection]:
         pass
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
     try:
         _migrate(conn)
         yield conn
