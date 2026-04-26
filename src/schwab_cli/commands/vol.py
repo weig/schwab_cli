@@ -762,3 +762,94 @@ def _parse_iso_date(s: str) -> date | None:
         return date.fromisoformat(s)
     except ValueError:
         return None
+
+
+# ---- 3-tier IVR/IVP resolver -------------------------------------------
+
+
+def compute_iv_rank_and_percentile(
+    conn,
+    *,
+    symbol: str,
+    today_iv_30d: float | None,
+    today_atm_iv: float | None,
+    lookback: int = 252,
+    backfill_callable=None,
+) -> dict:
+    """Tier 1 → 2 → 3 IVR/IVP resolver.
+
+    ``backfill_callable`` is the function used to populate synthetic
+    rows on tier-3 fallback; in production it's
+    :func:`_backfill_synthetic_iv`. Tests pass ``None`` to skip the
+    network-touching step.
+    """
+    from schwab_cli.storage.vol_history import (
+        read_atm_iv_30d_per_day, read_recent_per_day_with_source,
+    )
+
+    # TIER 1.
+    if today_iv_30d is not None:
+        series = read_atm_iv_30d_per_day(
+            conn, symbol=symbol, lookback_days=lookback
+        )
+        if len(series) >= 120:
+            return {
+                "ivr":        _ivr_from(series, today_iv_30d),
+                "ivp":        _ivp_from(series, today_iv_30d),
+                "n_days":     len(series),
+                "source":     "atm_iv_30d",
+                "backfilled": False,
+            }
+
+    # TIER 2 / 3.
+    legacy = read_recent_per_day_with_source(
+        conn, symbol=symbol, lookback_days=lookback
+    )
+    backfilled = any(s == "synthetic" for _, s in legacy)
+    legacy_ivs = [iv for iv, _ in legacy]
+
+    if today_atm_iv is not None and len(legacy_ivs) >= 120:
+        return {
+            "ivr":        _ivr_from(legacy_ivs, today_atm_iv),
+            "ivp":        _ivp_from(legacy_ivs, today_atm_iv),
+            "n_days":     len(legacy_ivs),
+            "source":     "atm_iv (legacy + synthetic)" if backfilled
+                          else "atm_iv (legacy)",
+            "backfilled": backfilled,
+        }
+
+    if backfill_callable is not None:
+        backfill_callable()
+        legacy = read_recent_per_day_with_source(
+            conn, symbol=symbol, lookback_days=lookback
+        )
+        legacy_ivs = [iv for iv, _ in legacy]
+        if today_atm_iv is not None and len(legacy_ivs) >= 120:
+            return {
+                "ivr":        _ivr_from(legacy_ivs, today_atm_iv),
+                "ivp":        _ivp_from(legacy_ivs, today_atm_iv),
+                "n_days":     len(legacy_ivs),
+                "source":     "atm_iv (legacy + synthetic)",
+                "backfilled": True,
+            }
+
+    return {
+        "ivr":        None,
+        "ivp":        None,
+        "n_days":     len(legacy_ivs),
+        "source":     "insufficient",
+        "backfilled": backfilled,
+        "low_history": True,
+    }
+
+
+def _ivr_from(series: list[float], today: float) -> float:
+    lo, hi = min(series), max(series)
+    if hi <= lo:
+        return 50.0
+    return 100.0 * (today - lo) / (hi - lo)
+
+
+def _ivp_from(series: list[float], today: float) -> float:
+    from schwab_cli.analytics.vol import percentile_rank
+    return percentile_rank(series, today)
