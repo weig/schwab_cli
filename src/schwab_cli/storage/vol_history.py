@@ -309,3 +309,64 @@ def _recent_rows(conn: sqlite3.Connection, *, symbol: str) -> list[sqlite3.Row]:
         """,
         (symbol,),
     ).fetchall()
+
+
+def record_extended_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    spot: float,
+    atm_iv: float,
+    atm_strike: float,
+    atm_expiry: str,
+    atm_dte: int,
+    captured_at_ms: int | None = None,
+    source: str = SOURCE_OBSERVED,
+    atm_iv_30d: float | None = None,
+    atm_iv_60d: float | None = None,
+    atm_iv_90d: float | None = None,
+    iv_25d_put_30d: float | None = None,
+    iv_25d_call_30d: float | None = None,
+    iv_25d_put_60d: float | None = None,
+    iv_25d_call_60d: float | None = None,
+    iv_25d_put_90d: float | None = None,
+    iv_25d_call_90d: float | None = None,
+    hv_30d: float | None = None,
+    raw_chain_summary: dict | None = None,
+) -> None:
+    """v3-aware single-row insert.
+
+    Wraps :func:`record_snapshot`'s legacy columns and additionally
+    writes the v3 columns. Same INSERT OR IGNORE first-write-wins
+    contract on ``(captured_at_ms, symbol)``.
+    """
+    import json
+    if captured_at_ms is None:
+        captured_at_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    summary_blob = (
+        json.dumps(raw_chain_summary, separators=(",", ":"))
+        if raw_chain_summary is not None else None
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO vol_snapshots (
+            captured_at_ms, symbol, spot, atm_iv,
+            atm_strike, atm_expiry, atm_dte, source,
+            atm_iv_30d, atm_iv_60d, atm_iv_90d,
+            iv_25d_put_30d, iv_25d_call_30d,
+            iv_25d_put_60d, iv_25d_call_60d,
+            iv_25d_put_90d, iv_25d_call_90d,
+            hv_30d, raw_chain_summary
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            captured_at_ms, symbol, spot, atm_iv,
+            atm_strike, atm_expiry, atm_dte, source,
+            atm_iv_30d, atm_iv_60d, atm_iv_90d,
+            iv_25d_put_30d, iv_25d_call_30d,
+            iv_25d_put_60d, iv_25d_call_60d,
+            iv_25d_put_90d, iv_25d_call_90d,
+            hv_30d, summary_blob,
+        ),
+    )

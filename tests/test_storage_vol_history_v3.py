@@ -146,3 +146,30 @@ def test_v2_data_survives_v3_migration(monkeypatch, tmp_path):
     assert rows[0]["symbol"] == "NVDA"
     assert rows[0]["atm_iv"] == 0.34
     assert rows[0]["atm_iv_30d"] is None  # new column, not backfilled
+
+
+import json
+
+
+def test_record_extended_snapshot_writes_all_v3_fields(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    from schwab_cli.storage.vol_history import record_extended_snapshot
+    with vol_history.connect() as conn:
+        record_extended_snapshot(
+            conn,
+            symbol="NVDA", spot=200.0, atm_iv=0.34,
+            atm_strike=200.0, atm_expiry="2026-05-15", atm_dte=30,
+            captured_at_ms=1000,
+            atm_iv_30d=0.35, atm_iv_60d=0.36, atm_iv_90d=0.37,
+            iv_25d_put_30d=0.40, iv_25d_call_30d=0.30,
+            iv_25d_put_60d=0.42, iv_25d_call_60d=0.31,
+            iv_25d_put_90d=0.44, iv_25d_call_90d=0.32,
+            hv_30d=0.28,
+            raw_chain_summary={"atm": {"30d": {"strike": 200.0}}},
+        )
+        row = conn.execute(
+            "SELECT * FROM vol_snapshots WHERE symbol='NVDA'"
+        ).fetchone()
+    assert row["atm_iv_30d"] == 0.35
+    assert row["hv_30d"] == 0.28
+    assert json.loads(row["raw_chain_summary"])["atm"]["30d"]["strike"] == 200.0
