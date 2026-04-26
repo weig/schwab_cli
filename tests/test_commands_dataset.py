@@ -69,3 +69,20 @@ def test_unsubscribe_soft_deletes(runner):
     with vol_history.connect() as conn:
         rows = list_active_subscriptions(conn, group_name="volatility")
     assert rows == []
+
+
+def test_status_outputs_table_for_subscribed_symbol(runner):
+    runner.invoke(app, ["dataset", "subscribe", "NVDA"])
+    result = runner.invoke(app, ["dataset", "status"])
+    assert result.exit_code == 0
+    assert "NVDA" in result.stdout
+    assert "GRACE" in result.stdout
+
+
+def test_status_json_output(runner):
+    runner.invoke(app, ["dataset", "subscribe", "NVDA"])
+    result = runner.invoke(app, ["dataset", "status", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.stdout)
+    assert parsed[0]["symbol"] == "NVDA"
+    assert parsed[0]["tier"] == "GRACE"

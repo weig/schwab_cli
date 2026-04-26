@@ -209,3 +209,38 @@ def test_list_ticker_states_filters_by_tier(conn):
         )
     actives = list_ticker_states(conn, group_name="volatility", tier="ACTIVE")
     assert {r["symbol"] for r in actives} == {"A", "C"}
+
+
+from schwab_cli.dataset.store import read_status_rows
+
+
+def test_read_status_rows_aggregates_sources(conn):
+    from schwab_cli.dataset.store import (
+        subscribe_equity, subscribe_position,
+    )
+    subscribe_equity(conn, symbol="AMZN", group_name="volatility",
+                     captured_at_ms=1000)
+    subscribe_position(conn, symbol="AMZN", group_name="volatility",
+                       account_hash_last4="1234", captured_at_ms=2000)
+    rows = read_status_rows(conn, group_name="volatility")
+    amzn = next(r for r in rows if r["symbol"] == "AMZN")
+    assert sorted(amzn["sources"]) == [
+        "equity", "position=1234"
+    ]
+    assert amzn["subscribed_at"] == 1000  # earliest
+
+
+def test_read_status_rows_filters_by_tier(conn):
+    from schwab_cli.dataset.store import (
+        subscribe_equity, write_ticker_state,
+    )
+    subscribe_equity(conn, symbol="A", group_name="volatility")
+    subscribe_equity(conn, symbol="B", group_name="volatility")
+    write_ticker_state(conn, symbol="A", group_name="volatility",
+                       tier="ACTIVE", tier_since=0,
+                       consecutive_days_below=0, last_evaluated_at=0)
+    write_ticker_state(conn, symbol="B", group_name="volatility",
+                       tier="WATCH", tier_since=0,
+                       consecutive_days_below=0, last_evaluated_at=0)
+    rows = read_status_rows(conn, group_name="volatility", tier="ACTIVE")
+    assert {r["symbol"] for r in rows} == {"A"}

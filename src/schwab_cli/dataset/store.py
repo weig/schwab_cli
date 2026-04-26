@@ -293,6 +293,73 @@ def write_ticker_state(
     )
 
 
+def read_status_rows(
+    conn: sqlite3.Connection,
+    *,
+    group_name: str,
+    tier: str | None = None,
+    source: str | None = None,
+    symbols: list[str] | None = None,
+) -> list[dict]:
+    """Aggregate per-symbol status: tier, sources, first/last data, etc."""
+    where = ["s.unsubscribed_at IS NULL", "s.group_name = ?"]
+    params: list[Any] = [group_name]
+    if symbols:
+        placeholder = ",".join("?" * len(symbols))
+        where.append(f"s.symbol IN ({placeholder})")
+        params.extend(symbols)
+
+    sub_rows = conn.execute(
+        f"""
+        SELECT symbol, source, source_key, subscribed_at
+        FROM subscriptions s
+        WHERE {' AND '.join(where)}
+        ORDER BY symbol
+        """,
+        params,
+    ).fetchall()
+
+    by_symbol: dict[str, dict] = {}
+    for r in sub_rows:
+        d = by_symbol.setdefault(r["symbol"], {
+            "symbol":         r["symbol"],
+            "group":          group_name,
+            "sources":        [],
+            "subscribed_at":  r["subscribed_at"],
+        })
+        label = r["source"] if not r["source_key"] else (
+            f"{r['source']}={r['source_key']}"
+        )
+        d["sources"].append(label)
+        d["subscribed_at"] = min(d["subscribed_at"], r["subscribed_at"])
+
+    if source:
+        by_symbol = {
+            s: d for s, d in by_symbol.items()
+            if any(label.startswith(source) for label in d["sources"])
+        }
+
+    for symbol, d in by_symbol.items():
+        ts = read_ticker_state(conn, symbol=symbol, group_name=group_name)
+        d["tier"] = ts["tier"] if ts else "GRACE"
+        d["tier_since"] = ts["tier_since"] if ts else d["subscribed_at"]
+        first_last = conn.execute(
+            "SELECT MIN(archive_date) AS fd, MAX(archive_date) AS ld, "
+            "COUNT(*) AS n FROM vol_snapshots WHERE symbol = ?",
+            (symbol,),
+        ).fetchone()
+        d["first_date"] = first_last["fd"]
+        d["last_date"]  = first_last["ld"]
+        d["n_days"]     = first_last["n"]
+
+    out = list(by_symbol.values())
+    if tier:
+        out = [d for d in out if d["tier"] == tier]
+    rank = {"ACTIVE": 0, "GRACE": 1, "WATCH": 2, "FROZEN": 3}
+    out.sort(key=lambda d: (rank.get(d["tier"], 99), d["symbol"]))
+    return out
+
+
 def list_ticker_states(
     conn: sqlite3.Connection,
     *,
