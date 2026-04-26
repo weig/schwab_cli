@@ -1,0 +1,14 @@
+{
+  "underlying": {"last": 50.0},
+  "expiries": [
+    {
+      "expiry": "2026-05-15", "dte": 30,
+      "contracts": [
+        {"strike": 47.5, "side": "P", "delta": null, "iv": 0.65, "volume": 110},
+        {"strike": 50.0, "side": "C", "delta": null, "iv": 0.55, "volume": 110},
+        {"strike": 50.0, "side": "P", "delta": null, "iv": 0.55, "volume": 110},
+        {"strike": 52.5, "side": "C", "delta": null, "iv": 0.50, "volume": 110}
+      ]
+    }
+  ]
+}
