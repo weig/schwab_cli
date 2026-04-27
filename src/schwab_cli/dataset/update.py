@@ -323,14 +323,31 @@ def run_volatility_update(
                   error=str(e), archive_date=archive_date)
             continue
 
+        # No valid ATM contract → ``pick_atm_contract`` couldn't find an
+        # expiry with enough volume + a non-NULL IV. Happens on
+        # weekend / pre-market runs and on illiquid names. Don't write
+        # a placeholder row — it would pollute IVR / IVP series with
+        # spurious zeros.
+        if (bundle["atm_iv"] is None
+                or bundle["atm_strike"] is None
+                or not bundle["atm_expiry"]
+                or bundle["atm_dte"] is None):
+            errors.append({
+                "symbol": sym,
+                "error": "no ATM contract (chain has no liquid quotes)",
+            })
+            _emit(event="errored", index=i, total=total, symbol=sym,
+                  error="no ATM contract", archive_date=archive_date)
+            continue
+
         record_extended_snapshot(
             conn,
             symbol=sym,
             spot=bundle["spot"],
-            atm_iv=bundle["atm_iv"] or 0.0,
-            atm_strike=bundle["atm_strike"] or bundle["spot"],
-            atm_expiry=bundle["atm_expiry"] or "",
-            atm_dte=bundle["atm_dte"] or 30,
+            atm_iv=bundle["atm_iv"],
+            atm_strike=bundle["atm_strike"],
+            atm_expiry=bundle["atm_expiry"],
+            atm_dte=bundle["atm_dte"],
             captured_at_ms=now_ms,
             atm_iv_30d=bundle["atm_iv_30d"],
             atm_iv_60d=bundle["atm_iv_60d"],
