@@ -302,6 +302,11 @@ def _confirm_or_abort(*, yes: bool) -> None:
     """Block until the user types 'yes' (case-insensitive). With ``yes=True``,
     skip the prompt entirely. Anything other than 'yes' aborts (exit 0).
 
+    Empty input (just Enter, no text) is **not** an abort — the prompt
+    re-displays so the live ticker can keep updating while the operator
+    decides. Only EOF (Ctrl+D), Ctrl+C, or non-empty input that isn't
+    'yes' actually aborts.
+
     The caller is responsible for any leading blank line / live-ticker
     output above the prompt — keeping the prompt itself a single line
     means the ticker's row math (``\\x1b[1A`` to repaint one row up) is
@@ -310,14 +315,26 @@ def _confirm_or_abort(*, yes: bool) -> None:
     if yes:
         typer.echo("(--yes: skipping confirmation prompt)", err=True)
         return
-    typer.echo('Type "yes" to confirm:', err=True, nl=False)
-    typer.echo(" ", err=True, nl=False)
-    try:
-        entered = sys.stdin.readline()
-    except (KeyboardInterrupt, EOFError):
-        typer.echo("\naborted", err=True)
-        raise typer.Exit(code=0)
-    if not re.fullmatch(r"\s*yes\s*", entered, re.IGNORECASE):
+    while True:
+        typer.echo('Type "yes" to confirm:', err=True, nl=False)
+        typer.echo(" ", err=True, nl=False)
+        try:
+            entered = sys.stdin.readline()
+        except (KeyboardInterrupt, EOFError):
+            typer.echo("\naborted", err=True)
+            raise typer.Exit(code=0)
+        # readline returns "" only on EOF (e.g. closed stdin / Ctrl+D
+        # at empty prompt); treat that as an explicit abort.
+        if entered == "":
+            typer.echo("\naborted", err=True)
+            raise typer.Exit(code=0)
+        # "\n" alone (operator hit Enter without typing) is benign —
+        # re-prompt instead of aborting so the live ticker keeps the
+        # screen fresh until they're ready to commit.
+        if entered.strip() == "":
+            continue
+        if re.fullmatch(r"\s*yes\s*", entered, re.IGNORECASE):
+            return
         typer.echo("aborted", err=True)
         raise typer.Exit(code=0)
 
