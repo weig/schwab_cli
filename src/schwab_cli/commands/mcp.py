@@ -572,7 +572,9 @@ def run_stop_service(*, plist_path: str | None) -> None:
 
 def run_uninstall_service(*, plist_path: str | None, yes: bool) -> None:
     import subprocess
-    from schwab_cli.mcp_server.launchd import DEFAULT_PLIST_PATH
+    from schwab_cli.mcp_server.launchd import (
+        DEFAULT_PLIST_PATH, remove_launcher,
+    )
 
     target = (
         Path(plist_path).expanduser() if plist_path else DEFAULT_PLIST_PATH
@@ -592,6 +594,7 @@ def run_uninstall_service(*, plist_path: str | None, yes: bool) -> None:
         capture_output=True, text=True,
     )
     target.unlink(missing_ok=True)
+    remove_launcher()
     typer.echo(f"removed: {target}")
 
 

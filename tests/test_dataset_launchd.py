@@ -104,6 +104,42 @@ def test_log_paths_attached_when_provided():
     assert parsed["StandardErrorPath"] == "/tmp/dataset.log"
 
 
+def test_plist_uses_launcher_basename_for_friendly_display(monkeypatch, tmp_path):
+    """The plist must reference the friendly-named launcher script
+    so System Settings → Login Items shows e.g. ``Schwab Indices Dataset``
+    instead of the bare ``schwab_cli`` binary name."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from schwab_cli.dataset.launchd import _write_launcher
+    spec = DatasetPlistSpec(
+        binary_path="/usr/local/bin/schwab_cli",
+        cron="0 22 * * *",
+        kind="volatility",
+    )
+    launcher = _write_launcher(spec)
+    assert launcher.name == "Schwab Volatility Dataset"
+    assert launcher.exists()
+    # Launcher is executable + execs the real binary with our args.
+    body = launcher.read_text()
+    assert body.startswith("#!/bin/sh")
+    assert "dataset update --group volatility" in body
+    assert "/usr/local/bin/schwab_cli" in body
+
+    blob = build_dataset_plist(spec, launcher_path=launcher)
+    parsed = plistlib.loads(blob)
+    assert parsed["ProgramArguments"] == [str(launcher)]
+
+
+def test_indices_launcher_has_friendly_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from schwab_cli.dataset.launchd import _write_launcher
+    spec = DatasetPlistSpec(
+        binary_path="/x/schwab_cli", cron="0 6 * * 0", kind="indices",
+    )
+    launcher = _write_launcher(spec)
+    assert launcher.name == "Schwab Indices Dataset"
+    assert "dataset update --indices" in launcher.read_text()
+
+
 def test_unsupported_kind_rejected():
     with pytest.raises(ValueError, match="unsupported plist kind"):
         DatasetPlistSpec(binary_path="/x", cron="0 22 * * *",
