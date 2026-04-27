@@ -439,12 +439,22 @@ def _spec_from_ticket(t: ParsedTicket) -> _NormalizedOrder:
             )
         )
 
-    if t.strategy == "VERTICAL":
-        complex_strategy = "VERTICAL"
-        side_word = "DEBIT" if t.order_type == "NET_DEBIT" else "CREDIT"
-        label = f"VERTICAL {t.option_type} {side_word}"
+    # Schwab's complexOrderStrategyType uses the parser's strategy
+    # name verbatim — VERTICAL, BUTTERFLY, CONDOR, STRADDLE, STRANGLE,
+    # IRON_CONDOR, CALENDAR, DIAGONAL. None / single-leg → "NONE".
+    if t.strategy:
+        complex_strategy = t.strategy   # already normalized in parser
     else:
         complex_strategy = "NONE"
+
+    if t.strategy == "VERTICAL":
+        side_word = "DEBIT" if t.order_type == "NET_DEBIT" else "CREDIT"
+        label = f"VERTICAL {t.option_type} {side_word}"
+    elif t.strategy:
+        # Generic label for the new strategies — keeps the panel
+        # human-readable without bespoke per-strategy phrasing.
+        label = f"{t.strategy} ({len(t.legs)} legs)"
+    else:
         label = f"{t.side} {t.quantity} {t.underlying} {t.option_type}"
 
     naked = _is_naked_short_options(t.legs)
