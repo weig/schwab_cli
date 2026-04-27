@@ -1,17 +1,17 @@
 """Index member fetchers.
 
-stockanalysis.com is the primary provider — exposes CSV-download
-endpoints at ``https://stockanalysis.com/list/{slug}-stocks/?p=csv``
-for the three indices we support there. SSGA is a fallback for SPX
-and DJI only (their public xlsx holdings of SPY / DIA).
+stockanalysis.com is the primary provider — its public list pages
+(``/list/sp-500-stocks/`` etc.) render one ``<a href="/stocks/SYM/">``
+per member, which is stable enough to scrape. SSGA is the fallback
+for SPX and DJI only (their public xlsx holdings of SPY / DIA).
 
 Both providers return ``set[str]`` of normalized symbols (Schwab's
 dot form, e.g. ``'BRK.B'``).
 """
 from __future__ import annotations
 
-import csv
 import io
+import re
 
 import httpx
 
@@ -32,7 +32,14 @@ _SSGA_URL = (
     "https://www.ssga.com/us/en/intermediary/library-content/products/"
     "fund-data/etfs/us/holdings-daily-us-en-{etf}.xlsx"
 )
-_USER_AGENT = "schwab_cli/dataset (+https://github.com/weig/schwab_cli)"
+# stockanalysis.com / Cloudflare reject our identifier-style UA. A
+# vanilla browser UA goes through cleanly and is what every other
+# scraper uses anyway.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 def fetch_stockanalysis_members(
@@ -48,31 +55,45 @@ def fetch_stockanalysis_members(
             f"(supported: {sorted(INDEX_TO_STOCKANALYSIS_SLUG)})"
         )
     url = f"{_STOCKANALYSIS_BASE}/{slug}-stocks/"
-    resp = client.get(url, params={"p": "csv"},
-                      headers={"User-Agent": _USER_AGENT})
+    resp = client.get(
+        url,
+        headers={
+            "User-Agent": _BROWSER_UA,
+            "Accept": "text/html,application/xhtml+xml,*/*",
+        },
+        follow_redirects=True,
+    )
     if resp.status_code != 200:
         raise RuntimeError(
             f"stockanalysis.com HTTP {resp.status_code} for {url}"
         )
-    return _parse_stockanalysis_csv(resp.text)
+    return _parse_stockanalysis_html(resp.text)
 
 
-def _parse_stockanalysis_csv(text: str) -> set[str]:
-    """Parse a stockanalysis.com export. Symbol column is 'Symbol'."""
+# Tickers appear as ``href="/stocks/<lowercase>/"`` links in the
+# rendered table. Skipping path words that share the same prefix
+# (e.g. ``/stocks/screener/``).
+_TICKER_HREF_RE = re.compile(r'href="/stocks/([a-z][a-z0-9.\-]{0,5})/"')
+_PATH_WORDS = frozenset({"screener", "compare", "industry", "sector", "list"})
+
+
+def _parse_stockanalysis_html(html: str) -> set[str]:
+    """Extract member tickers from a rendered list page.
+
+    The page renders one ``<a href="/stocks/SYM/">`` per member; we
+    collect those, drop the few non-ticker path words, and normalize
+    to Schwab's dot form (``brk-b`` → ``BRK.B``).
+    """
     out: set[str] = set()
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames or "Symbol" not in reader.fieldnames:
-        raise RuntimeError(
-            f"stockanalysis CSV missing 'Symbol' column "
-            f"(got {reader.fieldnames!r})"
-        )
-    for row in reader:
-        sym = (row.get("Symbol") or "").strip()
-        if not sym or " " in sym:
+    for raw in _TICKER_HREF_RE.findall(html):
+        if raw in _PATH_WORDS:
             continue
-        out.add(_normalize_symbol(sym))
+        out.add(_normalize_symbol(raw))
     if not out:
-        raise RuntimeError("stockanalysis CSV had no parseable rows")
+        raise RuntimeError(
+            "stockanalysis page had no /stocks/<symbol>/ links — "
+            "page layout may have changed"
+        )
     return out
 
 
@@ -98,7 +119,14 @@ def fetch_ssga_members(
             f"(supported: {sorted(INDEX_TO_SSGA_ETF)})"
         )
     url = _SSGA_URL.format(etf=etf)
-    resp = client.get(url, headers={"User-Agent": _USER_AGENT})
+    # SSGA recently moved their canonical xlsx URL and now serves a
+    # 301 from the legacy ``/us/en/intermediary/`` prefix. Always
+    # follow redirects so the adapter survives the next move too.
+    resp = client.get(
+        url,
+        headers={"User-Agent": _BROWSER_UA},
+        follow_redirects=True,
+    )
     if resp.status_code != 200:
         raise RuntimeError(f"SSGA HTTP {resp.status_code} for {url}")
     return _parse_ssga_xlsx(resp.content)

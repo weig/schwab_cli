@@ -21,23 +21,39 @@ from schwab_cli.dataset.indices import (
 _FIX = Path(__file__).parent / "fixtures"
 
 
-def _csv_bytes() -> bytes:
-    return (_FIX / "sa_sp500_sample.csv").read_bytes()
+def _sa_html_bytes() -> bytes:
+    """Minimal stockanalysis-shaped HTML with a few /stocks/SYM/ links
+    plus a couple of decoy path words (screener, compare) the parser
+    must skip."""
+    body = (
+        '<!doctype html><html><body>'
+        '<a href="/stocks/screener/">Screener</a>'
+        '<a href="/stocks/compare/">Compare</a>'
+        '<a href="/stocks/aapl/">AAPL</a>'
+        '<a href="/stocks/msft/">MSFT</a>'
+        '<a href="/stocks/nvda/">NVDA</a>'
+        '<a href="/stocks/amzn/">AMZN</a>'
+        '<a href="/stocks/brk-b/">BRK-B</a>'   # dash form, must normalize
+        '<a href="/stocks/googl/">GOOGL</a>'
+        '</body></html>'
+    )
+    return body.encode("utf-8")
 
 
-def test_stockanalysis_parses_symbols_from_csv():
+def test_stockanalysis_parses_symbols_from_html():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/list/sp-500-stocks/")
-        assert request.url.params["p"] == "csv"
-        return httpx.Response(200, content=_csv_bytes())
+        return httpx.Response(200, content=_sa_html_bytes())
 
     transport = httpx.MockTransport(handler)
     with httpx.Client(transport=transport, timeout=10.0) as client:
         out = fetch_stockanalysis_members("SPX", client=client)
 
     assert "AAPL" in out
-    assert "BRK.B" in out  # dot form preserved
-    assert len(out) == 6
+    assert "BRK.B" in out          # dash → dot normalization
+    assert "screener" not in out
+    assert "compare" not in out
+    assert len(out) == 6           # 6 real tickers; 2 decoys filtered
 
 
 def test_stockanalysis_raises_on_404():
@@ -97,7 +113,7 @@ def test_fetch_index_members_uses_primary_when_ok():
     calls = []
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.host)
-        return httpx.Response(200, content=_csv_bytes())
+        return httpx.Response(200, content=_sa_html_bytes())
     transport = httpx.MockTransport(handler)
     with httpx.Client(transport=transport, timeout=10.0) as client:
         out = fetch_index_members("SPX", client=client)
