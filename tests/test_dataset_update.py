@@ -264,6 +264,75 @@ def test_run_volatility_update_samples_active_writes_row(
     assert row["atm_iv_30d"] is not None
 
 
+def test_run_volatility_update_partial_results_survive_crash(
+    conn, monkeypatch, tmp_path,
+):
+    """If the orchestrator dies mid-run, the rows it had already
+    committed must survive on a fresh connection. Periodic commits
+    inside the for-loop are what give us this guarantee — without
+    them a single transaction at the end of the connect() context
+    manager would roll the whole batch back.
+    """
+    from schwab_cli.dataset.store import subscribe_equity
+    from schwab_cli.dataset.update import _COMMIT_BATCH
+    from schwab_cli.storage import vol_history
+    import json
+
+    # Subscribe more symbols than _COMMIT_BATCH so we cross a flush.
+    n_symbols = _COMMIT_BATCH + 5
+    symbols = [f"SYM{i:03d}" for i in range(n_symbols)]
+    for s in symbols:
+        subscribe_equity(conn, symbol=s, group_name="volatility",
+                         captured_at_ms=1000)
+
+    fake_chain = json.loads(
+        (Path(__file__).parent / "fixtures" / "chain_nvda_full.json")
+        .read_text()
+    )
+
+    crash_at_index = _COMMIT_BATCH + 2  # past one flush, before final
+    call_count = {"n": 0}
+
+    def fake_get_chain(client, symbol, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] > crash_at_index:
+            raise RuntimeError("simulated network blip")
+        return fake_chain
+
+    monkeypatch.setattr(
+        "schwab_cli.dataset.update.get_chain", fake_get_chain
+    )
+    monkeypatch.setattr(
+        "schwab_cli.dataset.update.get_history",
+        lambda c, s, **kw: {"candles": [{"close": 200.0 + i * 0.1}
+                                        for i in range(60)]},
+    )
+
+    summary = run_volatility_update(
+        conn, client=None, group_name="volatility",
+        now_ms=_ms(2026, 4, 15),
+        accounts=[],
+    )
+
+    # Sample succeeded for the first crash_at_index symbols, then
+    # errored for the rest.
+    assert len(summary["sampled"]) == crash_at_index
+    assert len(summary["errors"]) == n_symbols - crash_at_index
+
+    # Open a fresh connection — only the rows committed before the
+    # crash should be visible. The first flush at _COMMIT_BATCH had
+    # already happened, so we expect at least _COMMIT_BATCH rows
+    # to have survived.
+    with vol_history.connect() as conn2:
+        n_rows = conn2.execute(
+            "SELECT COUNT(*) FROM vol_snapshots WHERE symbol LIKE 'SYM%'"
+        ).fetchone()[0]
+    assert n_rows >= _COMMIT_BATCH, (
+        f"only {n_rows} rows committed; the periodic flush at "
+        f"every _COMMIT_BATCH={_COMMIT_BATCH} symbols isn't firing"
+    )
+
+
 def test_run_volatility_update_skips_already_sampled_today(conn, monkeypatch):
     """If a symbol already has an observed row for today's NY day, the
     daily cron must skip — same-day double-write is a waste of API

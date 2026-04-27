@@ -95,6 +95,9 @@ def run_indices_update(
             "removed": removed,
             "total":   len(upstream),
         }
+        # Commit after each index so a later provider failure can't
+        # roll back an earlier index's successful diff.
+        conn.commit()
     return summary
 
 
@@ -230,6 +233,12 @@ _NY = ZoneInfo("America/New_York")
 # How far back to fetch price history for HV computation.
 _HISTORY_LOOKBACK_DAYS = 110  # ~90 trading days + buffer
 
+# Commit every N successful samples so a mid-run crash doesn't lose
+# the rows we already wrote. 50 ≈ a few minutes of work at typical
+# Schwab response latency, balancing durability vs the (small) cost
+# of more fsyncs.
+_COMMIT_BATCH = 50
+
 
 def run_volatility_update(
     conn: sqlite3.Connection,
@@ -264,6 +273,9 @@ def run_volatility_update(
             conn, client=client, account_hash=acct,
             group_name=group_name, now_ms=now_ms,
         )
+    # Persist position-source rows before the long sample loop so a
+    # mid-run crash doesn't lose the position reconciliation work.
+    conn.commit()
 
     # Step 2 — build working set.
     active_rows = list_active_subscriptions(conn, group_name=group_name)
@@ -286,6 +298,11 @@ def run_volatility_update(
     # manual run + the cron + the `vol` command can't double-write the
     # same trading day.
     observed_today = _symbols_observed_on_ny_day(conn, archive_date)
+
+    # How many sampled rows we've written since the last commit. Reset
+    # to 0 each time we flush; flush every _COMMIT_BATCH symbols so a
+    # mid-run crash loses at most that many writes.
+    sampled_since_commit = 0
 
     def _emit(**evt: Any) -> None:
         if progress is not None:
@@ -451,6 +468,18 @@ def run_volatility_update(
               atm_iv_30d=bundle.get("atm_iv_30d"),
               hv_30d=bundle.get("hv_30d"),
               tier_from=old.tier, tier_to=new.tier)
+
+        # Periodic flush — durability over a single fat transaction.
+        sampled_since_commit += 1
+        if sampled_since_commit >= _COMMIT_BATCH:
+            conn.commit()
+            sampled_since_commit = 0
+
+    # Final flush for the trailing partial batch (the connect() context
+    # manager would commit on exit anyway, but committing here keeps
+    # the durability boundary explicit at the end of the orchestrator).
+    if sampled_since_commit > 0:
+        conn.commit()
 
     return {
         "sampled":     sampled,
