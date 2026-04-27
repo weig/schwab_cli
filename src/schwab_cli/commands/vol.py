@@ -88,50 +88,11 @@ def _client() -> SchwabClient:
 
 
 # ---- chain flattener ----------------------------------------------------
-
-
-def _flatten_chain(raw: dict[str, Any]) -> tuple[list[dict], list[dict]]:
-    """Return (per-expiry blocks, flat contract list) from a /chains response.
-
-    Per-expiry block shape::
-        {"expiry": "YYYY-MM-DD", "dte": int, "contracts": [...]}
-
-    Flat contract list mixes calls + puts across every expiry — what
-    :func:`aggregate_pc` consumes.
-    """
-    per_expiry: dict[tuple[str, int], list[dict]] = {}
-    flat: list[dict] = []
-
-    for side, map_key in [("C", "callExpDateMap"), ("P", "putExpDateMap")]:
-        for expiry_key, strike_map in (raw.get(map_key) or {}).items():
-            expiry, _, dte_part = expiry_key.partition(":")
-            try:
-                dte = int(dte_part)
-            except ValueError:
-                dte = 0
-            bucket = per_expiry.setdefault((expiry, dte), [])
-            for _strike, rows in (strike_map or {}).items():
-                for row in rows or []:
-                    iv_pct = row.get("volatility")
-                    iv = (iv_pct / 100.0) if isinstance(iv_pct, (int, float)) else None
-                    contract = {
-                        "side": side,
-                        "strike": row.get("strikePrice"),
-                        "iv": iv,
-                        "volume": row.get("totalVolume"),
-                        "openInterest": row.get("openInterest"),
-                        "expiry": expiry,
-                        "dte": dte,
-                    }
-                    bucket.append(contract)
-                    flat.append(contract)
-
-    expiries = [
-        {"expiry": exp, "dte": dte, "contracts": contracts}
-        for (exp, dte), contracts in per_expiry.items()
-    ]
-    expiries.sort(key=lambda e: e["dte"])
-    return expiries, flat
+#
+# Single-source-of-truth lives in api/chains.py — every consumer of the
+# Schwab /chains endpoint reaches through that helper so we can't drift
+# between the legacy `vol` and new `dataset` paths.
+from schwab_cli.api.chains import flatten_chain as _flatten_chain  # noqa: E402
 
 
 # ---- main entry --------------------------------------------------------

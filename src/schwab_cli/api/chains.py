@@ -48,3 +48,57 @@ def get_chain(
     if to_date is not None:
         params["toDate"] = to_date.isoformat()
     return client.get(f"{SchwabClient.MARKET_BASE}/chains", params=params)
+
+
+def flatten_chain(raw: dict) -> tuple[list[dict], list[dict]]:
+    """Flatten Schwab's ``callExpDateMap`` / ``putExpDateMap`` into the
+    ``[{expiry, dte, contracts}, ...]`` shape downstream analytics expect.
+
+    Schwab returns options as nested ``map[expiryKey][strike] → list[row]``
+    dicts; analytics functions (:func:`pick_atm_contract`,
+    :func:`pick_atm_curve`, :func:`sample_volatility`) operate on a
+    flat per-expiry contract list. This helper does the conversion in
+    one place so callers don't reach into the raw shape.
+
+    Returns ``(expiries, flat_contracts)`` where ``flat_contracts`` is
+    the same set of contracts unrolled out of expiry buckets — useful
+    for cross-chain aggregations like put/call volume ratios.
+
+    IV is normalized from Schwab's percent form (e.g. ``32.5``) to the
+    decimal form analytics use (``0.325``).
+    """
+    per_expiry: dict[tuple[str, int], list[dict]] = {}
+    flat: list[dict] = []
+    for side, map_key in [("C", "callExpDateMap"), ("P", "putExpDateMap")]:
+        for expiry_key, strike_map in (raw.get(map_key) or {}).items():
+            expiry, _, dte_part = expiry_key.partition(":")
+            try:
+                dte = int(dte_part)
+            except ValueError:
+                dte = 0
+            bucket = per_expiry.setdefault((expiry, dte), [])
+            for _strike, rows in (strike_map or {}).items():
+                for row in rows or []:
+                    iv_pct = row.get("volatility")
+                    iv = (
+                        iv_pct / 100.0
+                        if isinstance(iv_pct, (int, float)) else None
+                    )
+                    contract = {
+                        "side":         side,
+                        "strike":       row.get("strikePrice"),
+                        "iv":           iv,
+                        "delta":        row.get("delta"),
+                        "volume":       row.get("totalVolume"),
+                        "openInterest": row.get("openInterest"),
+                        "expiry":       expiry,
+                        "dte":          dte,
+                    }
+                    bucket.append(contract)
+                    flat.append(contract)
+    expiries = [
+        {"expiry": exp, "dte": dte, "contracts": contracts}
+        for (exp, dte), contracts in per_expiry.items()
+    ]
+    expiries.sort(key=lambda e: e["dte"])
+    return expiries, flat

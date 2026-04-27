@@ -123,18 +123,36 @@ def aggregate_pc(contracts: list[dict[str, Any]]) -> dict[str, Any]:
 # ---- ATM picker --------------------------------------------------------
 
 
+def _expiry_liquidity(contracts: list[dict]) -> float:
+    """Sum of volume + open interest across a contract list.
+
+    Volume alone resets to zero on weekends / pre-market, which made
+    the cron's gate reject every expiry on Sunday-evening runs even
+    for SPX heavyweights. Open interest carries over between sessions
+    and is the persistent liquidity signal — adding the two gives a
+    threshold that survives session boundaries.
+    """
+    return sum(
+        (c.get("volume") or 0) + (c.get("openInterest") or 0)
+        for c in (contracts or [])
+    )
+
+
 def pick_atm_contract(
     expiries: list[dict[str, Any]],
     spot: float,
     *,
-    min_volume: int = 100,
+    min_liquidity: int = 100,
 ) -> dict[str, Any] | None:
     """Pick the ATM contract for the current IV snapshot.
 
     Walks expiries in DTE order and returns the first one where:
 
-      * Total call + put volume on the expiry is at least ``min_volume``.
-        (Defends against zero-volume weeklies with stale quotes.)
+      * Total call + put volume *plus* open interest on the expiry is
+        at least ``min_liquidity``. We sum volume and OI so weekend /
+        pre-market runs still qualify on Friday's open interest even
+        when today's volume is zero. Defends against truly stale
+        weeklies (zero everywhere).
       * A strike exists close to ``spot``.
       * At least one of the call or put at that strike has a non-None IV.
 
@@ -145,8 +163,7 @@ def pick_atm_contract(
     """
     for exp in sorted(expiries, key=lambda e: e.get("dte", 10_000)):
         contracts = exp.get("contracts", [])
-        total_vol = sum((c.get("volume") or 0) for c in contracts)
-        if total_vol < min_volume:
+        if _expiry_liquidity(contracts) < min_liquidity:
             continue
 
         by_strike: dict[float, list[dict]] = {}
@@ -179,21 +196,21 @@ def pick_atm_curve(
     expiries: list[dict],
     spot: float,
     *,
-    min_volume: int = 100,
+    min_liquidity: int = 100,
 ) -> list[tuple[int, float]]:
     """Build the ``[(dte, atm_iv), ...]`` curve from a chain.
 
-    Skips expiries whose total contract volume is < ``min_volume``
-    (defends against zero-volume weeklies with stale quotes — same
-    rule as :func:`pick_atm_contract`). For each kept expiry, picks
-    the strike closest to ``spot`` and returns the call/put IV
-    midpoint (or single side if the other lacks IV). Sorted by DTE.
+    Skips expiries whose total ``volume + openInterest`` is below
+    ``min_liquidity`` (same gate as :func:`pick_atm_contract` — sum
+    keeps weekend / pre-market runs alive when volume is zero but OI
+    isn't). For each kept expiry, picks the strike closest to ``spot``
+    and returns the call/put IV midpoint (or single side if the other
+    lacks IV). Sorted by DTE.
     """
     out: list[tuple[int, float]] = []
     for exp in expiries:
         contracts = exp.get("contracts") or []
-        total = sum((c.get("volume") or 0) for c in contracts)
-        if total < min_volume:
+        if _expiry_liquidity(contracts) < min_liquidity:
             continue
         by_strike: dict[float, list[dict]] = {}
         for c in contracts:

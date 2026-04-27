@@ -229,7 +229,7 @@ def test_pick_atm_skips_low_volume_expiries():
             200.0: {"c_iv": 0.30, "p_iv": 0.32, "c_vol": 500, "p_vol": 500},
         }),
     ]
-    out = pick_atm_contract(expiries, spot=200.0, min_volume=100)
+    out = pick_atm_contract(expiries, spot=200.0, min_liquidity=100)
     assert out is not None
     assert out["expiry"] == "2026-05-15"
 
@@ -240,8 +240,32 @@ def test_pick_atm_returns_none_when_no_suitable_expiry():
             200.0: {"c_iv": 0.35, "p_iv": 0.37, "c_vol": 1, "p_vol": 1},
         }),
     ]
-    out = pick_atm_contract(expiries, spot=200.0, min_volume=100)
+    out = pick_atm_contract(expiries, spot=200.0, min_liquidity=100)
     assert out is None
+
+
+def test_pick_atm_uses_open_interest_when_volume_is_zero():
+    """Weekend / pre-market chains have volume=0 across the board but
+    open interest carries over. The liquidity gate must still pass on
+    OI alone — otherwise the cron rejects every symbol on Sunday."""
+    # Build an expiry with zero volume but real OI.
+    contracts = []
+    for strike in (195.0, 200.0, 205.0):
+        contracts.append({
+            "side": "C", "strike": strike,
+            "iv": 0.30, "volume": 0, "openInterest": 500,
+        })
+        contracts.append({
+            "side": "P", "strike": strike,
+            "iv": 0.32, "volume": 0, "openInterest": 500,
+        })
+    expiries = [{
+        "expiry": "2026-05-15", "dte": 22, "contracts": contracts,
+    }]
+    out = pick_atm_contract(expiries, spot=200.0, min_liquidity=100)
+    assert out is not None
+    assert out["strike"] == 200.0
+    assert out["iv"] == pytest.approx(0.31)
 
 
 def test_pick_atm_handles_missing_iv_gracefully():
@@ -255,6 +279,6 @@ def test_pick_atm_handles_missing_iv_gracefully():
             200.0: {"c_iv": 0.30, "p_iv": 0.32, "c_vol": 500, "p_vol": 500},
         }),
     ]
-    out = pick_atm_contract(expiries, spot=200.0, min_volume=100)
+    out = pick_atm_contract(expiries, spot=200.0, min_liquidity=100)
     assert out is not None
     assert out["expiry"] == "2026-05-15"

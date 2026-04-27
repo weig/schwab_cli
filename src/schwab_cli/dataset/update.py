@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from schwab_cli.api.accounts import get_account
-from schwab_cli.api.chains import get_chain
+from schwab_cli.api.chains import get_chain, flatten_chain
 from schwab_cli.api.history import get_history
 from schwab_cli.analytics.tier import TierState, Thresholds, resolve_tier
 from schwab_cli.dataset.config import load_config_or_default
@@ -324,7 +324,22 @@ def run_volatility_update(
 
         # Step 4 — sample.
         try:
-            chain = get_chain(client, sym, contract_type="ALL", strike_count=60)
+            raw = get_chain(client, sym, contract_type="ALL", strike_count=60)
+            # Schwab returns ``callExpDateMap``/``putExpDateMap``;
+            # flatten into the ``[{expiry, dte, contracts}, ...]``
+            # shape ``sample_volatility`` consumes. Pre-flattened
+            # input (e.g. from test fixtures) is passed through.
+            if "expiries" in raw:
+                chain = raw
+            else:
+                expiries, _flat = flatten_chain(raw)
+                spot_now = (raw.get("underlying") or {}).get("last")
+                if spot_now is None:
+                    spot_now = raw.get("underlyingPrice")
+                chain = {
+                    "underlying": {"last": spot_now},
+                    "expiries":   expiries,
+                }
             hist_end = now_dt
             hist_start = hist_end - timedelta(days=_HISTORY_LOOKBACK_DAYS)
             hist = get_history(
