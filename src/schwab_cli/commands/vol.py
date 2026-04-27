@@ -290,6 +290,13 @@ def run(
                 and counts[SOURCE_SYNTHETIC] == 0
                 and counts[SOURCE_OBSERVED] < _IVP_MIN_SAMPLE
             ):
+                # Per-day progress lines stream to stdout in human mode
+                # only — keeps JSON / MD / snapshot-only output clean for
+                # piping.
+                _bf_progress = (
+                    (lambda line: typer.secho(line, fg=typer.colors.CYAN))
+                    if not (as_json or as_md or snapshot_only) else None
+                )
                 n_synth = _backfill_synthetic_iv(
                     conn,
                     client=client,
@@ -298,6 +305,7 @@ def run(
                     expiries=expiries,
                     underlying_closes=closes,
                     underlying_candles=history_raw.get("candles") or [],
+                    progress=_bf_progress,
                 )
                 # Only mention the backfill to human readers — in JSON/MD
                 # modes or --snapshot-only the extra stderr line would
@@ -437,6 +445,40 @@ def _compute_ivp_state(
 # ---- backfill ----------------------------------------------------------
 
 
+def _existing_ny_days(conn, symbol: str) -> dict[str, str]:
+    """Map ``YYYY-MM-DD`` (NY calendar day) → ``'observed' | 'synthetic'``.
+
+    Used by the backfill loop to decide whether a candidate day should
+    be skipped (already have data) or written. Live observations
+    win over backfill rows when a single NY day has both.
+    """
+    rows = conn.execute(
+        "SELECT captured_at_ms, source FROM vol_snapshots WHERE symbol = ?",
+        (symbol,),
+    ).fetchall()
+    out: dict[str, str] = {}
+    for r in rows:
+        day = _ny_date_of_ms(int(r["captured_at_ms"]))
+        if out.get(day) != SOURCE_OBSERVED:
+            out[day] = r["source"] or SOURCE_OBSERVED
+    return out
+
+
+def _emit_backfill(
+    progress, *, symbol: str, day: str, status: str,
+) -> None:
+    """Render one Backfill progress line. ``progress`` is the callable
+    or ``None`` (silent in JSON / MD / snapshot-only output modes)."""
+    if progress is None:
+        return
+    if status == "wrote":
+        progress(f"Backfill {symbol} volatility {day}")
+    elif status == "skipped_live":
+        progress(f"Backfill {symbol} volatility {day} (Skipped, live data existed)")
+    elif status == "skipped_backfill":
+        progress(f"Backfill {symbol} volatility {day} (Skipped, backfill data existed)")
+
+
 def _backfill_synthetic_iv(
     conn,
     *,
@@ -446,6 +488,7 @@ def _backfill_synthetic_iv(
     expiries: list[dict[str, Any]],
     underlying_closes: list[float],
     underlying_candles: list[dict[str, Any]],
+    progress=None,
 ) -> int:
     """Populate the store with a 1-year synthetic ATM-IV series.
 
@@ -473,6 +516,7 @@ def _backfill_synthetic_iv(
             symbol=symbol,
             expiry=long_exp,
             underlying_candles=underlying_candles,
+            progress=progress,
         )
         if written > 0:
             return written
@@ -514,6 +558,7 @@ def _backfill_synthetic_iv(
         return 0
     strike = float(backfill["strike"])
 
+    existing_days = _existing_ny_days(conn, symbol)
     written = 0
     for oc in opt_candles:
         dt_ms = oc.get("datetime")
@@ -523,6 +568,14 @@ def _backfill_synthetic_iv(
         day = _ny_date_of_ms(int(dt_ms))
         und_entry = und_by_day.get(day)
         if und_entry is None:
+            continue
+        if existing_days.get(day) == SOURCE_OBSERVED:
+            _emit_backfill(progress, symbol=symbol, day=day,
+                           status="skipped_live")
+            continue
+        if existing_days.get(day) == SOURCE_SYNTHETIC:
+            _emit_backfill(progress, symbol=symbol, day=day,
+                           status="skipped_backfill")
             continue
         _und_ms, und_close = und_entry
         # DTE at the historical moment.
@@ -550,6 +603,8 @@ def _backfill_synthetic_iv(
             captured_at_ms=int(dt_ms),
             source=SOURCE_SYNTHETIC,
         )
+        existing_days[day] = SOURCE_SYNTHETIC
+        _emit_backfill(progress, symbol=symbol, day=day, status="wrote")
         written += 1
     return written
 
@@ -616,6 +671,7 @@ def _stitched_backfill(
     symbol: str,
     expiry: dict[str, Any],
     underlying_candles: list[dict[str, Any]],
+    progress=None,
 ) -> int:
     """Fetch multiple strikes on ``expiry`` and emit one IV row per
     underlying trading day, using the strike closest to that day's spot.
@@ -685,13 +741,22 @@ def _stitched_backfill(
     if expiry_date is None:
         return 0
 
+    existing_days = _existing_ny_days(conn, symbol)
     written = 0
-    for day, (_und_ms, spot) in und_by_day.items():
+    for day, (_und_ms, spot) in sorted(und_by_day.items()):
         day_obj = _parse_iso_date(day)
         if day_obj is None:
             continue
         T = (expiry_date - day_obj).days / 365.0
         if T <= 0:
+            continue
+        if existing_days.get(day) == SOURCE_OBSERVED:
+            _emit_backfill(progress, symbol=symbol, day=day,
+                           status="skipped_live")
+            continue
+        if existing_days.get(day) == SOURCE_SYNTHETIC:
+            _emit_backfill(progress, symbol=symbol, day=day,
+                           status="skipped_backfill")
             continue
         candidates = opt_per_day.get(day)
         if not candidates:
@@ -714,6 +779,8 @@ def _stitched_backfill(
             captured_at_ms=dt_ms,
             source=SOURCE_SYNTHETIC,
         )
+        existing_days[day] = SOURCE_SYNTHETIC
+        _emit_backfill(progress, symbol=symbol, day=day, status="wrote")
         written += 1
     return written
 
