@@ -5,6 +5,7 @@ from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
 from schwab_cli.commands import dataset as dataset_cmd
 from schwab_cli.commands import dividends as dividends_cmd
+from schwab_cli.commands import doctor as doctor_cmd
 from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
@@ -46,6 +47,11 @@ def setup(
     doc: bool = doc_option(),
 ) -> None:
     setup_cmd.run(dry_run=dry_run)
+
+
+@app.command("doctor", help="Health check: install, MCP, auth, dataset.")
+def doctor(doc: bool = doc_option()) -> None:
+    doctor_cmd.run()
 
 
 @app.command("auth", help="Authenticate with Schwab (refresh or full OAuth).")
