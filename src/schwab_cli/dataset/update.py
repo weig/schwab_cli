@@ -259,6 +259,12 @@ def run_volatility_update(
     total = len(symbols)
     archive_date = now_dt.astimezone(_NY).date().isoformat()
 
+    # Pre-pass: which symbols already have a live ('observed') row for
+    # today's NY day. Lets us skip the chain pull for them entirely so a
+    # manual run + the cron + the `vol` command can't double-write the
+    # same trading day.
+    observed_today = _symbols_observed_on_ny_day(conn, archive_date)
+
     def _emit(**evt: Any) -> None:
         if progress is not None:
             progress(evt)
@@ -283,6 +289,12 @@ def run_volatility_update(
             skipped.append(sym)
             _emit(event="skipped", index=i, total=total, symbol=sym,
                   reason="WATCH (non-Monday)", archive_date=archive_date)
+            continue
+        if sym in observed_today:
+            skipped.append(sym)
+            _emit(event="skipped", index=i, total=total, symbol=sym,
+                  reason="already sampled today",
+                  archive_date=archive_date)
             continue
 
         _emit(event="start", index=i, total=total, symbol=sym,
@@ -393,6 +405,34 @@ def run_volatility_update(
         "errors":      errors,
         "positions":   pos_summary,
     }
+
+
+def _symbols_observed_on_ny_day(
+    conn: sqlite3.Connection, ny_day: str,
+) -> set[str]:
+    """Return the set of symbols with an ``observed`` row whose
+    NY trading day matches ``ny_day`` (YYYY-MM-DD).
+
+    The query pre-filters by ``archive_date`` (UTC-bucketed) within
+    a one-day window of ``ny_day`` so we don't scan the whole table —
+    NY's UTC offset is at most 5 hours, so any row whose NY day equals
+    ``ny_day`` has UTC archive_date in ``{ny_day - 1, ny_day, ny_day + 1}``.
+    The exact NY-day match is then verified in Python.
+    """
+    rows = conn.execute(
+        """
+        SELECT symbol, captured_at_ms FROM vol_snapshots
+        WHERE source = 'observed'
+          AND archive_date BETWEEN date(?, '-1 day') AND date(?, '+1 day')
+        """,
+        (ny_day, ny_day),
+    ).fetchall()
+    out: set[str] = set()
+    for r in rows:
+        ts = datetime.fromtimestamp(r["captured_at_ms"] / 1000, tz=timezone.utc)
+        if ts.astimezone(_NY).date().isoformat() == ny_day:
+            out.add(r["symbol"])
+    return out
 
 
 def _today_chain_volume(chain: dict) -> int:

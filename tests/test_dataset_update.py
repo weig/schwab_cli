@@ -240,6 +240,45 @@ def test_run_volatility_update_samples_active_writes_row(
     assert row["atm_iv_30d"] is not None
 
 
+def test_run_volatility_update_skips_already_sampled_today(conn, monkeypatch):
+    """If a symbol already has an observed row for today's NY day, the
+    daily cron must skip — same-day double-write is a waste of API
+    calls and storage. Regression test for the behaviour."""
+    from schwab_cli.dataset.store import subscribe_equity
+    from schwab_cli.storage.vol_history import record_extended_snapshot
+
+    subscribe_equity(conn, symbol="NVDA", group_name="volatility")
+    write_ticker_state(
+        conn, symbol="NVDA", group_name="volatility",
+        tier="ACTIVE", tier_since=_ms(2026, 1, 1),
+        consecutive_days_below=0, last_evaluated_at=_ms(2026, 1, 1),
+    )
+    # Pre-seed today's observed row at NY 9:35am 2026-04-15 — i.e. an
+    # earlier `vol NVDA` invocation already captured today.
+    record_extended_snapshot(
+        conn, symbol="NVDA", spot=200.0, atm_iv=0.34,
+        atm_strike=200.0, atm_expiry="2026-05-15", atm_dte=30,
+        captured_at_ms=_ms(2026, 4, 15, hour=13),  # 9am NY
+        source="observed",
+    )
+
+    chain_calls: list[str] = []
+    monkeypatch.setattr(
+        "schwab_cli.dataset.update.get_chain",
+        lambda *a, **kw: chain_calls.append("called") or {},
+    )
+
+    summary = run_volatility_update(
+        conn, client=None, group_name="volatility",
+        now_ms=_ms(2026, 4, 15, hour=22),  # 6pm NY same day
+        accounts=[],
+    )
+    assert summary["sampled"] == []
+    assert "NVDA" in summary["skipped"]
+    # Crucially, we never made the chain pull — saved an API call.
+    assert chain_calls == []
+
+
 def test_run_volatility_update_skips_frozen(conn, monkeypatch):
     from schwab_cli.dataset.store import subscribe_equity
     subscribe_equity(conn, symbol="NVDA", group_name="volatility")
