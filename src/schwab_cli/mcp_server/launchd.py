@@ -48,6 +48,12 @@ class LaunchdPlistSpec:
     port: int = 7234
     log_file: str | None = None      # stderr + stdout destination
     admin_token: str | None = None
+    # Override the launcher-script directory. Production callers leave
+    # this ``None`` so the launcher lands in the canonical
+    # ``~/Library/Application Support/schwab_cli/launchers`` location.
+    # Tests must set this to ``tmp_path`` — without an override,
+    # ``write_launcher`` clobbers the user's real launcher script.
+    launcher_dir: Path | None = None
 
 
 def _shquote(s: str) -> str:
@@ -65,7 +71,10 @@ def write_launcher(spec: LaunchdPlistSpec) -> Path:
     "Schwab MCP Server" is the simplest way to control that string
     for an unsigned CLI.
     """
-    path = launcher_path()
+    if spec.launcher_dir is not None:
+        path = spec.launcher_dir / LAUNCHER_NAME
+    else:
+        path = launcher_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     body = (
         "#!/bin/sh\n"

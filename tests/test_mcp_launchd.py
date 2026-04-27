@@ -66,7 +66,14 @@ def test_build_plist_no_log_file_omits_redirect():
 
 def test_write_plist_creates_parent_dirs(tmp_path):
     target = tmp_path / "nested" / "launchagents" / "com.schwab-cli.mcp.plist"
-    path = write_plist(LaunchdPlistSpec(binary_path="/x"), target)
+    # ``launcher_dir=tmp_path`` keeps the launcher script inside the test's
+    # tmpdir; without it ``write_launcher`` clobbers the real
+    # ``~/Library/Application Support/schwab_cli/launchers`` script and
+    # breaks the user's launchd setup. Don't drop it.
+    path = write_plist(
+        LaunchdPlistSpec(binary_path="/x", launcher_dir=tmp_path),
+        target,
+    )
     assert path == target
     assert target.exists()
     # Round-trip parse.
@@ -77,6 +84,15 @@ def test_write_plist_creates_parent_dirs(tmp_path):
 def test_write_plist_overwrites_existing(tmp_path):
     target = tmp_path / "p.plist"
     target.write_text("leftover content")
-    write_plist(LaunchdPlistSpec(binary_path="/new"), target)
+    write_plist(
+        LaunchdPlistSpec(binary_path="/new", launcher_dir=tmp_path),
+        target,
+    )
     data = plistlib.loads(target.read_bytes())
-    assert data["ProgramArguments"][0] == "/new"
+    # The plist's ProgramArguments[0] is the launcher *script*, not the
+    # binary — the binary lives inside the launcher's exec line. Verify
+    # both: the plist points at the launcher in tmp_path, and the
+    # launcher itself contains our chosen binary.
+    launcher = tmp_path / "Schwab MCP Server"
+    assert data["ProgramArguments"][0] == str(launcher)
+    assert "/new mcp --sse" in launcher.read_text()

@@ -152,7 +152,10 @@ def test_server_exposes_expected_tool_names():
     assert handler is not None
     result = _call(handler(ListToolsRequest(method="tools/list")))
     names = {t.name for t in result.root.tools}
-    assert names == {"get_quote", "get_chain", "stream_quote", "server_status"}
+    assert names == {
+        "get_quote", "get_chain", "stream_quote", "server_status",
+        "dataset.history", "dataset.iv_rank", "dataset.status",
+    }
 
 
 # ---- stream_quote cleanup on client disconnect ------------------------

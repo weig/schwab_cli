@@ -295,11 +295,77 @@ def run_logout(*, url: str | None, token: str | None) -> None:
     typer.echo("shutdown signalled")
 
 
+def _launchd_job_loaded(label: str) -> bool:
+    """Return True when ``launchctl list`` recognizes ``label``.
+
+    Covers both running and throttled-retry states — what we care about
+    is whether launchd owns the daemon's lifecycle, not whether it's
+    currently up. Returns False on non-Darwin or when launchctl is
+    missing so the function is safe to call from tests.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["launchctl", "list", label],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
 def run_restart(
     *, url: str | None, token: str | None,
     stdio: bool, host: str, port: int,
 ) -> None:
-    """Logout + start. Start runs in the foreground in the same terminal."""
+    """Bounce the SSE daemon.
+
+    Two paths:
+
+    1. **launchd-managed.** When ``com.schwab-cli.mcp`` is loaded with
+       launchctl (the install-service path), ``launchctl kickstart -k``
+       is the canonical bounce — it SIGTERMs the existing PID and
+       lets ``KeepAlive=true`` respawn under the same job. The
+       command returns immediately; the user's terminal stays free.
+    2. **Manual foreground.** No launchd job loaded → fall back to
+       logout-via-admin + ``os.execvp``, the original behavior. The
+       restarted daemon takes over the user's terminal.
+
+    The ``--stdio`` flag and any non-default ``--host``/``--port`` are
+    incompatible with launchd (the plist bakes in ``--sse 127.0.0.1:7234``
+    by default). When ``--stdio`` is set we always take the foreground
+    path; mismatched host/port surface as a warning so the user can
+    decide whether to ``mcp install-service`` to re-bake the plist.
+    """
+    from schwab_cli.mcp_server.launchd import LABEL
+
+    if not stdio and _launchd_job_loaded(LABEL):
+        if (host, port) != ("127.0.0.1", 7234):
+            typer.secho(
+                f"warning: --host/--port flags ({host}:{port}) are ignored "
+                f"in launchd mode; the plist's baked config wins. "
+                f"Re-run `mcp install-service` to change the bound address.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        import subprocess
+        target = f"gui/{os.getuid()}/{LABEL}"
+        typer.echo(f"kickstarting launchd job: {target}")
+        result = subprocess.run(
+            ["launchctl", "kickstart", "-k", target],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            typer.secho(
+                f"launchctl kickstart failed: {err}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(
+            "daemon will respawn momentarily — `mcp status` to verify."
+        )
+        return
+
     try:
         run_logout(url=url, token=token)
     except typer.Exit:
