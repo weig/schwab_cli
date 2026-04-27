@@ -26,12 +26,33 @@ def test_resolve_stock_lowercase_gets_normalized():
     assert resolve("nvda").underlying == "NVDA"
 
 
-def test_resolve_stock_with_dot_kept():
-    assert resolve("BRK.B") == Ticker(type="stock", underlying="BRK.B", option=None)
+def test_resolve_stock_class_share_normalizes_to_slash():
+    """Schwab's quote / chain / history endpoints want ``BRK/B`` —
+    the dot and dash forms silently return empty payloads. The
+    resolver canonicalizes to slash so downstream API calls always
+    use the form Schwab accepts."""
+    expected = Ticker(type="stock", underlying="BRK/B", option=None)
+    assert resolve("BRK.B") == expected
+    assert resolve("BRK/B") == expected
+    assert resolve("BRK-B") == expected
+    assert resolve("brk.b") == expected   # case-insensitive
 
 
 def test_stock_ticker_to_schwab_symbol_is_identity():
     assert resolve("NVDA").to_schwab_symbol() == "NVDA"
+
+
+def test_to_schwab_form_normalizes_class_shares():
+    """Module-level helper used at API boundaries when the caller
+    has a raw symbol string and didn't go through the Ticker
+    resolver. Idempotent and OSI-safe."""
+    from schwab_cli.ticker import to_schwab_form
+    assert to_schwab_form("BRK.B") == "BRK/B"
+    assert to_schwab_form("BRK-B") == "BRK/B"
+    assert to_schwab_form("BRK/B") == "BRK/B"   # idempotent
+    assert to_schwab_form("NVDA") == "NVDA"     # plain pass-through
+    # OSI option strings have digits; must not get rewritten.
+    assert to_schwab_form("NVDA  260501C00240000") == "NVDA  260501C00240000"
 
 
 # ---- option: all four input forms equivalent -----------------------------

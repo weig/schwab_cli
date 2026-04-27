@@ -69,6 +69,36 @@ class Ticker:
         return f"{u}{yymmdd}{self.option.type}{strike_osi}"
 
 
+def to_schwab_form(symbol: str) -> str:
+    """Normalize a stock symbol to the form Schwab's API accepts.
+
+    Schwab's quote / chain / history endpoints want class shares with
+    a slash separator (``BRK/B``). Common alternative forms (``BRK.B``,
+    ``BRK-B``) silently return empty results. This helper rewrites
+    those into Schwab's form so the API layer can be agnostic about
+    which convention the caller used.
+
+    Idempotent — already-correct ``BRK/B`` and plain ``NVDA`` pass
+    through unchanged. Option OSI strings (with embedded YYMMDD) are
+    detected by the presence of a digit and returned as-is so the
+    21-char OSI form survives.
+    """
+    if not symbol:
+        return symbol
+    s = symbol.strip()
+    if any(c.isdigit() for c in s):
+        # OSI option symbol (NVDA  260501C00240000) — leave alone.
+        return s
+    # Replace the *first* dot or dash with a slash. Avoid touching
+    # subsequent characters in case some weird future ticker has
+    # multiple separators.
+    if "." in s:
+        return s.replace(".", "/", 1)
+    if "-" in s:
+        return s.replace("-", "/", 1)
+    return s
+
+
 # Option ticker: underlying (alphanumeric, may embed digits for synthetic
 # names like EXACT6), optional whitespace (Schwab's "NVDA  260501C240"
 # padding), then a strict YYMMDD date, put/call letter, and strike.
@@ -83,7 +113,10 @@ _OPTION_RE = re.compile(
 # Stock ticker: alpha only (optionally with a ".X" share-class suffix).
 # Deliberately strict — rejects digit-bearing strings so `NVDA260501C240`
 # cannot accidentally parse as a stock after the option regex misses.
-_STOCK_RE = re.compile(r"^[A-Z]+(?:\.[A-Z]+)?$")
+# Class-share separators: ``.`` (BRK.B), ``/`` (BRK/B), ``-`` (BRK-B).
+# All three conventions show up in the wild; we accept any and
+# canonicalize to the slash form Schwab's quote/history APIs expect.
+_STOCK_RE = re.compile(r"^[A-Z]+(?:[./\-][A-Z]+)?$")
 
 
 def resolve(raw: str) -> Ticker:
@@ -112,7 +145,13 @@ def resolve(raw: str) -> Ticker:
 
     # Not an option — must be a pure-alpha stock ticker.
     if _STOCK_RE.match(compact):
-        return Ticker(type="stock", underlying=compact, option=None)
+        # Canonicalize class-share separator to Schwab's slash form.
+        # ``BRK.B`` / ``BRK-B`` → ``BRK/B`` so the underlying string
+        # is what Schwab's quote/history endpoints expect.
+        canonical = re.sub(r"[.\-]", "/", compact, count=1) if any(
+            sep in compact for sep in ".-"
+        ) else compact
+        return Ticker(type="stock", underlying=canonical, option=None)
 
     raise TickerError(f"unrecognized ticker format: {raw!r}")
 

@@ -5,6 +5,7 @@ from datetime import date
 from typing import Literal
 
 from schwab_cli.api.client import SchwabClient
+from schwab_cli.ticker import to_schwab_form
 
 
 def get_chain(
@@ -34,7 +35,7 @@ def get_chain(
     if strike_count is not None and strike_count < 1:
         raise ValueError(f"strike_count must be >= 1 or None, got {strike_count}")
     params: dict[str, str | int] = {
-        "symbol": symbol,
+        "symbol": to_schwab_form(symbol),
         "contractType": contract_type,
         "strategy": "SINGLE",
         "includeUnderlyingQuote": "true",

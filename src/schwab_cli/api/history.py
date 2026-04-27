@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 
 from schwab_cli.api.client import SchwabClient
+from schwab_cli.ticker import to_schwab_form
 
 # Schwab's /pricehistory validates `frequencyType` against `periodType`:
 #   day   → minute only
@@ -36,7 +37,7 @@ def get_history(
     `start` and `end` must be tz-aware datetimes; Schwab wants epoch ms (UTC).
     """
     params: dict[str, str | int] = {
-        "symbol": symbol,
+        "symbol": to_schwab_form(symbol),
         "periodType": _PERIOD_TYPE[frequency_type],
         "frequencyType": frequency_type,
         "frequency": frequency,

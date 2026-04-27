@@ -37,6 +37,11 @@ def run(symbols: list[str], *, as_json: bool, as_md: bool) -> None:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
+    # Normalize class-share separators (BRK.B → BRK/B) up front so the
+    # renderer's per-symbol lookup matches the keys Schwab returns.
+    from schwab_cli.ticker import to_schwab_form
+    symbols = [to_schwab_form(s) for s in symbols]
+
     client = _client()
     try:
         payload = get_quotes(client, symbols)

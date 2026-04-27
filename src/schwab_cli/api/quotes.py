@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from schwab_cli.api.client import SchwabClient
+from schwab_cli.ticker import to_schwab_form
 
 
 def get_quotes(
@@ -25,6 +26,8 @@ def get_quotes(
     """
     if not symbols:
         return {}
+    # BRK.B / BRK-B → BRK/B etc. Idempotent for already-correct inputs.
+    symbols = [to_schwab_form(s) for s in symbols]
     params: dict[str, str] = {"symbols": ",".join(symbols)}
     if fields:
         params["fields"] = fields
