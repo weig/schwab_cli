@@ -47,15 +47,30 @@ def subscribe(
             typer.secho("--account requires a non-empty value",
                         fg=typer.colors.RED, err=True)
             raise typer.Exit(code=2)
+        # Persist the account intent so the daily cron picks it up
+        # even if today's eager sync fails (no auth, network blip, …).
         cfg = load_config_or_default()
         cfg.setdefault("accounts", {}).setdefault(group, [])
         if account not in cfg["accounts"][group]:
             cfg["accounts"][group].append(account)
             save_config(cfg)
-        typer.secho(
-            f"subscribed account {account[-4:]!r} → group={group}",
-            fg=typer.colors.GREEN,
-        )
+        # Eager-sync positions so `dataset status` shows them right away.
+        # Falls back gracefully when auth isn't set up yet.
+        added, closed, err = _eager_sync_account(account, group=group)
+        suffix = account[-4:] if len(account) >= 4 else account
+        if err is not None:
+            typer.secho(
+                f"subscribed account {suffix!r} → group={group}; "
+                f"position sync deferred ({err}). "
+                f"Run `dataset update --group {group}` after auth is set up.",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            typer.secho(
+                f"subscribed account {suffix!r} → group={group}; "
+                f"+{len(added)} symbols ({', '.join(added) or '—'})",
+                fg=typer.colors.GREEN,
+            )
         return
 
     if not target_str:
@@ -87,6 +102,43 @@ def subscribe(
         for sym in symbols:
             subscribe_equity(conn, symbol=sym, group_name=group)
     typer.secho(f"subscribed: {', '.join(symbols)}", fg=typer.colors.GREEN)
+
+
+def _eager_sync_account(
+    account: str, *, group: str,
+) -> tuple[list[str], list[str], str | None]:
+    """Materialize position rows for the just-subscribed account.
+
+    Returns ``(added_symbols, closed_symbols, error_message)``. On any
+    failure (no auth, expired session, API error) we return an error
+    string instead of raising — the subscription intent is already
+    persisted, so the daily cron will retry.
+    """
+    import time
+    from schwab_cli.storage import vol_history
+    from schwab_cli.dataset.update import sync_account_positions
+    try:
+        from schwab_cli.api.client import SchwabClient
+        from schwab_cli import config as config_module
+        from schwab_cli.session import load as load_session
+        cfg_full = config_module.load()
+        sess = load_session()
+    except Exception as e:
+        return [], [], f"config/session load failed: {e}"
+    if cfg_full is None or sess is None:
+        return [], [], "no session — run `schwab_cli auth`"
+    try:
+        client = SchwabClient(cfg_full, sess)
+        with vol_history.connect() as conn:
+            summary = sync_account_positions(
+                conn, client=client, account_hash=account,
+                group_name=group, now_ms=int(time.time() * 1000),
+            )
+    except Exception as e:
+        return [], [], str(e)
+    if summary.get("error"):
+        return [], [], summary["error"]
+    return summary.get("added", []), summary.get("closed", []), None
 
 
 @app.command("unsubscribe", help="Remove subscription(s) (soft-delete).")
