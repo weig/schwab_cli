@@ -40,6 +40,7 @@ class OrderContext:
     profile: Any | None = None
     profile_load_error: str | None = None
     underlying_quote: dict | None = None
+    chain_data: dict | None = None        # shape_envelope output, single-expiry only
     current_balances: dict | None = None
     account_positions: list | None = None
     preview_summary: Any | None = None

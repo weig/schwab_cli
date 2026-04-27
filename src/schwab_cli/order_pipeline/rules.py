@@ -219,6 +219,73 @@ class FetchUnderlyingQuoteRule:
         return RuleResult()
 
 
+class FetchChainRule:
+    """Step 2c — option-chain pull for POP enrichment.
+
+    Single-expiry option orders only — multi-expiry strategies
+    (CALENDAR / DIAGONAL / etc.) need per-leg chain calls and a
+    different POP shape; punt for now.
+
+    Best-effort: chain endpoint failures leave ``ctx.chain_data``
+    ``None`` and the analytics renderer prints "(unavailable)" rather
+    than blocking the order.
+    """
+
+    name = "fetch_chain"
+
+    def applies(self, ctx: OrderContext) -> bool:
+        if not (ctx.dry_run or not ctx.yes):
+            return False
+        # Only meaningful for option orders. Equity has no chain.
+        legs = (ctx.body or {}).get("orderLegCollection") or []
+        return any(
+            (l.get("instrument") or {}).get("assetType") == "OPTION"
+            for l in legs
+        )
+
+    def execute(self, ctx: OrderContext) -> RuleResult:
+        from datetime import date
+
+        from schwab_cli.api.chains import get_chain
+        from schwab_cli.output.chains import shape_envelope
+
+        legs = (ctx.body or {}).get("orderLegCollection") or []
+        # Collect distinct expiries from each option OSI symbol.
+        expiries: set[date] = set()
+        for leg in legs:
+            sym = ((leg.get("instrument") or {}).get("symbol") or "")
+            if len(sym) < 21:
+                continue
+            try:
+                yymmdd = sym[6:12]
+                expiries.add(date(
+                    2000 + int(yymmdd[:2]),
+                    int(yymmdd[2:4]),
+                    int(yymmdd[4:6]),
+                ))
+            except (ValueError, IndexError):
+                continue
+        # Multi-expiry strategies skip POP for now (the existing
+        # ``pop()`` accepts mixed expiries via dte=0 fallback, but
+        # the result isn't meaningful without per-expiry chains).
+        if len(expiries) != 1:
+            return RuleResult()
+        expiry = next(iter(expiries))
+        try:
+            raw = get_chain(
+                ctx.client, ctx.spec.underlying.upper(),
+                contract_type="ALL", strike_count=50,
+                from_date=expiry, to_date=expiry,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; POP just stays None
+            return RuleResult()
+        try:
+            ctx.chain_data = shape_envelope(raw)
+        except Exception:  # noqa: BLE001
+            ctx.chain_data = None
+        return RuleResult()
+
+
 class SchwabPreviewRule:
     """Step 3 — call Schwab's previewOrder for commission, fees, BP, rejects.
 
@@ -284,6 +351,8 @@ class ComputeAnalyticsRule:
             strikes=ctx.spec.strikes,
             quantity=ctx.spec.quantity,
             price=ctx.spec.price,
+            body=ctx.body,
+            chain_data=ctx.chain_data,
         )
         return RuleResult()
 
@@ -774,6 +843,7 @@ DEFAULT_RULES: tuple = (
     FetchAccountBalancesRule(),
     DetectOpenCloseRule(),       # must run BEFORE SchwabPreviewRule
     FetchUnderlyingQuoteRule(),
+    FetchChainRule(),
     SchwabPreviewRule(),
     ComputeAnalyticsRule(),
     RenderPanelRule(),

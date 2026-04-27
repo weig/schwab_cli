@@ -28,15 +28,17 @@ _ET = ZoneInfo("America/New_York")
 class OrderAnalytics:
     """Local-only analytics for the confirmation panel.
 
-    POP is deferred to the Phase 2 live-MCP integration (needs a
-    real-time IV pull). For Phase 1 we surface only the deterministic
-    payoff-at-expiry numbers.
+    Probability-of-profit is populated when the chain payload was
+    fetched and we could anchor IV on the order's option legs;
+    otherwise ``pop`` is ``None`` and the renderer falls back to a
+    "(unavailable)" line.
     """
 
     max_profit: float | None    # dollars; None = unlimited
     max_loss: float | None      # dollars (negative); None = unlimited downside
     breakevens: tuple[float, ...]
     order_cost: float           # dollars; positive = debit, negative = credit
+    pop: float | None = None    # probability of profit, 0..1
 
 
 def compute_analytics(
@@ -47,16 +49,35 @@ def compute_analytics(
     strikes: tuple[float, ...],
     quantity: int,
     price: float | None,
+    body: dict | None = None,
+    chain_data: dict | None = None,
 ) -> OrderAnalytics | None:
     """Return :class:`OrderAnalytics` for option orders we know how to
     score, or ``None`` for equity / unsupported shapes.
 
     ``price`` is the limit price per share (single leg) or per spread
     (vertical). For market orders we can't compute these → return ``None``.
+
+    ``body`` + ``chain_data`` are optional. When both are supplied, the
+    returned analytics carry a non-``None`` :attr:`OrderAnalytics.pop`
+    computed against the chain's IV. Failure to compute POP is silent —
+    ``pop`` falls back to ``None`` and the renderer prints "(unavailable)".
     """
     if not option_type or price is None:
         return None
     qty_mult = 100 * quantity
+
+    def _with_pop(a: OrderAnalytics) -> OrderAnalytics:
+        """Best-effort POP enrichment. Silent on any failure — the
+        renderer treats ``pop=None`` as "(unavailable)"."""
+        if not body or not chain_data:
+            return a
+        try:
+            pop = _compute_pop(body, chain_data)
+        except Exception:  # noqa: BLE001 — never block analytics on POP
+            pop = None
+        from dataclasses import replace
+        return replace(a, pop=pop)
 
     if strategy is None:
         # Single-leg option.
@@ -64,35 +85,35 @@ def compute_analytics(
         if side == "BUY":  # long
             cost = price * qty_mult
             if option_type == "CALL":
-                return OrderAnalytics(
+                return _with_pop(OrderAnalytics(
                     max_profit=None,                # unlimited upside
                     max_loss=-cost,
                     breakevens=(K + price,),
                     order_cost=cost,
-                )
+                ))
             else:  # PUT
-                return OrderAnalytics(
+                return _with_pop(OrderAnalytics(
                     max_profit=(K - price) * qty_mult,
                     max_loss=-cost,
                     breakevens=(K - price,),
                     order_cost=cost,
-                )
+                ))
         else:  # SELL
             credit = price * qty_mult
             if option_type == "CALL":
-                return OrderAnalytics(
+                return _with_pop(OrderAnalytics(
                     max_profit=credit,
                     max_loss=None,                  # unlimited
                     breakevens=(K + price,),
                     order_cost=-credit,
-                )
+                ))
             else:  # PUT
-                return OrderAnalytics(
+                return _with_pop(OrderAnalytics(
                     max_profit=credit,
                     max_loss=-(K - price) * qty_mult,
                     breakevens=(K - price,),
                     order_cost=-credit,
-                )
+                ))
 
     if strategy == "VERTICAL":
         lower, higher = strikes
@@ -106,12 +127,12 @@ def compute_analytics(
                 breakeven = lower + debit_per
             else:                                    # PUT
                 breakeven = higher - debit_per
-            return OrderAnalytics(
+            return _with_pop(OrderAnalytics(
                 max_profit=max_profit,
                 max_loss=max_loss,
                 breakevens=(breakeven,),
                 order_cost=debit_per * qty_mult,
-            )
+            ))
         else:  # SELL — credit spread
             credit_per = price
             max_profit = credit_per * qty_mult
@@ -120,14 +141,91 @@ def compute_analytics(
                 breakeven = lower + credit_per
             else:
                 breakeven = higher - credit_per
-            return OrderAnalytics(
+            return _with_pop(OrderAnalytics(
                 max_profit=max_profit,
                 max_loss=max_loss,
                 breakevens=(breakeven,),
                 order_cost=-credit_per * qty_mult,
-            )
+            ))
 
     return None
+
+
+def _compute_pop(body: dict, chain_envelope: dict) -> float | None:
+    """Probability of profit for ``body``'s option legs, against the
+    flattened chain envelope.
+
+    Builds :class:`PricedLeg` objects by matching each body leg's OSI
+    symbol to a chain contract. Returns ``None`` when:
+
+    * Spot is missing from the chain envelope.
+    * No legs match a chain contract (e.g. unfetched expiry).
+    * Every leg's IV resolves to zero (the underlying ``pop`` function
+      then returns a deterministic 0/1 — useless as a probability).
+    """
+    from datetime import date as _date
+
+    from schwab_cli.analytics.strategy import PricedLeg, pop as _pop_fn
+
+    legs_raw = body.get("orderLegCollection") or []
+    if not legs_raw:
+        return None
+    underlying = (chain_envelope.get("underlying") or {})
+    spot = underlying.get("last")
+    if not isinstance(spot, (int, float)) or spot <= 0:
+        return None
+
+    contracts = chain_envelope.get("contracts") or []
+    # Index by (side, strike) for O(1) lookup.
+    by_key: dict[tuple[str, float], dict] = {}
+    for c in contracts:
+        side_c = c.get("side")
+        k = c.get("strike")
+        if side_c in ("C", "P") and isinstance(k, (int, float)):
+            by_key[(side_c, float(k))] = c
+
+    priced: list[PricedLeg] = []
+    dte: int | None = chain_envelope.get("dte")
+    for leg in legs_raw:
+        instr = (leg.get("instrument") or {})
+        if instr.get("assetType") != "OPTION":
+            continue
+        sym = (instr.get("symbol") or "")
+        if len(sym) < 21:
+            continue
+        # OSI: 6-char underlying / 6-char YYMMDD / 1-char C|P / 8-digit strike.
+        try:
+            yymmdd = sym[6:12]
+            cp = sym[12]
+            strike_int = int(sym[13:21])
+            expiry = _date(2000 + int(yymmdd[:2]), int(yymmdd[2:4]), int(yymmdd[4:6]))
+            strike = strike_int / 1000.0
+        except (ValueError, IndexError):
+            continue
+        contract = by_key.get((cp, strike))
+        if not contract:
+            continue
+        instruction = (leg.get("instruction") or "").upper()
+        sign = 1 if instruction.startswith("BUY") else -1
+        qty_int = int(leg.get("quantity") or 0)
+        if qty_int == 0:
+            continue
+        from schwab_cli.commands.strategy import _pick_premium
+        premium = _pick_premium(contract)
+        priced.append(PricedLeg(
+            qty=sign * qty_int, side=cp, expiry=expiry, strike=strike,
+            premium=premium, iv=contract.get("iv"),
+            delta=contract.get("delta"), gamma=contract.get("gamma"),
+            theta=contract.get("theta"), vega=contract.get("vega"),
+        ))
+
+    if not priced:
+        return None
+    if not isinstance(dte, int):
+        # Derive from the first leg if envelope didn't carry one.
+        from datetime import date as _today_d
+        dte = max((priced[0].expiry - _today_d.today()).days, 0)
+    return _pop_fn(priced, spot=float(spot), dte=dte)
 
 
 # ---- preview-response field extraction ------------------------------------
@@ -379,7 +477,10 @@ def render_confirmation(
         if analytics.breakevens:
             be = "  ".join(f"${b:,.2f}" for b in analytics.breakevens)
             lines.append(_row("Breakevens", be))
-        lines.append(_row("POP", "(deferred to Phase 2 — needs live IV)"))
+        if analytics.pop is not None:
+            lines.append(_row("Prob of Profit", f"{analytics.pop * 100:.1f}%"))
+        else:
+            lines.append(_row("Prob of Profit", "(unavailable — chain not fetched)"))
 
     # Cost & Buying Power
     lines.append("")
