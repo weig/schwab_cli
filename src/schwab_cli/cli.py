@@ -799,6 +799,27 @@ def order_place(
         help="Required companion flag for --override. Without it the "
              "override has no effect (ceremony — see docs/plan/order.md).",
     ),
+    stop_price: float = typer.Option(
+        None, "--stop-price",
+        help="Trigger price for STOP / STOP_LIMIT orders. Required when "
+             "--type is STOP or STOP_LIMIT.",
+    ),
+    trailing_offset: float = typer.Option(
+        None, "--trailing-offset",
+        help="Distance the stop trails the basis. VALUE = absolute "
+             "dollars (e.g. 1.50); PERCENT = whole-number percent "
+             "(e.g. 5 for 5%). Required for TRAILING_STOP*.",
+    ),
+    trailing_basis: str = typer.Option(
+        None, "--trailing-basis",
+        help="What the trail anchors to: BID, ASK, LAST, MARK. "
+             "Required for TRAILING_STOP*.",
+    ),
+    trailing_type: str = typer.Option(
+        None, "--trailing-type",
+        help="VALUE (absolute) or PERCENT (relative). "
+             "Required for TRAILING_STOP*.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     order_cmd.run_place(
@@ -811,6 +832,10 @@ def order_place(
         profile=profile,
         override_reason=override_reason,
         override_confirm=override_confirm,
+        stop_price=stop_price,
+        trailing_offset=trailing_offset,
+        trailing_basis=trailing_basis,
+        trailing_type=trailing_type,
     )
 
 
@@ -831,6 +856,10 @@ def order_preview(
     special: str = typer.Option(None, "--special"),
     parse_string: str = typer.Option(None, "--parse"),
     as_json: bool = typer.Option(False, "--json"),
+    stop_price: float = typer.Option(None, "--stop-price"),
+    trailing_offset: float = typer.Option(None, "--trailing-offset"),
+    trailing_basis: str = typer.Option(None, "--trailing-basis"),
+    trailing_type: str = typer.Option(None, "--trailing-type"),
     profile: str = typer.Option(
         None, "--profile",
         help="Policy profile name (default: default; honours $SCHWAB_CLI_PROFILE).",
@@ -845,6 +874,10 @@ def order_preview(
         special=special, parse_string=parse_string,
         dry_run=True, yes=False, as_json=as_json,
         profile=profile,
+        stop_price=stop_price,
+        trailing_offset=trailing_offset,
+        trailing_basis=trailing_basis,
+        trailing_type=trailing_type,
     )
 
 

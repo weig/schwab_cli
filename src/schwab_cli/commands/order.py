@@ -344,6 +344,11 @@ class _NormalizedOrder:
     # For analytics:
     option_type: str | None                # CALL/PUT/None
     strikes: tuple[float, ...]
+    # Phase 4: stop / trailing-stop fields. None for non-stop orders.
+    stop_price: float | None = None        # STOP, STOP_LIMIT trigger
+    trailing_offset: float | None = None   # TRAILING_STOP* offset value
+    trailing_basis: str | None = None      # BID, ASK, LAST, MARK
+    trailing_type: str | None = None       # VALUE, PERCENT
 
 
 def _build_body(spec: _NormalizedOrder) -> dict:
@@ -360,6 +365,17 @@ def _build_body(spec: _NormalizedOrder) -> dict:
     if spec.price is not None:
         # Schwab prefers prices as strings to avoid float-truncation.
         body["price"] = f"{spec.price:.2f}"
+    # Stop / stop-limit: trigger price.
+    if spec.stop_price is not None:
+        body["stopPrice"] = f"{spec.stop_price:.2f}"
+    # Trailing stop: offset + basis + type. Schwab requires all three
+    # for TRAILING_STOP / TRAILING_STOP_LIMIT — see Trader API §placeOrder.
+    if spec.trailing_offset is not None:
+        body["stopPriceOffset"] = spec.trailing_offset
+    if spec.trailing_basis is not None:
+        body["stopPriceLinkBasis"] = spec.trailing_basis
+    if spec.trailing_type is not None:
+        body["stopPriceLinkType"] = spec.trailing_type
     return body
 
 
@@ -485,6 +501,10 @@ def _spec_from_flags(
     session: str,
     leg_specs: tuple[str, ...],
     complex_strategy: str,
+    stop_price: float | None = None,
+    trailing_offset: float | None = None,
+    trailing_basis: str | None = None,
+    trailing_type: str | None = None,
 ) -> _NormalizedOrder:
     if leg_specs:
         # Multi-leg option order via --leg.
@@ -544,6 +564,10 @@ def _spec_from_flags(
             is_naked_short=_is_naked_short_options(parsed_for_naked),
             option_type=opt_type,
             strikes=strikes,
+            stop_price=stop_price,
+            trailing_offset=trailing_offset,
+            trailing_basis=trailing_basis,
+            trailing_type=trailing_type,
         )
 
     # Equity single-leg.
@@ -562,6 +586,10 @@ def _spec_from_flags(
         is_naked_short=False,
         option_type=None,
         strikes=(),
+        stop_price=stop_price,
+        trailing_offset=trailing_offset,
+        trailing_basis=trailing_basis,
+        trailing_type=trailing_type,
     )
 
 
@@ -690,6 +718,10 @@ def run_place(
     profile: str | None = None,
     override_reason: str | None = None,
     override_confirm: bool = False,
+    stop_price: float | None = None,
+    trailing_offset: float | None = None,
+    trailing_basis: str | None = None,
+    trailing_type: str | None = None,
 ) -> None:
     sub = "preview" if dry_run else "place"
     # Log the raw invocation BEFORE any validation so even bad-flag
@@ -745,6 +777,10 @@ def run_place(
             session=session,
             leg_specs=leg_specs,
             complex_strategy=complex_strategy or "AUTO",
+            stop_price=stop_price,
+            trailing_offset=trailing_offset,
+            trailing_basis=trailing_basis,
+            trailing_type=trailing_type,
         )
 
     _validate_session_combo(
@@ -772,12 +808,53 @@ def run_place(
         raise typer.Exit(code=EXIT_USAGE)
 
     # Validate price requirement for non-MARKET orders.
-    if spec.order_type in ("LIMIT", "NET_DEBIT", "NET_CREDIT") and spec.price is None:
+    if spec.order_type in (
+        "LIMIT", "NET_DEBIT", "NET_CREDIT", "LIMIT_ON_CLOSE",
+    ) and spec.price is None:
         typer.secho(
             f"--type={spec.order_type} requires --price",
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=EXIT_USAGE)
+
+    # Stop variants need a trigger price.
+    if spec.order_type in ("STOP", "STOP_LIMIT") and spec.stop_price is None:
+        typer.secho(
+            f"--type={spec.order_type} requires --stop-price",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+    if spec.order_type == "STOP_LIMIT" and spec.price is None:
+        typer.secho(
+            "--type=STOP_LIMIT requires both --stop-price (trigger) "
+            "and --price (limit once triggered)",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
+    # Trailing stops need offset + basis + type. STOP_LIMIT variant
+    # also needs --price.
+    if spec.order_type in ("TRAILING_STOP", "TRAILING_STOP_LIMIT"):
+        missing = [
+            f for f, v in (
+                ("--trailing-offset", spec.trailing_offset),
+                ("--trailing-basis",  spec.trailing_basis),
+                ("--trailing-type",   spec.trailing_type),
+            ) if v is None
+        ]
+        if missing:
+            typer.secho(
+                f"--type={spec.order_type} requires {', '.join(missing)}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=EXIT_USAGE)
+        if spec.order_type == "TRAILING_STOP_LIMIT" and spec.price is None:
+            typer.secho(
+                "--type=TRAILING_STOP_LIMIT requires --price (the "
+                "limit anchored to the trailing trigger)",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=EXIT_USAGE)
 
     if special:
         # Tack on into the body during build (handled here so spec stays minimal).
