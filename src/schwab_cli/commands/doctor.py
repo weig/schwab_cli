@@ -201,7 +201,73 @@ def _redact_user(username: str | None) -> str:
     return f"{username[:2]}***"
 
 
-# ---- 4. Dataset -------------------------------------------------------
+# ---- 4. Telegram notifications ----------------------------------------
+
+
+_TELEGRAM_API = "https://api.telegram.org"
+
+
+def _telegram_get_me(bot_token: str) -> dict | None:
+    """Hit Telegram's getMe with a short timeout. Returns the bot info
+    on success, ``None`` on any failure (bad token, network, …)."""
+    try:
+        resp = httpx.get(
+            f"{_TELEGRAM_API}/bot{bot_token}/getMe", timeout=3.0,
+        )
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        if not body.get("ok"):
+            return None
+        return body.get("result")
+    except (httpx.HTTPError, json.JSONDecodeError):
+        return None
+
+
+def _redact_token(token: str) -> str:
+    """Show only the bot ID portion (before the colon) so we don't
+    leak the secret half. Telegram tokens look like ``<id>:<secret>``."""
+    head, _, _ = token.partition(":")
+    return f"{head}:***" if head else "***"
+
+
+def _check_telegram() -> None:
+    _section("Telegram notifications")
+    from schwab_cli.notify.config import load as load_notify_config
+
+    cfg = load_notify_config()
+    tg = cfg.telegram
+
+    if not tg.configured:
+        _bad("Not configured")
+        _hint("schwab_cli notify configure  (or edit "
+              "~/.config/schwab_cli/notification.json directly)")
+        return
+
+    _ok("Configured", f"bot {_redact_token(tg.bot_token)}, "
+                      f"chat {tg.chat_id}")
+
+    bot = _telegram_get_me(tg.bot_token)
+    if bot:
+        _ok("Bot reachable", f"@{bot.get('username', '?')} "
+                             f"({bot.get('first_name', '?')})")
+    else:
+        _bad("Bot unreachable")
+        _hint("verify bot_token + network; try `schwab_cli notify test`")
+
+    n_events = len(tg.events)
+    if n_events > 0:
+        _info("Events subscribed", f"{n_events} ({', '.join(tg.events[:3])}"
+                                   + ("…" if n_events > 3 else "") + ")")
+    else:
+        _info("Events subscribed", "0  (channel configured but no events "
+                                   "will fire — add to "
+                                   "~/.config/schwab_cli/notification.json)")
+
+    _info("Rate limit", f"{tg.rate_limit_seconds}s per (channel, event)")
+
+
+# ---- 5. Dataset -------------------------------------------------------
 
 
 _DATASET_INDICES_PLIST = (
@@ -335,5 +401,6 @@ def run() -> None:
     _check_install()
     _check_mcp()
     _check_auth()
+    _check_telegram()
     _check_dataset()
     typer.echo("")
