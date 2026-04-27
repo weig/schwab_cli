@@ -175,6 +175,51 @@ def test_iron_butterfly():
     assert c.naked is False
 
 
+# ---- 4-leg same-side condor -------------------------------------------
+
+
+def test_long_call_condor():
+    # +1 -1 -1 +1 ascending strikes, all calls.
+    legs = [L(1, "C", 250), L(-1, "C", 255), L(-1, "C", 260), L(1, "C", 265)]
+    c = classify(legs)
+    assert c.strategy == "Long Call Condor"
+    assert c.ticket_name == "CONDOR"
+    assert c.naked is False  # balanced — long count == short count
+
+
+def test_short_call_condor():
+    # -1 +1 +1 -1 ascending strikes, all calls. Bounded both ways.
+    legs = [L(-1, "C", 250), L(1, "C", 255), L(1, "C", 260), L(-1, "C", 265)]
+    c = classify(legs)
+    assert c.strategy == "Short Call Condor"
+    assert c.ticket_name == "CONDOR"
+    # Per side: 2 long, 2 short → not naked at infinity.
+    assert c.naked is False
+
+
+def test_short_put_condor():
+    legs = [L(-1, "P", 250), L(1, "P", 255), L(1, "P", 260), L(-1, "P", 265)]
+    c = classify(legs)
+    assert c.ticket_name == "CONDOR"
+    assert c.strategy == "Short Put Condor"
+
+
+def test_condor_classifies_when_qty_scaled_by_spread_count():
+    # SELL -2 CONDOR — leg qtys 2/2/2/2 with the same sign topology.
+    # Classifier must gcd-reduce before pattern-matching.
+    legs = [L(-2, "C", 250), L(2, "C", 255), L(2, "C", 260), L(-2, "C", 265)]
+    c = classify(legs)
+    assert c.ticket_name == "CONDOR"
+    assert c.strategy == "Short Call Condor"
+
+
+def test_iron_condor_qty_scaled_by_spread_count():
+    # Same shape as test_iron_condor_credit but with 3-spread quantities.
+    legs = [L(3, "P", 192.5), L(-3, "P", 197.5), L(-3, "C", 207.5), L(3, "C", 210)]
+    c = classify(legs)
+    assert c.ticket_name == "IRON CONDOR"
+
+
 # ---- irregular shapes fall back to CUSTOM -----------------------------
 
 

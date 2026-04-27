@@ -32,6 +32,8 @@ Conventions embedded here (observed from Schwab UI):
 from __future__ import annotations
 
 from datetime import date
+from functools import reduce
+from math import gcd
 
 from schwab_cli.analytics.strategy import PricedLeg
 from schwab_cli.analytics.strategy_classify import Classification
@@ -58,10 +60,11 @@ def render_ticket(
 
     net_premium_per_share = _net_premium(legs)
     side_word = "BUY" if net_premium_per_share < 0 else "SELL"
-    # ±N is the spread quantity. For now we always emit ±1 spreads — the
-    # parser doesn't accept a multi-spread quantity, and leg qtys
-    # represent the ratios relative to one spread.
-    n_tok = "+1" if side_word == "BUY" else "-1"
+    # Spread count = gcd of |qty| across legs. ``SELL -2 CONDOR`` arrives
+    # as leg qtys 2/2/2/2 → gcd=2 → emit ``-2`` and reduce CUSTOM ratios.
+    spread_qty = reduce(gcd, (abs(L.qty) for L in legs)) or 1
+    sign = "+" if side_word == "BUY" else "-"
+    n_tok = f"{sign}{spread_qty}"
     abs_premium = abs(net_premium_per_share)
     price_tok = f"@{abs_premium:.2f} LMT"
 
@@ -81,7 +84,7 @@ def render_ticket(
 
     # CUSTOM fallback -----------------------------------------------
     if name == "CUSTOM":
-        return _render_custom(legs, sym, side_word, n_tok, price_tok)
+        return _render_custom(legs, sym, side_word, n_tok, price_tok, spread_qty)
 
     # Named multi-leg shapes ---------------------------------------
     expiries = {leg.expiry for leg in legs}
@@ -202,6 +205,7 @@ def _render_custom(
     side_word: str,
     n_tok: str,
     price_tok: str,
+    spread_qty: int = 1,
 ) -> str:
     """CUSTOM fallback: per-leg ratios, dates, strikes, sides.
 
@@ -210,6 +214,10 @@ def _render_custom(
     calls before puts. Multi-expiry legs keep their own dates in the
     date list — Schwab requires one date per leg for CUSTOM even when
     all legs share the expiry.
+
+    ``spread_qty`` is the gcd of |qty| across legs. CUSTOM ratios are
+    reduced by that factor so a -2 spread with leg qtys 2/2 prints as
+    ratios ``1/1`` not ``2/2``; the spread count rides on ``n_tok``.
     """
     ordered = sorted(
         legs,
@@ -220,7 +228,7 @@ def _render_custom(
     # Absolute quantities for the ratio list — sign is carried by the
     # top-level SIDE keyword and individual-leg directions are implicit
     # in the order of the ratio/date/strike/side lists.
-    ratios_tok = "/".join(str(abs(L.qty)) for L in ordered)
+    ratios_tok = "/".join(str(abs(L.qty) // spread_qty) for L in ordered)
     dates_tok = "/".join(_fmt_date(L.expiry) for L in ordered)
     strikes_tok = "/".join(_fmt_strike(L.strike) for L in ordered)
     sides_tok = "/".join(_fmt_side(L.side) for L in ordered)

@@ -166,6 +166,66 @@ def test_iron_condor_requires_four_strikes():
         )
 
 
+# ---- COLLAR ------------------------------------------------------------
+
+
+def test_collar_buy_short_call_long_put_long_stock():
+    t = parse_ticket(
+        "BUY +1 COLLAR AMZN 100 15 JAN 27 230/220 CALL/PUT/AMZN @218.38 LMT"
+    )
+    assert t.strategy == "COLLAR"
+    assert t.order_type == "NET_DEBIT"
+    assert t.price == 218.38
+    # Two option legs (call short + put long) plus one equity leg.
+    assert len(t.legs) == 2
+    assert len(t.equity_legs) == 1
+    by_type = {l.option_type: l for l in t.legs}
+    assert by_type["CALL"].instruction == "SELL_TO_OPEN"
+    assert by_type["CALL"].strike == 230.0
+    assert by_type["PUT"].instruction == "BUY_TO_OPEN"
+    assert by_type["PUT"].strike == 220.0
+    eq = t.equity_legs[0]
+    assert eq.instruction == "BUY"
+    assert eq.quantity == 100
+    assert eq.underlying == "AMZN"
+
+
+def test_collar_sell_inverts_all_three_legs():
+    t = parse_ticket(
+        "SELL -1 COLLAR AMZN 100 15 JAN 27 230/220 CALL/PUT/AMZN @217.50 LMT"
+    )
+    assert t.order_type == "NET_CREDIT"
+    by_type = {l.option_type: l for l in t.legs}
+    assert by_type["CALL"].instruction == "BUY_TO_OPEN"
+    assert by_type["PUT"].instruction == "SELL_TO_OPEN"
+    assert t.equity_legs[0].instruction == "SELL"
+    assert t.equity_legs[0].quantity == 100
+
+
+def test_collar_quantity_scales_share_count():
+    # 3 spreads × 100 = 300 shares.
+    t = parse_ticket(
+        "BUY +3 COLLAR AMZN 100 15 JAN 27 230/220 CALL/PUT/AMZN @218.38 LMT"
+    )
+    assert t.equity_legs[0].quantity == 300
+    assert all(l.quantity == 3 for l in t.legs)
+
+
+def test_collar_rejects_wrong_side_token():
+    # The third part of CALL/PUT/<UND> must be the underlying ticker.
+    with pytest.raises(TicketParseError, match="COLLAR side token"):
+        parse_ticket(
+            "BUY +1 COLLAR AMZN 100 15 JAN 27 230/220 CALL/PUT/NVDA @218.38 LMT"
+        )
+
+
+def test_collar_requires_two_strikes():
+    with pytest.raises(TicketParseError, match="COLLAR requires 2 strikes"):
+        parse_ticket(
+            "BUY +1 COLLAR AMZN 100 15 JAN 27 230 CALL/PUT/AMZN @218.38 LMT"
+        )
+
+
 # ---- error paths -------------------------------------------------------
 
 

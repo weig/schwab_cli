@@ -18,6 +18,9 @@ The classifier also decides:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace as _replace
+from functools import reduce
+from math import gcd
 
 from schwab_cli.analytics.strategy_legs import Leg
 
@@ -37,6 +40,12 @@ def classify(legs: list[Leg]) -> Classification:
     Empty input is a programming error (caller should have validated) —
     raises :class:`ValueError`. Otherwise always returns a
     Classification; unknown shapes come back as CUSTOM.
+
+    Quantities are gcd-normalized before pattern-matching so that a
+    multi-spread order (``-2 CONDOR`` with leg qtys 2/2/2/2) classifies
+    the same as a single spread (1/1/1/1). The spread count itself is
+    not surfaced — callers that need it (the ticket renderer) compute
+    it from the original legs.
     """
     if not legs:
         raise ValueError("classify() requires at least one leg")
@@ -44,7 +53,11 @@ def classify(legs: list[Leg]) -> Classification:
     expiries = {leg.expiry for leg in legs}
     multi_expiry = len(expiries) > 1
 
+    # Naked / multi-expiry detection use the original legs — naked
+    # status is invariant under scaling, and expiry diversity isn't
+    # affected by qty.
     naked = _is_naked(legs)
+    legs = _reduce_qtys(legs)
 
     if multi_expiry:
         # Name the shape where we can (CALENDAR / DIAGONAL) so the
@@ -207,6 +220,33 @@ def _classify_four(legs: list[Leg], *, naked: bool) -> Classification:
     puts = sorted([L for L in legs if L.side == "P"], key=lambda L: L.strike)
     calls = sorted([L for L in legs if L.side == "C"], key=lambda L: L.strike)
 
+    # Same-side CONDOR (4 calls or 4 puts) — long has signs +/-/-/+
+    # ascending, short flips. Equidistant strikes optional; mismatch
+    # could be Schwab's "Broken Wing Condor" but the keyword is the
+    # same on the order ticket.
+    same_side = (
+        calls if len(calls) == 4 else puts if len(puts) == 4 else None
+    )
+    if same_side is not None and all(abs(L.qty) == 1 for L in same_side):
+        by_strike = sorted(same_side, key=lambda L: L.strike)
+        qs = tuple(L.qty for L in by_strike)
+        side_word = "Call" if same_side[0].side == "C" else "Put"
+        if len({L.strike for L in by_strike}) == 4:
+            if qs == (1, -1, -1, 1):
+                return Classification(
+                    strategy=f"Long {side_word} Condor",
+                    ticket_name="CONDOR",
+                    supported=True,
+                    naked=naked,
+                )
+            if qs == (-1, 1, 1, -1):
+                return Classification(
+                    strategy=f"Short {side_word} Condor",
+                    ticket_name="CONDOR",
+                    supported=True,
+                    naked=naked,
+                )
+
     if len(puts) == 2 and len(calls) == 2:
         # Must have all four 1:1 qty magnitudes.
         if all(abs(L.qty) == 1 for L in legs):
@@ -275,6 +315,24 @@ def _multi_expiry_ticket(legs: list[Leg]) -> str:
             return "CALENDAR"
         return "DIAGONAL"
     return "CUSTOM"
+
+
+# ---- qty normalization -------------------------------------------------
+
+
+def _reduce_qtys(legs: list[Leg]) -> list[Leg]:
+    """Return ``legs`` with each ``qty`` divided by the gcd of |qty|.
+
+    Spread orders carry leg ratios already scaled by the spread count
+    (``SELL -2 CONDOR`` → leg qtys 2/2/2/2). Pattern-matching uses unit
+    ratios (1/1/1/1), so we strip the common factor up front.
+    """
+    if not legs:
+        return list(legs)
+    g = reduce(gcd, (abs(L.qty) for L in legs))
+    if g <= 1:
+        return list(legs)
+    return [_replace(L, qty=L.qty // g) for L in legs]
 
 
 # ---- naked detection ---------------------------------------------------

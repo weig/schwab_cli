@@ -97,6 +97,42 @@ def test_straddle_pipeline_emits_call_plus_put_at_same_strike(
     assert all(l["instruction"] == "BUY_TO_OPEN" for l in legs)
 
 
+def test_collar_pipeline_emits_two_options_plus_one_equity_leg(
+    monkeypatch, tmp_path,
+):
+    _prep(monkeypatch, tmp_path)
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        result = runner.invoke(app, [
+            "order", "place", "--account", "5678",
+            "--parse",
+            "BUY +1 COLLAR AMZN 100 15 JAN 27 230/220 CALL/PUT/AMZN "
+            "@218.38 LMT",
+            "--dry-run", "--json",
+        ])
+    finally:
+        _exit_all(patches)
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)["order"]
+    assert body["orderType"] == "NET_DEBIT"
+    assert body["complexOrderStrategyType"] == "COLLAR_WITH_STOCK"
+    legs = body["orderLegCollection"]
+    assert len(legs) == 3
+    asset_types = [l["instrument"]["assetType"] for l in legs]
+    # Exactly one EQUITY leg + two OPTIONS — order isn't significant.
+    assert asset_types.count("EQUITY") == 1
+    assert asset_types.count("OPTION") == 2
+    eq_leg = next(l for l in legs if l["instrument"]["assetType"] == "EQUITY")
+    assert eq_leg["instruction"] == "BUY"
+    assert eq_leg["quantity"] == 100
+    # Option legs: short CALL, long PUT.
+    opt_legs = [l for l in legs if l["instrument"]["assetType"] == "OPTION"]
+    by_instr = {l["instruction"]: l for l in opt_legs}
+    assert "SELL_TO_OPEN" in by_instr  # the call we sold
+    assert "BUY_TO_OPEN" in by_instr   # the put we bought
+
+
 def test_condor_pipeline_emits_four_legs(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     patches = _patches()

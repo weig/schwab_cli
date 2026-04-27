@@ -201,6 +201,35 @@ def test_ticket_custom_multi_expiry_calendar_renders_slashed_dates():
     assert "@3.00 LMT" in t
 
 
+# ---- spread quantity from leg gcd -------------------------------------
+
+
+def test_ticket_preserves_spread_count_from_leg_qtys():
+    # SELL -2 CONDOR — leg qtys 2/-2/2/-2 → gcd=2 → ticket reads "-2".
+    legs = [
+        PL(-2, "C", 250, 0.06),
+        PL(2, "C", 255, 0.0),
+        PL(2, "C", 260, 0.0),
+        PL(-2, "C", 265, 0.0),
+    ]
+    c = CLS("Short Call Condor", "CONDOR")
+    t = render_ticket(legs, c, symbol="AMZN")
+    # Spread count rides on n_tok, not on per-leg ratios (CONDOR keyword
+    # implies 1:1:1:1 ratios).
+    assert t.startswith("SELL -2 CONDOR AMZN 100 ")
+    # Strikes descending per Schwab convention.
+    assert "265/260/255/250 CALL" in t
+
+
+def test_ticket_custom_reduces_ratios_by_spread_count():
+    # Multi-spread CUSTOM: 2:1 ratio executed twice → leg qtys 4 / -2.
+    # Ticket should print "BUY +2 ... 2/1 CUSTOM ..." not "BUY +1 ... 4/2 CUSTOM ...".
+    legs = [PL(-2, "C", 255, 3.00), PL(4, "C", 260, 1.20)]
+    c = CLS("Custom 2-leg", "CUSTOM")
+    t = render_ticket(legs, c, symbol="AMZN")
+    assert t.startswith("SELL -2 2/1 CUSTOM AMZN 100 ")
+
+
 # ---- Weeklys / monthly detection --------------------------------------
 
 

@@ -56,6 +56,7 @@ from schwab_cli.order_policy.fields import OrderContext
 from schwab_cli.order_policy.loader import select_profile_name
 from schwab_cli.order_policy.sources import referenced_fields, required_sources
 from schwab_cli.order_ticket import (
+    ParsedEquityLeg,
     ParsedLeg,
     ParsedTicket,
     TicketParseError,
@@ -438,26 +439,38 @@ def _spec_from_ticket(t: ParsedTicket) -> _NormalizedOrder:
                 position_effect_explicit=leg.effect_explicit,
             )
         )
+    # Mixed-asset strategies (COLLAR today) carry a stock leg alongside
+    # the option legs. Schwab's COLLAR_WITH_STOCK body lists all three
+    # in ``orderLegCollection`` — leg order isn't significant.
+    for eq in t.equity_legs:
+        schwab_legs.append(
+            _equity_leg(eq.instruction, eq.quantity, eq.underlying)
+        )
 
     # Schwab's complexOrderStrategyType uses the parser's strategy
     # name verbatim — VERTICAL, BUTTERFLY, CONDOR, STRADDLE, STRANGLE,
     # IRON_CONDOR, CALENDAR, DIAGONAL. None / single-leg → "NONE".
-    if t.strategy:
+    # COLLAR is a special case: Schwab API expects "COLLAR_WITH_STOCK"
+    # for the stock+two-option triple.
+    if t.strategy == "COLLAR":
+        complex_strategy = "COLLAR_WITH_STOCK"
+    elif t.strategy:
         complex_strategy = t.strategy   # already normalized in parser
     else:
         complex_strategy = "NONE"
 
+    total_legs = len(t.legs) + len(t.equity_legs)
     if t.strategy == "VERTICAL":
         side_word = "DEBIT" if t.order_type == "NET_DEBIT" else "CREDIT"
         label = f"VERTICAL {t.option_type} {side_word}"
     elif t.strategy:
         # Generic label for the new strategies — keeps the panel
         # human-readable without bespoke per-strategy phrasing.
-        label = f"{t.strategy} ({len(t.legs)} legs)"
+        label = f"{t.strategy} ({total_legs} legs)"
     else:
         label = f"{t.side} {t.quantity} {t.underlying} {t.option_type}"
 
-    naked = _is_naked_short_options(t.legs)
+    naked = _is_naked_short_options(t.legs, t.equity_legs)
 
     return _NormalizedOrder(
         side=t.side,
@@ -476,26 +489,58 @@ def _spec_from_ticket(t: ParsedTicket) -> _NormalizedOrder:
     )
 
 
-def _is_naked_short_options(legs: tuple[ParsedLeg, ...]) -> bool:
-    """Naked = a short leg with no offsetting long of the same side at
-    a more-favorable strike. Cheap heuristic, not a full risk model."""
-    short_legs = [
-        l for l in legs if l.instruction in ("SELL_TO_OPEN", "SELL_TO_CLOSE")
-    ]
-    if not short_legs:
-        return False
-    for short in short_legs:
-        protectors = [
-            l for l in legs
-            if l.option_type == short.option_type
-            and l.expiry == short.expiry
-            and l.instruction in ("BUY_TO_OPEN", "BUY_TO_CLOSE")
-        ]
-        if short.option_type == "CALL":
-            covered = any(p.strike >= short.strike for p in protectors)
-        else:  # PUT — long PUT at a higher strike covers a short put
-            covered = any(p.strike <= short.strike for p in protectors)
-        if not covered:
+def _is_naked_short_options(
+    legs: tuple[ParsedLeg, ...],
+    equity_legs: tuple[ParsedEquityLeg, ...] = (),
+) -> bool:
+    """Naked = unbounded loss exposure on at least one (option_type,
+    expiry) bucket.
+
+    A long option of any strike covers a short option of the same side
+    at the unbounded tail (calls → +∞, puts → 0): both have slope ±1
+    far OTM, so longs and shorts cancel 1:1 regardless of strike. Only
+    the *net contract count* per (side, expiry) decides whether the
+    position has unbounded loss. Per-strike coverage matters for
+    max-loss magnitude, not for the naked flag.
+
+    Mixed-asset strategies (COLLAR) include stock that hedges a same-
+    direction option short: long stock covers short calls (deliver on
+    assignment), short stock covers short puts. We credit each 100
+    shares as one contract of synthetic coverage on the appropriate
+    side.
+
+    A balanced four-leg call CONDOR (2 short outer wings + 2 long
+    inner body) is therefore not naked — it's bounded above by the
+    short outer minus the long inner.
+    """
+    from collections import defaultdict
+
+    net = defaultdict(int)
+    for leg in legs:
+        key = (leg.option_type, leg.expiry)
+        if leg.instruction in ("BUY_TO_OPEN", "BUY_TO_CLOSE"):
+            net[key] += leg.quantity
+        elif leg.instruction in ("SELL_TO_OPEN", "SELL_TO_CLOSE"):
+            net[key] -= leg.quantity
+
+    # Stock-based coverage (BUY 100 = +1 synthetic call coverage; SELL
+    # 100 = +1 synthetic put coverage). Floor-divide so a partial 50-
+    # share leg doesn't claim a contract of coverage it can't deliver.
+    contracts_long = sum(
+        eq.quantity for eq in equity_legs if eq.instruction == "BUY"
+    ) // 100
+    contracts_short = sum(
+        eq.quantity for eq in equity_legs if eq.instruction == "SELL"
+    ) // 100
+
+    for (opt_type, _expiry), n in net.items():
+        if n >= 0:
+            continue
+        if opt_type == "CALL":
+            n += contracts_long
+        else:
+            n += contracts_short
+        if n < 0:
             return True
     return False
 

@@ -63,6 +63,20 @@ class ParsedLeg:
 
 
 @dataclass(frozen=True)
+class ParsedEquityLeg:
+    """An equity (stock) leg attached to a multi-asset strategy.
+
+    Only emitted by COLLAR / COVERED / similar mixed-asset shapes.
+    For COLLAR a BUY ticket produces a single ``BUY 100×qty`` leg
+    paired with the option pair; SELL inverts.
+    """
+
+    instruction: str          # BUY / SELL
+    quantity: int             # share count, always positive
+    underlying: str
+
+
+@dataclass(frozen=True)
 class ParsedTicket:
     """Result of parsing a Schwab/TOS-style order ticket.
 
@@ -82,6 +96,9 @@ class ParsedTicket:
     option_type: OptionType | None         # None for equity
     strikes: tuple[float, ...] = field(default_factory=tuple)
     legs: tuple[ParsedLeg, ...] = field(default_factory=tuple)
+    # Stock legs accompanying multi-asset strategies (COLLAR today;
+    # COVERED, COMBO etc. later). Empty for pure-option / pure-equity.
+    equity_legs: tuple[ParsedEquityLeg, ...] = field(default_factory=tuple)
 
     @property
     def is_option(self) -> bool:
@@ -89,7 +106,9 @@ class ParsedTicket:
 
     @property
     def is_equity(self) -> bool:
-        return not self.legs
+        # Pure-equity ticket carries no option legs and no equity-leg
+        # supplements (those only appear on mixed strategies).
+        return not self.legs and not self.equity_legs
 
 
 _MONTHS: dict[str, int] = {
@@ -108,7 +127,7 @@ _UNIMPLEMENTED_STRATEGIES = {"BACK_RATIO"}
 # else is rejected.
 _KNOWN_STRATEGIES = {
     "VERTICAL", "CALENDAR", "DIAGONAL", "BUTTERFLY", "CONDOR",
-    "STRADDLE", "STRANGLE", "COVERED", "CUSTOM",
+    "STRADDLE", "STRANGLE", "COVERED", "CUSTOM", "COLLAR",
 }
 
 # Strikes-per-strategy for the ones the parser currently understands.
@@ -126,6 +145,9 @@ _STRIKE_COUNT: dict[str, int] = {
     "DIAGONAL":     2,
     # COVERED:       option strike count = 1 (call sold against 100 shares)
     "COVERED":      1,
+    # COLLAR:        2 strikes positionally — call_strike, put_strike,
+    # paired with the side token CALL/PUT/<UNDERLYING>.
+    "COLLAR":       2,
     # CUSTOM:        any
     "CUSTOM":       0,
 }
@@ -347,10 +369,30 @@ def _finish_option(
     # ---- OPTION_TYPE ----
     # STRADDLE / STRANGLE / IRON_CONDOR don't carry an explicit
     # CALL/PUT token — the side is implicit from the strategy. For
-    # the rest, a CALL or PUT token is required.
+    # the rest, a CALL or PUT token is required. COLLAR has its own
+    # ``CALL/PUT/<UNDERLYING>`` triple to mark the equity leg.
     implicit_type_strategies = {"STRADDLE", "STRANGLE", "IRON_CONDOR"}
-    if strategy in implicit_type_strategies:
-        option_type: OptionType = "CALL"   # placeholder; legs override
+    if strategy == "COLLAR":
+        if cursor >= len(tokens):
+            raise TicketParseError(
+                f"COLLAR expects 'CALL/PUT/{underlying}' after strikes: {raw!r}"
+            )
+        type_tok = tokens[cursor].upper()
+        parts = type_tok.split("/")
+        if (
+            len(parts) != 3
+            or parts[0] != "CALL"
+            or parts[1] != "PUT"
+            or parts[2] != underlying.upper()
+        ):
+            raise TicketParseError(
+                f"COLLAR side token must be 'CALL/PUT/{underlying}', "
+                f"got {tokens[cursor]!r}"
+            )
+        option_type: OptionType = "CALL"   # placeholder; legs carry their own
+        cursor += 1
+    elif strategy in implicit_type_strategies:
+        option_type = "CALL"   # placeholder; legs override
     else:
         if cursor >= len(tokens):
             raise TicketParseError(
@@ -391,9 +433,15 @@ def _finish_option(
             order_type = "NET_DEBIT" if side == "BUY" else "NET_CREDIT"
         else:  # IRON_CONDOR
             order_type = "NET_CREDIT" if side == "BUY" else "NET_DEBIT"
+    elif strategy == "COLLAR" and order_type == "LIMIT":
+        # BUY COLLAR: pay for stock + long put net of short call premium.
+        # SELL COLLAR: receive proceeds. Schwab uses NET_DEBIT/CREDIT for
+        # mixed stock+option orders; the limit price is per-share net.
+        order_type = "NET_DEBIT" if side == "BUY" else "NET_CREDIT"
 
     # ---- expand legs ----
     legs = _expand_legs(side, quantity, strategy, underlying, expiry, option_type, strikes)
+    equity_legs = _expand_equity_legs(side, quantity, strategy, underlying)
 
     # Apply the position-effect marker(s).
     #
@@ -439,6 +487,7 @@ def _finish_option(
         option_type=option_type,
         strikes=strikes,
         legs=legs,
+        equity_legs=equity_legs,
     )
 
 
@@ -687,6 +736,26 @@ def _expand_legs(
             )
         )
 
+    if strategy == "COLLAR":
+        # Two strikes positionally: ``call_strike, put_strike`` (matches
+        # the order of CALL/PUT in the side token). BUY collar = sell
+        # the call (cap upside) + buy the put (downside hedge); SELL
+        # inverts. The stock leg is added separately by
+        # ``_expand_equity_legs``.
+        call_strike, put_strike = strikes[0], strikes[1]
+        if side == "BUY":
+            call_instr, put_instr = "SELL_TO_OPEN", "BUY_TO_OPEN"
+        else:
+            call_instr, put_instr = "BUY_TO_OPEN", "SELL_TO_OPEN"
+        return (
+            ParsedLeg(instruction=call_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="CALL", strike=call_strike),
+            ParsedLeg(instruction=put_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="PUT", strike=put_strike),
+        )
+
     if strategy == "IRON_CONDOR":
         # Four strikes ascending: PUT side (low pair) + CALL side
         # (high pair). Long outer + short inner.
@@ -720,6 +789,29 @@ def _expand_legs(
         f"use --leg to specify legs explicitly",
         kind="phase2",
     )
+
+
+def _expand_equity_legs(
+    side: Side,
+    quantity: int,
+    strategy: str | None,
+    underlying: str,
+) -> tuple[ParsedEquityLeg, ...]:
+    """Build the stock leg(s) for strategies that combine equity and
+    options (today: COLLAR; later: COVERED, COMBO, ...).
+
+    Returns an empty tuple for pure-option strategies. Share count is
+    ``100 × quantity`` (one option contract represents 100 shares).
+    """
+    if strategy == "COLLAR":
+        return (
+            ParsedEquityLeg(
+                instruction="BUY" if side == "BUY" else "SELL",
+                quantity=quantity * 100,
+                underlying=underlying,
+            ),
+        )
+    return ()
 
 
 # ---- OSI symbol -----------------------------------------------------------
