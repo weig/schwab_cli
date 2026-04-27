@@ -131,9 +131,12 @@ def sync_account_positions(
 ) -> dict[str, list[str]]:
     """Pull account positions and reconcile with ``subscriptions``.
 
-    Inserts new option-bearing underlyings, soft-deletes ones no longer
-    held. Underlyings are deduplicated — multiple option contracts on
-    the same underlying produce one ``subscriptions`` row.
+    Tracks the underlying for every EQUITY (stock / ETF) and OPTION
+    position in the account — both forms of exposure benefit from a
+    maintained IV / IVR / IVP series. Multiple positions on the same
+    underlying (e.g. shares + several option strikes) collapse to one
+    ``subscriptions`` row. Mutual funds, fixed income, cash, and
+    currencies are skipped — no useful options chain.
 
     Returns ``{'added': [...], 'closed': [...]}`` for the run summary.
     """
@@ -147,12 +150,9 @@ def sync_account_positions(
     positions = (acct.get("securitiesAccount") or {}).get("positions") or []
     upstream: set[str] = set()
     for p in positions:
-        instr = p.get("instrument") or {}
-        if instr.get("assetType") != "OPTION":
-            continue
-        und = instr.get("underlyingSymbol")
-        if und:
-            upstream.add(und)
+        sym = _underlying_for_position(p)
+        if sym:
+            upstream.add(sym)
 
     current = _current_position_underlyings(conn, suffix, group_name)
     added = sorted(upstream - current)
@@ -183,6 +183,28 @@ def sync_account_positions(
         )
 
     return {"added": added, "closed": closed}
+
+
+def _underlying_for_position(p: dict) -> str | None:
+    """Map one Schwab position row to the underlying symbol we want to
+    track, or ``None`` if the asset type isn't options-relevant.
+
+    EQUITY → ``instrument.symbol`` (the stock / ETF ticker itself).
+    OPTION → ``instrument.underlyingSymbol`` (the option's underlying).
+    Everything else (MUTUAL_FUND, CASH_EQUIVALENT, FIXED_INCOME,
+    CURRENCY, COLLECTIVE_INVESTMENT) → None.
+    """
+    instr = p.get("instrument") or {}
+    asset_type = instr.get("assetType")
+    if asset_type == "OPTION":
+        sym = instr.get("underlyingSymbol")
+    elif asset_type == "EQUITY":
+        sym = instr.get("symbol")
+    else:
+        sym = None
+    if not sym or not isinstance(sym, str):
+        return None
+    return sym.strip().upper() or None
 
 
 def _current_position_underlyings(

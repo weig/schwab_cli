@@ -119,16 +119,36 @@ from schwab_cli.dataset.update import sync_account_positions, run_volatility_upd
 
 
 def test_sync_account_positions_inserts_new_holdings(conn, monkeypatch):
+    """Equities (stocks / ETFs) and options-bearing underlyings should
+    both produce subscriptions rows. Mutual funds and cash are skipped."""
     def fake_get_account(client, account_hash):
         return {
             "securitiesAccount": {
                 "positions": [
+                    # Plain stock holding.
+                    {"instrument": {"assetType": "EQUITY",
+                                    "symbol": "TSLA"},
+                     "longQuantity": 100, "shortQuantity": 0},
+                    # ETF (also EQUITY in Schwab's classification).
+                    {"instrument": {"assetType": "EQUITY",
+                                    "symbol": "SPY"},
+                     "longQuantity": 50, "shortQuantity": 0},
+                    # Long call on NVDA.
                     {"instrument": {"assetType": "OPTION",
                                     "underlyingSymbol": "NVDA"},
                      "longQuantity": 1, "shortQuantity": 0},
+                    # Short put on AMZN.
                     {"instrument": {"assetType": "OPTION",
                                     "underlyingSymbol": "AMZN"},
                      "longQuantity": 0, "shortQuantity": 2},
+                    # Mutual fund — must be skipped.
+                    {"instrument": {"assetType": "MUTUAL_FUND",
+                                    "symbol": "VFIAX"},
+                     "longQuantity": 100, "shortQuantity": 0},
+                    # Cash equivalent — must be skipped.
+                    {"instrument": {"assetType": "CASH_EQUIVALENT",
+                                    "symbol": "MMDA1"},
+                     "longQuantity": 1234.56, "shortQuantity": 0},
                 ]
             }
         }
@@ -141,9 +161,13 @@ def test_sync_account_positions_inserts_new_holdings(conn, monkeypatch):
         conn, client=None, account_hash="abcd1234efgh",
         group_name="volatility", now_ms=1000,
     )
-    assert sorted(summary["added"]) == ["AMZN", "NVDA"]
+    # Stocks (TSLA, SPY) + option underlyings (NVDA, AMZN). VFIAX +
+    # MMDA1 dropped.
+    assert sorted(summary["added"]) == ["AMZN", "NVDA", "SPY", "TSLA"]
     rows = list_active_subscriptions(conn, group_name="volatility")
     sources = [(r["symbol"], r["source_key"]) for r in rows]
+    assert ("TSLA", "efgh") in sources
+    assert ("SPY",  "efgh") in sources
     assert ("NVDA", "efgh") in sources
 
 
