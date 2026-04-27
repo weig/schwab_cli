@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -216,6 +216,7 @@ def run_volatility_update(
     group_name: str = "volatility",
     now_ms: int,
     accounts: list[str],
+    progress: Callable[[dict], None] | None = None,
 ) -> dict[str, Any]:
     """Daily volatility cron.
 
@@ -225,6 +226,12 @@ def run_volatility_update(
       3. Decide what to sample (skip FROZEN; WATCH only Monday NY).
       4. Sample — write extended snapshot + return bundle.
       5. Re-evaluate tier; persist.
+
+    ``progress`` is an optional callback invoked once per symbol with
+    ``{event, index, total, symbol, ...}``. Events: ``start`` before
+    the API calls, ``sampled`` on success, ``skipped`` for FROZEN /
+    non-Monday WATCH, ``errored`` for per-symbol failures. Used by
+    the CLI to print live progress; tests pass ``None``.
     """
     cfg = load_config_or_default()
 
@@ -249,8 +256,14 @@ def run_volatility_update(
     skipped: list[str] = []
     transitions: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
+    total = len(symbols)
+    archive_date = now_dt.astimezone(_NY).date().isoformat()
 
-    for sym in symbols:
+    def _emit(**evt: Any) -> None:
+        if progress is not None:
+            progress(evt)
+
+    for i, sym in enumerate(symbols, start=1):
         state_row = read_ticker_state(conn, symbol=sym, group_name=group_name)
         if state_row is None:
             tier = "GRACE"
@@ -263,10 +276,17 @@ def run_volatility_update(
 
         if tier == "FROZEN":
             skipped.append(sym)
+            _emit(event="skipped", index=i, total=total, symbol=sym,
+                  reason="FROZEN", archive_date=archive_date)
             continue
         if tier == "WATCH" and not is_monday:
             skipped.append(sym)
+            _emit(event="skipped", index=i, total=total, symbol=sym,
+                  reason="WATCH (non-Monday)", archive_date=archive_date)
             continue
+
+        _emit(event="start", index=i, total=total, symbol=sym,
+              tier=tier, archive_date=archive_date)
 
         # Step 4 — sample.
         try:
@@ -287,6 +307,8 @@ def run_volatility_update(
             bundle = sample_volatility(chain=chain, underlying_closes=closes)
         except Exception as e:
             errors.append({"symbol": sym, "error": str(e)})
+            _emit(event="errored", index=i, total=total, symbol=sym,
+                  error=str(e), archive_date=archive_date)
             continue
 
         record_extended_snapshot(
@@ -357,6 +379,12 @@ def run_volatility_update(
             consecutive_days_below=new.consecutive_days_below,
             last_evaluated_at=now_ms,
         )
+
+        _emit(event="sampled", index=i, total=total, symbol=sym,
+              archive_date=archive_date,
+              atm_iv_30d=bundle.get("atm_iv_30d"),
+              hv_30d=bundle.get("hv_30d"),
+              tier_from=old.tier, tier_to=new.tier)
 
     return {
         "sampled":     sampled,

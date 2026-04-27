@@ -285,7 +285,9 @@ def update(
         summary = run_volatility_update(
             conn, client=client, group_name=group,
             now_ms=now_ms, accounts=accounts,
+            progress=_print_volatility_progress,
         )
+    typer.echo("")  # blank line before summary
     typer.echo(
         f"sampled={len(summary['sampled'])} "
         f"skipped={len(summary['skipped'])} "
@@ -294,6 +296,43 @@ def update(
     )
     for t in summary["transitions"]:
         typer.echo(f"  {t['symbol']}: {t['from']} → {t['to']}")
+
+
+def _print_volatility_progress(evt: dict) -> None:
+    """Per-symbol progress printer for ``dataset update --group …``.
+
+    Emits one line per symbol — the *start* event prints "updating
+    [N/T] SYM volatility for DATE" before the chain pull so the user
+    can see exactly which symbol is in flight if it stalls. Skipped
+    and errored symbols emit a status line in place of the start
+    line. Successful samples are silent on the second tick (the next
+    "updating" line is the natural progress signal); failures emit
+    a follow-up red line.
+    """
+    width = len(str(evt["total"]))
+    head = f"[{evt['index']:>{width}}/{evt['total']}]"
+    sym = evt["symbol"]
+    date = evt.get("archive_date", "")
+    e = evt["event"]
+    if e == "start":
+        typer.echo(f"updating {head} {sym} volatility for {date}")
+    elif e == "skipped":
+        typer.secho(
+            f"skipping {head} {sym} ({evt.get('reason', 'skip')})",
+            fg=typer.colors.YELLOW,
+        )
+    elif e == "errored":
+        typer.secho(
+            f"  ↳ {sym}: error — {evt.get('error', 'unknown')}",
+            fg=typer.colors.RED,
+        )
+    elif e == "sampled":
+        # Tier transitions are interesting; same-tier samples stay quiet.
+        if evt.get("tier_from") != evt.get("tier_to"):
+            typer.secho(
+                f"  ↳ {sym}: tier {evt['tier_from']} → {evt['tier_to']}",
+                fg=typer.colors.CYAN,
+            )
 
 
 cron_app = typer.Typer(help="Install / uninstall launchd scheduled jobs.")

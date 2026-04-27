@@ -108,7 +108,8 @@ def test_update_indices_calls_orchestrator(runner, monkeypatch):
 
 def test_update_group_volatility_calls_orchestrator(runner, monkeypatch):
     calls = []
-    def fake_run(conn, *, client, group_name, now_ms, accounts):
+    def fake_run(conn, *, client, group_name, now_ms, accounts,
+                 progress=None):
         calls.append("vol")
         return {"sampled": ["NVDA"], "skipped": [],
                 "transitions": [], "errors": [], "positions": {}}
