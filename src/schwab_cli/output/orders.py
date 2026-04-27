@@ -779,9 +779,19 @@ def _ticket_price_suffix(order_type: str, price, duration: str) -> str:
 
 
 def render_order_list_human(orders: list[dict]) -> str:
-    """Rich-table rendering of `order list` results."""
+    """Rich-table rendering of `order list` results.
+
+    Order IDs and OSI symbols are emitted in full — truncating Order
+    ID broke the displayed value as input to ``order cancel`` /
+    ``order get``, and truncating the OSI symbol hid the strike,
+    which is the most important leg attribute. OSI's internal
+    padding (``KO    260529P00073000``) is collapsed to a single
+    space for readability without losing information.
+    """
+    import re as _re
+
     buf = StringIO()
-    console = Console(file=buf, force_terminal=False, no_color=True, width=140)
+    console = Console(file=buf, force_terminal=False, no_color=True, width=160)
     table = Table(title=f"Orders ({len(orders)})", show_lines=False)
     for col in ("Order ID", "Entered (ET)", "Status", "Type", "Side/Instr",
                 "Qty", "Symbol", "Price"):
@@ -797,7 +807,9 @@ def render_order_list_human(orders: list[dict]) -> str:
             instrs += "/+"
         qty = sum(l.get("quantity", 0) for l in legs) or o.get("quantity", "?")
         symbols = ",".join(
-            ((l.get("instrument") or {}).get("symbol") or "?")[:14] for l in legs[:2]
+            _re.sub(r"\s+", " ",
+                    (l.get("instrument") or {}).get("symbol") or "?")
+            for l in legs[:2]
         )
         if len(legs) > 2:
             symbols += ",..."
@@ -806,7 +818,7 @@ def render_order_list_human(orders: list[dict]) -> str:
             f"{price}" if price is not None else "-"
         )
         table.add_row(
-            order_id[-10:], entered, status, otype, instrs,
+            order_id, entered, status, otype, instrs,
             str(qty), symbols, price_s,
         )
     console.print(table)
