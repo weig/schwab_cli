@@ -78,16 +78,20 @@ def to_schwab_form(symbol: str) -> str:
     those into Schwab's form so the API layer can be agnostic about
     which convention the caller used.
 
+    Symbols are also uppercased so renderer-side ``payload.get(symbol)``
+    lookups match the keys Schwab returns (Schwab always replies with
+    uppercase symbols regardless of the request casing).
+
     Idempotent — already-correct ``BRK/B`` and plain ``NVDA`` pass
     through unchanged. Option OSI strings (with embedded YYMMDD) are
-    detected by the presence of a digit and returned as-is so the
-    21-char OSI form survives.
+    detected by the presence of a digit and uppercased — they already
+    are by convention, but this stays safe for casual inputs.
     """
     if not symbol:
         return symbol
-    s = symbol.strip()
+    s = symbol.strip().upper()
     if any(c.isdigit() for c in s):
-        # OSI option symbol (NVDA  260501C00240000) — leave alone.
+        # OSI option symbol (NVDA  260501C00240000).
         return s
     # Replace the *first* dot or dash with a slash. Avoid touching
     # subsequent characters in case some weird future ticker has

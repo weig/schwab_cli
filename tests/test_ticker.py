@@ -53,6 +53,11 @@ def test_to_schwab_form_normalizes_class_shares():
     assert to_schwab_form("NVDA") == "NVDA"     # plain pass-through
     # OSI option strings have digits; must not get rewritten.
     assert to_schwab_form("NVDA  260501C00240000") == "NVDA  260501C00240000"
+    # Lowercase input is uppercased so renderer key lookups against
+    # the Schwab response (always uppercase keys) match. Without this,
+    # `quote amzn` shows all dashes because payload.get("amzn") misses.
+    assert to_schwab_form("amzn") == "AMZN"
+    assert to_schwab_form("brk.b") == "BRK/B"
 
 
 # ---- option: all four input forms equivalent -----------------------------
