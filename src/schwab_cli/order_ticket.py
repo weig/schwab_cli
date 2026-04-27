@@ -97,10 +97,37 @@ _MONTHS: dict[str, int] = {
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
 
-_PHASE2_STRATEGIES = {
-    "CALENDAR", "DIAGONAL", "BUTTERFLY", "CONDOR", "IRON",  # IRON CONDOR
+# Strategies the Phase 1 parser knew about but didn't handle —
+# every one of these except BACK_RATIO and STRADDLE/STRANGLE is
+# now supported. Kept as a discoverable name for the rejection
+# message on ratio strategies that still aren't implemented.
+_UNIMPLEMENTED_STRATEGIES = {"BACK_RATIO"}
+
+# Strategies that expand into 1+ legs in _finish_option. The first
+# token after the qty must match one of these (or VERTICAL); anything
+# else is rejected.
+_KNOWN_STRATEGIES = {
+    "VERTICAL", "CALENDAR", "DIAGONAL", "BUTTERFLY", "CONDOR",
     "STRADDLE", "STRANGLE", "COVERED", "CUSTOM",
-    "BACK_RATIO", "STRADDLE/STRANGLE",
+}
+
+# Strikes-per-strategy for the ones the parser currently understands.
+# 0 = strikes count is variable (CUSTOM), 1 = single strike (STRADDLE,
+# CALENDAR), 2 = two strikes (VERTICAL, STRANGLE, DIAGONAL), 3 = three
+# (BUTTERFLY), 4 = four (CONDOR, IRON CONDOR).
+_STRIKE_COUNT: dict[str, int] = {
+    "VERTICAL":     2,
+    "STRADDLE":     1,
+    "STRANGLE":     2,
+    "BUTTERFLY":    3,
+    "CONDOR":       4,
+    "IRON_CONDOR":  4,
+    "CALENDAR":     1,
+    "DIAGONAL":     2,
+    # COVERED:       option strike count = 1 (call sold against 100 shares)
+    "COVERED":      1,
+    # CUSTOM:        any
+    "CUSTOM":       0,
 }
 
 
@@ -197,13 +224,18 @@ def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
     # ---- optional STRATEGY keyword ----
     strategy: str | None = None
     next_tok = tokens[cursor].upper()
-    if next_tok == "VERTICAL":
-        strategy = "VERTICAL"
+    # IRON CONDOR is two tokens; collapse before matching.
+    if next_tok == "IRON" and cursor + 1 < len(tokens) \
+            and tokens[cursor + 1].upper() == "CONDOR":
+        strategy = "IRON_CONDOR"
+        cursor += 2
+    elif next_tok in _KNOWN_STRATEGIES:
+        strategy = next_tok
         cursor += 1
-    elif next_tok in _PHASE2_STRATEGIES:
+    elif next_tok in _UNIMPLEMENTED_STRATEGIES:
         raise TicketParseError(
-            f"strategy {next_tok!r} not supported in Phase 1; "
-            "use --leg or wait for Phase 2",
+            f"strategy {next_tok!r} not yet supported; use --leg "
+            "to specify the legs explicitly",
             kind="phase2",
         )
 
@@ -284,73 +316,81 @@ def _finish_option(
         raise TicketParseError(f"expected strike(s) after expiry: {raw!r}")
     strikes_tok = tokens[cursor]
     cursor += 1
-    if "/" in strikes_tok:
-        if strategy is None:
-            raise TicketParseError(
-                f"multi-strike ticket requires a strategy keyword "
-                f"(e.g. VERTICAL) before the underlying, got {strikes_tok!r}"
-            )
-        if strategy == "VERTICAL":
-            parts = strikes_tok.split("/")
-            if len(parts) != 2:
-                raise TicketParseError(
-                    f"VERTICAL requires two strikes separated by '/' "
-                    f"(got {strikes_tok!r})"
-                )
-            try:
-                strikes = tuple(float(x) for x in parts)
-            except ValueError:
-                raise TicketParseError(f"invalid strike(s) {strikes_tok!r}")
-            if any(v <= 0 for v in strikes):
-                raise TicketParseError(
-                    f"strikes must be positive, got {strikes_tok!r}"
-                )
-            if strikes[0] == strikes[1]:
-                raise TicketParseError(
-                    f"VERTICAL strikes must differ, got {strikes_tok!r}"
-                )
-        else:
-            raise TicketParseError(
-                f"strategy {strategy!r} multi-strike layout not supported in "
-                "Phase 1",
-                kind="phase2",
-            )
-    else:
-        if strategy is not None:
-            raise TicketParseError(
-                f"strategy {strategy!r} requires multiple strikes separated "
-                f"by '/', got single strike {strikes_tok!r}"
-            )
-        try:
-            strikes = (float(strikes_tok),)
-        except ValueError:
-            raise TicketParseError(f"invalid strike {strikes_tok!r}")
-        if strikes[0] <= 0:
-            raise TicketParseError(f"strike must be positive, got {strikes_tok!r}")
+    parts = strikes_tok.split("/")
+    try:
+        strikes = tuple(float(p) for p in parts)
+    except ValueError:
+        raise TicketParseError(f"invalid strike(s) {strikes_tok!r}")
+    if any(v <= 0 for v in strikes):
+        raise TicketParseError(f"strikes must be positive, got {strikes_tok!r}")
+
+    expected = _STRIKE_COUNT.get(strategy) if strategy else 1
+    if strategy is None and len(strikes) != 1:
+        raise TicketParseError(
+            f"single-leg ticket got {len(strikes)} strikes "
+            f"({strikes_tok!r}); add a strategy keyword "
+            f"(VERTICAL/STRADDLE/STRANGLE/BUTTERFLY/CONDOR/IRON CONDOR) "
+            f"between qty and underlying"
+        )
+    if strategy is not None and expected and len(strikes) != expected:
+        raise TicketParseError(
+            f"{strategy} requires {expected} strikes separated by '/' "
+            f"(got {len(strikes)}: {strikes_tok!r})"
+        )
+    # Same-strike sanity for spreads.
+    if strategy in ("VERTICAL", "STRANGLE", "DIAGONAL") \
+            and len(set(strikes)) != len(strikes):
+        raise TicketParseError(
+            f"{strategy} requires distinct strikes, got {strikes_tok!r}"
+        )
 
     # ---- OPTION_TYPE ----
-    if cursor >= len(tokens):
-        raise TicketParseError(f"expected CALL or PUT after strikes: {raw!r}")
-    type_tok = tokens[cursor].upper()
-    if type_tok not in ("CALL", "PUT"):
-        raise TicketParseError(
-            f"option type must be CALL or PUT, got {tokens[cursor]!r}"
-        )
-    option_type: OptionType = type_tok  # type: ignore[assignment]
-    cursor += 1
+    # STRADDLE / STRANGLE / IRON_CONDOR don't carry an explicit
+    # CALL/PUT token — the side is implicit from the strategy. For
+    # the rest, a CALL or PUT token is required.
+    implicit_type_strategies = {"STRADDLE", "STRANGLE", "IRON_CONDOR"}
+    if strategy in implicit_type_strategies:
+        option_type: OptionType = "CALL"   # placeholder; legs override
+    else:
+        if cursor >= len(tokens):
+            raise TicketParseError(
+                f"expected CALL or PUT after strikes: {raw!r}"
+            )
+        type_tok = tokens[cursor].upper()
+        if type_tok not in ("CALL", "PUT"):
+            raise TicketParseError(
+                f"option type must be CALL or PUT, got {tokens[cursor]!r}"
+            )
+        option_type = type_tok  # type: ignore[assignment]
+        cursor += 1
 
     # ---- @PRICE + ORDER_TYPE [+ DURATION] ----
     price, order_type, duration = _parse_price_type_duration(
         tokens, cursor, raw, default_when_combo=("LIMIT" if strategy is None else "NET"),
     )
 
-    # For VERTICAL: BUY → NET_DEBIT, SELL → NET_CREDIT (for LMT). MKT → MARKET.
-    if strategy == "VERTICAL":
-        if order_type == "LIMIT":
+    # Multi-leg spreads use NET_DEBIT / NET_CREDIT instead of LIMIT.
+    # BUY → DEBIT (paying for the spread), SELL → CREDIT (receiving).
+    # IRON CONDOR is conventionally written with the short legs
+    # collecting credit, so even a "BUY +1 IRON CONDOR" reads as
+    # establishing the position — net effect is a credit on the
+    # short legs. Schwab's reservation is to use NET_CREDIT when the
+    # user types BUY for an iron condor; we follow TOS convention.
+    multi_leg_net_strategies = {
+        "VERTICAL", "STRANGLE", "BUTTERFLY", "CONDOR",
+        "DIAGONAL", "CALENDAR",
+    }
+    if strategy in multi_leg_net_strategies and order_type == "LIMIT":
+        order_type = "NET_DEBIT" if side == "BUY" else "NET_CREDIT"
+    elif strategy in ("STRADDLE", "IRON_CONDOR") and order_type == "LIMIT":
+        # STRADDLE: BUY pays both wings → DEBIT. SELL collects → CREDIT.
+        # IRON CONDOR: TOS shows "BUY +1" but the position collects
+        # net credit on the short inner legs — Schwab wants NET_CREDIT
+        # in that case. SELL inverts.
+        if strategy == "STRADDLE":
             order_type = "NET_DEBIT" if side == "BUY" else "NET_CREDIT"
-        # MARKET stays MARKET (rare but allowed by Schwab for spreads via NET_ZERO,
-        # but Phase 1 keeps MARKET single-instruction; a spread MKT is uncommon
-        # enough we punt on encoding it).
+        else:  # IRON_CONDOR
+            order_type = "NET_CREDIT" if side == "BUY" else "NET_DEBIT"
 
     # ---- expand legs ----
     legs = _expand_legs(side, quantity, strategy, underlying, expiry, option_type, strikes)
@@ -580,8 +620,105 @@ def _expand_legs(
             ),
         )
 
+    if strategy == "STRADDLE":
+        # Both legs at the same strike, one CALL + one PUT.
+        # BUY → both BTO. SELL → both STO.
+        instr = f"{side}_TO_OPEN"
+        strike = strikes[0]
+        return (
+            ParsedLeg(instruction=instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="CALL", strike=strike),
+            ParsedLeg(instruction=instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="PUT", strike=strike),
+        )
+
+    if strategy == "STRANGLE":
+        # Convention: lower strike = PUT, higher = CALL.
+        # BUY → both BTO; SELL → both STO.
+        instr = f"{side}_TO_OPEN"
+        lower, higher = sorted(strikes)
+        return (
+            ParsedLeg(instruction=instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="PUT", strike=lower),
+            ParsedLeg(instruction=instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="CALL", strike=higher),
+        )
+
+    if strategy == "BUTTERFLY":
+        # Three strikes in ascending order: low / mid / high.
+        # BUY → BTO low (×1), STO mid (×2), BTO high (×1).
+        # SELL → invert.
+        s = sorted(strikes)
+        if len(s) != 3 or s[1] - s[0] != s[2] - s[1]:
+            raise TicketParseError(
+                f"BUTTERFLY requires three equidistant strikes, got "
+                f"{strikes!r}"
+            )
+        wing_instr = "BUY_TO_OPEN" if side == "BUY" else "SELL_TO_OPEN"
+        body_instr = "SELL_TO_OPEN" if side == "BUY" else "BUY_TO_OPEN"
+        return (
+            ParsedLeg(instruction=wing_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type=option_type, strike=s[0]),
+            ParsedLeg(instruction=body_instr, quantity=quantity * 2,
+                      underlying=underlying, expiry=expiry,
+                      option_type=option_type, strike=s[1]),
+            ParsedLeg(instruction=wing_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type=option_type, strike=s[2]),
+        )
+
+    if strategy == "CONDOR":
+        # Four strikes ascending: long outer, short inner.
+        # BUY → BTO outer + STO inner. SELL inverts.
+        s = sorted(strikes)
+        outer_instr = "BUY_TO_OPEN" if side == "BUY" else "SELL_TO_OPEN"
+        inner_instr = "SELL_TO_OPEN" if side == "BUY" else "BUY_TO_OPEN"
+        return tuple(
+            ParsedLeg(instruction=instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type=option_type, strike=k)
+            for k, instr in zip(
+                s, [outer_instr, inner_instr, inner_instr, outer_instr],
+            )
+        )
+
+    if strategy == "IRON_CONDOR":
+        # Four strikes ascending: PUT side (low pair) + CALL side
+        # (high pair). Long outer + short inner.
+        #
+        # Convention: TOS "BUY +1 IRON CONDOR" means establishing the
+        # short-vol position — collects net credit on the inner legs.
+        # Schwab body lists each leg's instruction: BTO outer / STO
+        # inner. Mechanically identical to a CONDOR with a P/C
+        # boundary in the middle.
+        s = sorted(strikes)
+        outer_instr = "BUY_TO_OPEN" if side == "BUY" else "SELL_TO_OPEN"
+        inner_instr = "SELL_TO_OPEN" if side == "BUY" else "BUY_TO_OPEN"
+        # P, P, C, C
+        return (
+            ParsedLeg(instruction=outer_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="PUT", strike=s[0]),
+            ParsedLeg(instruction=inner_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="PUT", strike=s[1]),
+            ParsedLeg(instruction=inner_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="CALL", strike=s[2]),
+            ParsedLeg(instruction=outer_instr, quantity=quantity,
+                      underlying=underlying, expiry=expiry,
+                      option_type="CALL", strike=s[3]),
+        )
+
     raise TicketParseError(
-        f"internal: unhandled strategy {strategy!r}", kind="phase2",
+        f"strategy {strategy!r} parser not yet implemented; "
+        f"use --leg to specify legs explicitly",
+        kind="phase2",
     )
 
 

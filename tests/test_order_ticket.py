@@ -182,29 +182,30 @@ def test_mkt_with_price_rejected():
 
 
 def test_vertical_requires_two_strikes():
-    with pytest.raises(TicketParseError, match="multiple strikes"):
+    with pytest.raises(TicketParseError, match="VERTICAL requires 2 strikes"):
         parse_ticket("BUY +1 VERTICAL AMZN 1 MAY 26 250 CALL @2 LMT")
 
 
 def test_vertical_two_strikes_required_format():
-    with pytest.raises(TicketParseError, match="VERTICAL requires"):
+    with pytest.raises(TicketParseError, match="VERTICAL requires 2 strikes"):
         parse_ticket(
             "BUY +1 VERTICAL AMZN 1 MAY 26 250/260/270 CALL @2 LMT"
         )
 
 
 def test_vertical_equal_strikes_rejected():
-    with pytest.raises(TicketParseError, match="must differ"):
+    with pytest.raises(TicketParseError, match="distinct strikes"):
         parse_ticket("BUY +1 VERTICAL AMZN 1 MAY 26 250/250 CALL @2 LMT")
 
 
-def test_phase2_strategy_rejected_with_phase2_kind():
+def test_unimplemented_strategy_rejected_with_phase2_kind():
+    """BACK_RATIO is recognized but not yet implemented; the
+    spread-strategy parser must surface a clear hint."""
     with pytest.raises(TicketParseError) as exc:
         parse_ticket(
-            "BUY +1 BUTTERFLY AMZN 1 MAY 26 250/260/270 CALL @2 LMT"
+            "BUY +1 BACK_RATIO AMZN 1 MAY 26 250/260 CALL @2 LMT"
         )
     assert exc.value.kind == "phase2"
-    assert "Phase 1" in str(exc.value) or "Phase 2" in str(exc.value)
 
 
 def test_invalid_month_falls_through_to_equity_error():
@@ -226,8 +227,10 @@ def test_unexpected_trailing_rejected():
         parse_ticket("BUY +100 NVDA @150 LMT DAY EXTRA")
 
 
-def test_strategy_keyword_with_single_strike_rejected():
-    with pytest.raises(TicketParseError, match="multiple strikes"):
+def test_strategy_keyword_with_wrong_strike_count_rejected():
+    """VERTICAL needs 2 strikes; supplying 1 must error explicitly so
+    the user knows to add a /SECOND-STRIKE token."""
+    with pytest.raises(TicketParseError, match="VERTICAL requires 2 strikes"):
         parse_ticket("BUY +1 VERTICAL AMZN 1 MAY 26 250 CALL @2 LMT")
 
 
