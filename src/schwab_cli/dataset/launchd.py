@@ -205,16 +205,38 @@ def build_dataset_plist(
 
 
 def install_plist(spec: DatasetPlistSpec) -> Path:
-    """Write the launcher + plist and ``launchctl load`` (G13.2)."""
+    """Write the launcher + plist and ``launchctl load`` (G13.2).
+
+    Idempotent across schedule changes: any previously-loaded job at
+    the same label is unloaded first. Without that, ``launchctl load``
+    silently fails with ``Load failed: 5: Input/output error`` while
+    returning exit 0 — so the plist on disk reflects the new schedule
+    but launchd is still running the old one. We proactively unload
+    so the reload always sticks.
+    """
     launcher = _write_launcher(spec)
     spec.plist_path.parent.mkdir(parents=True, exist_ok=True)
     spec.plist_path.write_bytes(
         build_dataset_plist(spec, launcher_path=launcher)
     )
+    # Best-effort unload — silent when nothing's loaded ("Could not
+    # find specified service" on stderr is expected and harmless).
     subprocess.run(
-        ["launchctl", "load", "-w", str(spec.plist_path)],
-        check=True,
+        ["launchctl", "unload", str(spec.plist_path)],
+        check=False, capture_output=True,
     )
+    # macOS launchctl returns 0 even when load fails, so we have to
+    # sniff stderr for "Load failed" instead of trusting the exit code.
+    result = subprocess.run(
+        ["launchctl", "load", "-w", str(spec.plist_path)],
+        capture_output=True, text=True,
+    )
+    err = (result.stderr or "").strip()
+    if result.returncode != 0 or "load failed" in err.lower():
+        raise RuntimeError(
+            f"launchctl load failed for {spec.plist_path}: "
+            f"{err or 'exit ' + str(result.returncode)}"
+        )
     return spec.plist_path
 
 

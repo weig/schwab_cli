@@ -144,3 +144,99 @@ def test_unsupported_kind_rejected():
     with pytest.raises(ValueError, match="unsupported plist kind"):
         DatasetPlistSpec(binary_path="/x", cron="0 22 * * *",
                         kind="other")
+
+
+# ---- install_plist: idempotent unload-before-load ---------------------
+
+
+def _install_spec():
+    # ``plist_path`` is derived from ``Path.home()``, so callers monkeypatch
+    # HOME → tmp_path before constructing the spec to keep filesystem writes
+    # inside the test sandbox.
+    return DatasetPlistSpec(
+        binary_path="/x/schwab_cli", cron="0 9 * * *", kind="volatility",
+    )
+
+
+def test_install_plist_unloads_then_loads(monkeypatch, tmp_path):
+    """Reinstall must unload first — otherwise launchctl silently
+    skips loading the new plist when one is already loaded at the
+    same label."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from schwab_cli.dataset import launchd as ds_launchd
+
+    calls: list[list[str]] = []
+
+    class FakeResult:
+        def __init__(self, returncode=0, stderr=""):
+            self.returncode = returncode
+            self.stderr = stderr
+            self.stdout = ""
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return FakeResult(returncode=0, stderr="")
+
+    monkeypatch.setattr(ds_launchd.subprocess, "run", fake_run)
+
+    ds_launchd.install_plist(_install_spec())
+
+    assert calls[0][:2] == ["launchctl", "unload"]
+    assert calls[1][:2] == ["launchctl", "load"]
+    assert "-w" in calls[1]
+
+
+def test_install_plist_raises_when_load_fails_silently(monkeypatch, tmp_path):
+    """macOS launchctl returns 0 even when load fails. Catch it via
+    stderr's ``Load failed`` text so the user sees the problem
+    instead of a fake-success message."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from schwab_cli.dataset import launchd as ds_launchd
+
+    class FakeResult:
+        def __init__(self, returncode=0, stderr=""):
+            self.returncode = returncode
+            self.stderr = stderr
+            self.stdout = ""
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["launchctl", "load"]:
+            return FakeResult(
+                returncode=0,
+                stderr=(
+                    "Load failed: 5: Input/output error\n"
+                    "Try running `launchctl bootstrap` as root for richer errors.\n"
+                ),
+            )
+        return FakeResult()
+
+    monkeypatch.setattr(ds_launchd.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="launchctl load failed"):
+        ds_launchd.install_plist(_install_spec())
+
+
+def test_install_plist_swallows_unload_noise(monkeypatch, tmp_path):
+    """Unload-not-loaded prints noise on stderr but exits non-zero;
+    install_plist must not surface that as a failure."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from schwab_cli.dataset import launchd as ds_launchd
+
+    class FakeResult:
+        def __init__(self, returncode=0, stderr=""):
+            self.returncode = returncode
+            self.stderr = stderr
+            self.stdout = ""
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["launchctl", "unload"]:
+            return FakeResult(
+                returncode=1,
+                stderr='Could not find specified service\n',
+            )
+        return FakeResult()  # load succeeds
+
+    monkeypatch.setattr(ds_launchd.subprocess, "run", fake_run)
+    # Should not raise — unload errors are expected when nothing's loaded.
+    path = ds_launchd.install_plist(_install_spec())
+    assert path.exists()
