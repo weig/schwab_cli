@@ -13,11 +13,78 @@ between this module and ``commands/order``.
 from __future__ import annotations
 
 import json as _json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
 import typer
 
 from .context import OrderContext, RuleResult
+
+
+class ParallelFetchRule:
+    """Run a set of independent fetch rules concurrently.
+
+    Each child rule must (a) be best-effort — no ``halt`` — (b) write
+    disjoint :class:`OrderContext` fields, and (c) use
+    :class:`SchwabClient`, which is safe under a small thread fan-out
+    in the order hot path: ``_request`` issues a fresh
+    ``httpx.request`` per call (no shared connection pool), and
+    ``_account_ids_cache`` is already populated before the pipeline
+    runs (resolve-account happens in ``run_place``).
+
+    Total wall-clock for the wrapper ≈ ``max(child_times)`` since the
+    children fan out on a thread pool. Per-child timings stay
+    available via :attr:`last_child_timings` so the
+    ``SCHWAB_CLI_PROFILE_PIPELINE`` runner output can show them
+    indented under the wrapper row.
+    """
+
+    name = "parallel_fetch"
+
+    def __init__(self, *children: "OrderRule") -> None:
+        self._children: tuple[OrderRule, ...] = children
+        self.last_child_timings: list[tuple[str, float]] = []
+
+    def applies(self, ctx: OrderContext) -> bool:
+        # Wrapper applies if any child applies. Children whose
+        # ``applies`` returns False are skipped inside ``execute``.
+        return any(c.applies(ctx) for c in self._children)
+
+    def execute(self, ctx: OrderContext) -> RuleResult:
+        active = [c for c in self._children if c.applies(ctx)]
+        self.last_child_timings = []
+        if not active:
+            return RuleResult()
+        if len(active) == 1:
+            # No fan-out worth the thread overhead.
+            child = active[0]
+            t0 = time.perf_counter()
+            child.execute(ctx)
+            self.last_child_timings.append(
+                (getattr(child, "name", type(child).__name__),
+                 time.perf_counter() - t0)
+            )
+            return RuleResult()
+
+        def _run(rule: "OrderRule") -> tuple[str, float]:
+            t0 = time.perf_counter()
+            try:
+                rule.execute(ctx)
+            except Exception:  # noqa: BLE001 — best-effort fetch
+                # Each child rule is already wrapped in its own
+                # try/except for graceful degradation; an exception
+                # escaping here is a real bug. Re-raise so the
+                # ThreadPoolExecutor surfaces it.
+                raise
+            return (
+                getattr(rule, "name", type(rule).__name__),
+                time.perf_counter() - t0,
+            )
+
+        with ThreadPoolExecutor(max_workers=len(active)) as ex:
+            self.last_child_timings = list(ex.map(_run, active))
+        return RuleResult()
 
 
 class OrderRule(Protocol):
@@ -840,10 +907,20 @@ class PlaceOrderRule:
 
 DEFAULT_RULES: tuple = (
     LoadProfileRule(),
-    FetchAccountBalancesRule(),
+    # Three independent Schwab REST calls — fan out on threads. They
+    # write disjoint OrderContext fields (current_balances /
+    # account_positions / underlying_quote / chain_data), so a thread
+    # pool of 3 cuts the cold-start latency from sum(~1.65s) to
+    # max(~600ms). DetectOpenCloseRule below depends on
+    # account_positions; SchwabPreviewRule depends on
+    # detect_open_close having rewritten the body; both stay
+    # sequential after the fetch fan-out.
+    ParallelFetchRule(
+        FetchAccountBalancesRule(),
+        FetchUnderlyingQuoteRule(),
+        FetchChainRule(),
+    ),
     DetectOpenCloseRule(),       # must run BEFORE SchwabPreviewRule
-    FetchUnderlyingQuoteRule(),
-    FetchChainRule(),
     SchwabPreviewRule(),
     ComputeAnalyticsRule(),
     RenderPanelRule(),
