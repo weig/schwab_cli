@@ -43,6 +43,18 @@ class SchwabClient:
         self._cfg = cfg
         self._session = session
         self._account_ids_cache: list[AccountIds] | None = None
+        # Persistent HTTP/2 client. ``httpx.request`` (the module-level
+        # helper) opens a fresh TCP+TLS connection per call, so each
+        # Schwab call paid ~200–300 ms in handshake. A long-lived
+        # client reuses the underlying connection for sequential
+        # calls; with HTTP/2 it also multiplexes the parallel
+        # ``order place`` fan-out (account/quote/chain) on a single
+        # stream, dropping the per-arm handshake cost.
+        #
+        # ``http2`` requires the ``h2`` extra. We assume it's
+        # installed (declared in ``pyproject.toml``) — the constructor
+        # raises if it's not, which is loud-enough feedback to fix.
+        self._http: httpx.Client | None = None
 
     @property
     def session(self) -> Session:
@@ -104,6 +116,35 @@ class SchwabClient:
 
         return resp
 
+    def _http_client(self) -> httpx.Client:
+        """Return the shared HTTP/2 client, creating it on first use.
+
+        Lazy so the client cost (TLS context, h2 import) doesn't hit
+        unrelated commands that don't talk to Schwab. Connection
+        pooling means subsequent calls reuse the open TCP+TLS;
+        HTTP/2 means concurrent calls multiplex on one stream rather
+        than each opening their own.
+        """
+        if self._http is None:
+            self._http = httpx.Client(
+                http2=True,
+                timeout=30.0,
+                limits=httpx.Limits(
+                    max_keepalive_connections=4,
+                    max_connections=8,
+                    keepalive_expiry=60.0,
+                ),
+            )
+        return self._http
+
+    def close(self) -> None:
+        """Close the underlying HTTP/2 client. Safe to call multiple
+        times. Tests use this to release the connection pool between
+        cases without leaking warnings."""
+        if self._http is not None:
+            self._http.close()
+            self._http = None
+
     def _request(
         self,
         method: str,
@@ -112,7 +153,7 @@ class SchwabClient:
         params: dict | None = None,
         json: dict | None = None,
     ) -> httpx.Response:
-        return httpx.request(
+        return self._http_client().request(
             method,
             url,
             params=params,
