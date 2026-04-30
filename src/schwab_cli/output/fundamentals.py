@@ -1,39 +1,53 @@
 """Renderers for ``fundamentals`` command.
 
-The Schwab ``/quotes?fields=quote,fundamental`` endpoint returns a per-
-symbol ``fundamental`` block. Schwab reports margin / return figures and
-``dividendYield`` as **percentage values** (e.g. ``46.86`` for 46.86%,
-``0.44`` for 0.44%). We surface them as-is plus a ``%`` suffix — do not
+The Schwab ``/quotes?fields=all`` endpoint returns a per-symbol
+``fundamental`` block. Field names verified against the live API:
+``eps``, ``peRatio``, ``divAmount``, ``divYield``, ``divFreq``,
+``divPayAmount``, ``divExDate``, ``divPayDate``, ``nextDivExDate``,
+``nextDivPayDate``, ``declarationDate``, ``sharesOutstanding``,
+``avg10DaysVolume``, ``avg1YearVolume``, ``lastEarningsDate``,
+``fundLeverageFactor``. (The longer ``epsTTM`` / ``dividendYield``
+forms appear in older Schwab docs but are NOT what the live endpoint
+returns — using them silently produces ``null`` rows.)
+
+Schwab reports ``divYield`` as a **percentage value** (e.g. ``0.44``
+for 0.44%). We surface percentages with a ``%`` suffix — do not
 multiply by 100 again.
 
-Human mode stacks a metric/value table per symbol (multi-symbol layouts
-exceed terminal width). MD mode renders one row per symbol with the
-headline metrics for at-a-glance comparison. JSON surfaces the raw
-fundamental block plus the last price for downstream tooling.
+Human mode stacks a metric/value table per symbol. MD mode renders one
+row per symbol. JSON surfaces the raw fundamental block plus the
+derived ``valuation`` section and any ``data_quality_warnings``.
 
 P/E semantics
 -------------
-Schwab's ``peRatio`` field is **forward / normalized** (it does NOT
-equal ``last / epsTTM`` for any growing company). The ``epsTTM`` field
-is the trailing 12-month figure, sourced from a different basis. To
-keep downstream consumers from confusing the two we surface a derived
-``valuation`` section alongside the raw ``fundamental`` block::
+Schwab's ``peRatio`` is **forward / normalized**; ``eps`` is **TTM**
+(trailing 12 months). They use different EPS basis, so for any growing
+company ``last / eps != peRatio``. To keep downstream consumers from
+confusing the two we surface a derived ``valuation`` section::
 
     valuation = {
         "pe_forward": fundamental.peRatio,             # Schwab's forward
-        "pe_ttm":     last / fundamental.epsTTM,       # derived TTM
-        "eps_ttm":    fundamental.epsTTM,
+        "pe_ttm":     last / fundamental.eps,          # derived TTM
+        "eps_ttm":    fundamental.eps,
     }
 
 Data quality
 ------------
-Dual-class tickers (BRK.A/B, BF.A/B, …) are sometimes served with the
-sister-class EPS leaked into the response (Schwab upstream bug). We
-detect that with a deliberately conservative heuristic — symbol
-contains ``/`` AND ``epsTTM > 1000`` — and append a non-fatal entry
-to ``data_quality_warnings``. We do NOT mutate the numbers, since
-Schwab may fix the bug at any time and a hard-coded share-class ratio
-would silently corrupt correct data.
+Dual-class tickers (BRK.A/B, BF.A/B, GOOG/GOOGL, UA/UAA, …) are
+sometimes served with the sister-class EPS leaked into the response
+(Schwab upstream bug). We detect this with three independent
+signals — known-dual-class membership, EPS too large, P/E too small —
+and emit a structured ``data_quality_warnings`` entry::
+
+    {"code": "POSSIBLE_DUAL_CLASS_LEAK",
+     "message": "EPS=46563.02 P/E=0.01 likely contaminated by sister
+                share class",
+     "guidance": "Cross-check public sources (e.g. divide EPS by
+                  share-class ratio); known dual-class siblings often
+                  trade at a fixed economic ratio (BRK A:B = 1500:1)"}
+
+We do NOT mutate the numbers — Schwab may fix the bug at any time and
+a hard-coded ratio would silently corrupt correct data the day after.
 """
 
 from __future__ import annotations
@@ -116,7 +130,7 @@ _SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ("P/E (TTM)", "peRatioTtm", "num"),
             ("PEG", "pegRatio", "num"),
             ("P/B", "pbRatio", "num"),
-            ("EPS (TTM)", "epsTTM", "num"),
+            ("EPS (TTM)", "eps", "num"),
             ("EPS Δ (TTM)", "epsChangePercentTTM", "pct"),
             ("Rev Δ (TTM)", "revChangeTTM", "pct"),
         ],
@@ -140,8 +154,8 @@ _SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
     (
         "Dividends",
         [
-            ("Yield", "dividendYield", "pct"),
-            ("Amount (annual)", "dividendAmount", "num"),
+            ("Yield", "divYield", "pct"),
+            ("Amount (annual)", "divAmount", "num"),
         ],
     ),
     (
@@ -180,17 +194,19 @@ def _to_float(v: Any) -> float | None:
 def _compute_valuation(last: Any, fundamental: dict | None) -> dict | None:
     """Surface forward and TTM P/E side-by-side.
 
-    Returns ``None`` when there's no fundamental block at all so the
-    JSON output stays sparse for invalid / non-equity symbols.
+    Reads ``fundamental.eps`` (Schwab's TTM EPS) and ``peRatio``
+    (Schwab's forward / normalized P/E). Returns ``None`` when there's
+    no fundamental block at all so the JSON output stays sparse for
+    invalid / non-equity symbols.
     """
     if not fundamental:
         return None
     pe_forward = _to_float(fundamental.get("peRatio"))
-    eps_ttm = _to_float(fundamental.get("epsTTM"))
+    eps_ttm = _to_float(fundamental.get("eps"))
     last_f = _to_float(last)
     pe_ttm: float | None = None
-    if last_f is not None and eps_ttm is not None and eps_ttm != 0:
-        pe_ttm = last_f / eps_ttm
+    if last_f is not None and eps_ttm is not None and eps_ttm > 0:
+        pe_ttm = round(last_f / eps_ttm, 4)
     return {
         "pe_forward": pe_forward,
         "pe_ttm": pe_ttm,
@@ -198,25 +214,78 @@ def _compute_valuation(last: Any, fundamental: dict | None) -> dict | None:
     }
 
 
-def _data_quality_warnings(symbol: str, fundamental: dict | None) -> list[str]:
-    """Detect upstream data oddities worth flagging without mutating values.
+# Known dual-class equities. Symbols *without* a ``/`` (e.g. ``UA`` /
+# ``UAA``, ``GOOG`` / ``GOOGL``) need explicit listing because the
+# numeric heuristics alone won't catch a smearing event on those — the
+# leaked EPS could be from any class. Membership doesn't imply the data
+# is wrong, only that downstream consumers should cross-check.
+_DUAL_CLASS_TICKERS: frozenset[str] = frozenset({
+    "BRK/A", "BRK/B",
+    "BF/A", "BF/B",
+    "GOOG", "GOOGL",
+    "UA", "UAA",
+    "LEN", "LEN/B",
+    "MOG/A", "MOG/B",
+    "HEI", "HEI/A",
+    "FOX", "FOXA",
+    "NWS", "NWSA",
+    "DISCA", "DISCB", "DISCK",
+    "VIAC", "VIACA",
+})
 
-    Heuristic (deliberately conservative): symbol contains ``/`` (i.e.
-    is a class-share form like ``BRK/B``) AND ``epsTTM > 1000`` (no
-    sane B-share has a five-figure EPS — that's the A-share's number
-    bleeding through Schwab's response).
+# Numeric anomaly thresholds. These deliberately err on the side of
+# false negatives: any normal equity has EPS well under $1000 and P/E
+# well over 0.1, so anything outside that range is almost certainly
+# data corruption rather than a legitimate edge case.
+_ANOMALY_EPS_TOO_LARGE = 1000.0
+_ANOMALY_PE_TOO_SMALL = 0.1
+
+
+def _data_quality_warnings(symbol: str, fundamental: dict | None) -> list[dict]:
+    """Detect upstream data oddities. Structured (non-string) entries
+    so downstream agents can pattern-match on ``code`` rather than
+    parse the human message.
+
+    Three independent triggers, OR'd together (any one fires):
+
+    1. Symbol is in the known dual-class set — even if EPS / P/E look
+       fine, a future smearing event would go silently undetected
+       without this safety net.
+    2. ``eps`` exceeds ``_ANOMALY_EPS_TOO_LARGE`` ($1000). No
+       legitimate non-bankrupt B-share equity has that EPS.
+    3. ``peRatio`` is under ``_ANOMALY_PE_TOO_SMALL`` (0.1) and
+       positive. A P/E that low means the EPS basis is wrong.
     """
     if not fundamental:
         return []
-    warnings: list[str] = []
-    if "/" in symbol:
-        eps = _to_float(fundamental.get("epsTTM"))
-        if eps is not None and eps > 1000:
-            warnings.append(
-                "possible dual-class EPS leak — epsTTM and peRatio likely "
-                "reflect the sister share class; verify against issuer filings"
-            )
-    return warnings
+    eps = _to_float(fundamental.get("eps"))
+    pe = _to_float(fundamental.get("peRatio"))
+    triggers: list[str] = []
+    if symbol in _DUAL_CLASS_TICKERS:
+        triggers.append("known dual-class symbol")
+    if eps is not None and eps > _ANOMALY_EPS_TOO_LARGE:
+        triggers.append(f"EPS={eps:,.2f} exceeds anomaly threshold "
+                        f"(${_ANOMALY_EPS_TOO_LARGE:,.0f})")
+    if pe is not None and 0 < pe < _ANOMALY_PE_TOO_SMALL:
+        triggers.append(f"P/E={pe:.4f} below anomaly threshold "
+                        f"({_ANOMALY_PE_TOO_SMALL})")
+    if not triggers:
+        return []
+    return [{
+        "code": "POSSIBLE_DUAL_CLASS_LEAK",
+        "message": (
+            f"EPS={eps if eps is not None else '—'} "
+            f"P/E={pe if pe is not None else '—'} "
+            f"likely contaminated by sister share class "
+            f"({'; '.join(triggers)})"
+        ),
+        "guidance": (
+            "Cross-check public sources before relying on EPS / P/E. "
+            "Known dual-class siblings often trade at a fixed economic "
+            "ratio (e.g. BRK A:B = 1500:1) — divide the leaked EPS by "
+            "that ratio for an order-of-magnitude check."
+        ),
+    }]
 
 
 def _shape_row(symbol: str, payload: dict, invalid: set[str]) -> dict:
@@ -260,7 +329,13 @@ def _human(rows: list[dict]) -> str:
             header += f"  [cyan]{_money(row['last'])}[/]"
         console.print(header)
         for warning in row.get("data_quality_warnings") or []:
-            console.print(f"[yellow]⚠ data quality: {warning}[/]")
+            # Structured warning: render code + message; keep guidance on
+            # a dim follow-up line so the primary alert stays scannable.
+            console.print(
+                f"[yellow]⚠ {warning['code']}: {warning['message']}[/]"
+            )
+            if warning.get("guidance"):
+                console.print(f"[dim]  → {warning['guidance']}[/]")
         console.print("[dim]" + "─" * 60 + "[/]")
         fundamental = row.get("fundamental") or {}
         valuation = row.get("valuation") or {}
@@ -318,15 +393,17 @@ def _md(rows: list[dict]) -> str:
             f"| {_num(v.get('pe_forward'))} "
             f"| {_num(v.get('pe_ttm'))} "
             f"| {_num(f.get('pegRatio'))} "
-            f"| {_num(f.get('epsTTM'))} "
+            f"| {_num(f.get('eps'))} "
             f"| {_pct(f.get('epsChangePercentTTM'))} "
             f"| {_pct(f.get('revChangeTTM'))} "
-            f"| {_pct(f.get('dividendYield'))} "
+            f"| {_pct(f.get('divYield'))} "
             f"| {_num(f.get('beta'))} "
             f"| {_num(f.get('high52'))} "
             f"| {_num(f.get('low52'))} |"
         )
         if warnings:
-            line += "  <!-- " + "; ".join(warnings) + " -->"
+            line += "  <!-- " + "; ".join(
+                f"{w['code']}: {w['message']}" for w in warnings
+            ) + " -->"
         out.append(line)
     return "\n".join(out) + "\n"

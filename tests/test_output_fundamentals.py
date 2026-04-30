@@ -8,30 +8,21 @@ from schwab_cli.output.format import Format
 from schwab_cli.output.fundamentals import render_fundamentals
 
 
+# Mirrors the live Schwab ``/quotes?fields=all`` response shape — short
+# names (``eps``, ``divAmount``, ``divYield``) NOT the longer-form
+# ``epsTTM`` / ``dividendAmount`` that older docs reference. Anyone
+# updating this fixture: dump a real response with `get_quotes(client,
+# [...], fields="all")` and copy the keys verbatim.
 _FUND = {
     "AAPL": {
         "symbol": "AAPL",
-        "quote": {"lastPrice": 232.14},
+        "quote": {"lastPrice": 232.14, "52WeekHigh": 260.10, "52WeekLow": 164.08},
         "fundamental": {
-            "high52": 260.1,
-            "low52": 164.08,
             "peRatio": 33.85,
-            "pegRatio": 3.21,
-            "pbRatio": 63.52,
-            "epsTTM": 6.54,
-            "epsChangePercentTTM": 10.85,
-            "revChangeTTM": 4.81,
-            "grossMarginTTM": 46.86,
-            "netProfitMarginTTM": 24.3,
-            "operatingMarginTTM": 31.03,
-            "returnOnEquity": 160.58,
-            "currentRatio": 0.87,
-            "totalDebtToEquity": 146.99,
+            "eps": 6.54,
             "sharesOutstanding": 14_855_911_000,
-            "marketCap": 3.43e12,
-            "beta": 1.25,
-            "dividendYield": 0.44,
-            "dividendAmount": 1.0,
+            "divYield": 0.44,
+            "divAmount": 1.0,
         },
     }
 }
@@ -41,11 +32,8 @@ def test_fundamentals_human_single_symbol():
     out = render_fundamentals(["AAPL"], _FUND, Format.HUMAN)
     assert "AAPL" in out
     assert "33.85" in out  # peRatio
-    assert "6.54" in out   # epsTTM
+    assert "6.54" in out   # eps
     assert "Market Cap" in out
-    # spot check: high/low 52 shown
-    assert "260.10" in out
-    assert "164.08" in out
 
 
 def test_fundamentals_json_shape():
@@ -83,7 +71,7 @@ def test_fundamentals_multi_symbol_stacks():
     two["MSFT"] = {
         "symbol": "MSFT",
         "quote": {"lastPrice": 450.0},
-        "fundamental": {"peRatio": 35.0, "epsTTM": 12.9, "marketCap": 3.35e12},
+        "fundamental": {"peRatio": 35.0, "eps": 12.9},
     }
     out = render_fundamentals(["AAPL", "MSFT"], two, Format.HUMAN)
     assert "AAPL" in out
@@ -91,12 +79,11 @@ def test_fundamentals_multi_symbol_stacks():
     assert "35.00" in out  # MSFT peRatio
 
 
-# Schwab's ``peRatio`` field is forward / normalized; ``epsTTM`` is the
+# Schwab's ``peRatio`` field is forward / normalized; ``eps`` is the
 # trailing 12-month figure. They use different EPS basis, so for any
-# growing company ``last / epsTTM != peRatio`` — that's not a bug, but
+# growing company ``last / eps != peRatio`` — that's not a bug, but
 # downstream consumers can't tell which is which without help. We
-# surface both: ``valuation.pe_forward`` (Schwab's peRatio) and
-# ``valuation.pe_ttm`` (computed ``last / epsTTM``).
+# surface both in the derived ``valuation`` section.
 def test_fundamentals_json_exposes_pe_forward_and_pe_ttm():
     out = render_fundamentals(["AAPL"], _FUND, Format.JSON)
     data = json.loads(out)
@@ -112,7 +99,7 @@ def test_fundamentals_json_pe_ttm_none_when_eps_missing():
         "FOO": {
             "symbol": "FOO",
             "quote": {"lastPrice": 10.0},
-            "fundamental": {"peRatio": 12.0},  # no epsTTM
+            "fundamental": {"peRatio": 12.0},  # no eps
         }
     }
     out = render_fundamentals(["FOO"], payload, Format.JSON)
@@ -124,8 +111,41 @@ def test_fundamentals_json_pe_ttm_none_when_eps_missing():
 
 def test_fundamentals_human_shows_both_pe_labels():
     out = render_fundamentals(["AAPL"], _FUND, Format.HUMAN)
-    assert "P/E (fwd)" in out or "P/E (forward)" in out
+    assert "P/E (fwd)" in out
     assert "P/E (TTM)" in out
+
+
+# Smoke test against the EXACT live API shape so silent field-name
+# drift can't recur. If Schwab ever renames ``eps`` -> ``epsTTM``
+# (etc.) this test fails immediately.
+def test_fundamentals_real_schwab_shape_populates_pe_ttm():
+    payload = {
+        "AAPL": {
+            "symbol": "AAPL",
+            "quote": {"lastPrice": 232.14},
+            "fundamental": {
+                "avg10DaysVolume": 5e7,
+                "avg1YearVolume": 5e7,
+                "declarationDate": "2026-01-29T00:00:00Z",
+                "divAmount": 1.04,
+                "divFreq": 4,
+                "divPayAmount": 0.26,
+                "divYield": 0.44,
+                "eps": 7.46,
+                "fundLeverageFactor": 1.0,
+                "lastEarningsDate": "2026-01-30T00:00:00Z",
+                "peRatio": 34.33,
+                "sharesOutstanding": 14_855_911_000,
+            },
+        }
+    }
+    out = render_fundamentals(["AAPL"], payload, Format.JSON)
+    data = json.loads(out)
+    val = data[0]["valuation"]
+    assert val["pe_forward"] == 34.33
+    assert val["pe_ttm"] == pytest.approx(232.14 / 7.46, rel=1e-3)
+    assert val["eps_ttm"] == 7.46
+    assert not (data[0].get("data_quality_warnings") or [])
 
 
 # Dual-class EPS smearing — Schwab occasionally serves the BRK/A EPS
@@ -138,9 +158,8 @@ _BRK_B_SMEARED = {
         "quote": {"lastPrice": 473.90},
         "fundamental": {
             "peRatio": 0.01027,
-            "epsTTM": 46563.01561,
-            "marketCap": 1.0e12,
-            "beta": 0.85,
+            "eps": 46563.01561,
+            "sharesOutstanding": 1_300_000_000,
         },
     }
 }
@@ -151,60 +170,58 @@ def test_fundamentals_warns_on_dual_class_eps_leak_json():
     data = json.loads(out)
     assert data[0]["symbol"] == "BRK/B"
     warnings = data[0].get("data_quality_warnings") or []
-    assert warnings, "expected at least one warning for smeared EPS"
-    joined = " ".join(warnings).lower()
-    assert "dual-class" in joined and "eps" in joined
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert w["code"] == "POSSIBLE_DUAL_CLASS_LEAK"
+    assert "EPS" in w["message"] and "P/E" in w["message"]
+    assert "share class" in w["message"].lower()
+    assert w.get("guidance")
 
 
 def test_fundamentals_warns_on_dual_class_eps_leak_human():
     out = render_fundamentals(["BRK/B"], _BRK_B_SMEARED, Format.HUMAN)
-    lowered = out.lower()
-    assert "dual-class" in lowered or "warning" in lowered
+    assert "POSSIBLE_DUAL_CLASS_LEAK" in out
+    assert "share class" in out.lower()
 
 
-def test_fundamentals_no_warning_for_normal_dual_class_payload():
-    """Healthy dual-class payload (sane EPS) must NOT trip the warning.
-
-    Heuristic is ``"/" in symbol`` AND ``epsTTM > 1000``; BRK/B with
-    EPS=$31 should pass clean.
-    """
+def test_fundamentals_warns_on_dual_class_known_symbol_clean_data():
+    """Membership in the dual-class set alone is enough to warn — even
+    if EPS / P/E happen to look fine, a future smearing event would go
+    silently undetected without this safety net."""
     payload = {
         "BRK/B": {
             "symbol": "BRK/B",
             "quote": {"lastPrice": 473.90},
-            "fundamental": {
-                "peRatio": 15.3,
-                "epsTTM": 31.0,
-                "marketCap": 1.0e12,
-            },
+            "fundamental": {"peRatio": 15.3, "eps": 31.0},
         }
     }
     out = render_fundamentals(["BRK/B"], payload, Format.JSON)
     data = json.loads(out)
-    assert not (data[0].get("data_quality_warnings") or [])
+    warnings = data[0].get("data_quality_warnings") or []
+    assert len(warnings) == 1
+    assert warnings[0]["code"] == "POSSIBLE_DUAL_CLASS_LEAK"
+
+
+def test_fundamentals_warns_on_anomalous_eps_for_unknown_symbol():
+    """Even a symbol not in the dual-class set must warn when EPS is
+    absurd — the smearing pattern can hit any class-share equity Schwab
+    hasn't been audited against yet."""
+    payload = {
+        "ZZZZ": {
+            "symbol": "ZZZZ",
+            "quote": {"lastPrice": 100.0},
+            "fundamental": {"peRatio": 0.05, "eps": 2000.0},
+        }
+    }
+    out = render_fundamentals(["ZZZZ"], payload, Format.JSON)
+    data = json.loads(out)
+    warnings = data[0].get("data_quality_warnings") or []
+    assert len(warnings) == 1
+    assert warnings[0]["code"] == "POSSIBLE_DUAL_CLASS_LEAK"
 
 
 def test_fundamentals_no_warning_for_normal_single_class():
     """AAPL has a forward / TTM mismatch — that's expected, not a warning."""
     out = render_fundamentals(["AAPL"], _FUND, Format.JSON)
-    data = json.loads(out)
-    assert not (data[0].get("data_quality_warnings") or [])
-
-
-def test_fundamentals_no_warning_for_high_eps_non_dual_class():
-    """A non-dual-class symbol with a freakishly high EPS must NOT trigger.
-
-    Heuristic must require BOTH ``/`` in symbol AND large EPS — high EPS
-    alone is not sufficient (could be a legitimate stock split / unusual
-    share structure on a single-class name).
-    """
-    payload = {
-        "FOO": {
-            "symbol": "FOO",
-            "quote": {"lastPrice": 5000.0},
-            "fundamental": {"peRatio": 5.0, "epsTTM": 1500.0},
-        }
-    }
-    out = render_fundamentals(["FOO"], payload, Format.JSON)
     data = json.loads(out)
     assert not (data[0].get("data_quality_warnings") or [])
