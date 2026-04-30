@@ -167,3 +167,31 @@ def test_dividends_api_error(monkeypatch, tmp_path):
         result = runner.invoke(app, ["dividends", "AAPL"])
     assert result.exit_code == 1
     assert "503" in result.output
+
+
+def test_dividends_brk_b_class_share(monkeypatch, tmp_path):
+    """``BRK.B`` / ``BRK-B`` must surface dividend data — Schwab keys the
+    response by canonical ``BRK/B``, so the renderer's per-symbol lookup
+    has to match that, not the user's raw input."""
+    _prep(monkeypatch, tmp_path)
+    payload = {
+        "BRK/B": {
+            "symbol": "BRK/B",
+            "quote": {"lastPrice": 450.0},
+            "fundamental": {
+                "dividendAmount": 0.0,
+                "dividendYield": 0.0,
+                "dividendFreq": 0,
+            },
+        }
+    }
+    for variant in ("BRK.B", "BRK-B", "BRK/B", "brk.b"):
+        with patch(
+            "schwab_cli.commands.dividends.get_quotes",
+            return_value=payload,
+        ):
+            result = runner.invoke(app, ["dividends", variant, "--json"])
+        assert result.exit_code == 0, result.output
+        import json
+        data = json.loads(result.stdout)
+        assert data[0]["symbol"] == "BRK/B"

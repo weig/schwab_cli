@@ -146,3 +146,29 @@ def test_fundamentals_api_error(monkeypatch, tmp_path):
         result = runner.invoke(app, ["fundamentals", "AAPL"])
     assert result.exit_code == 1
     assert "500" in result.output
+
+
+def test_fundamentals_brk_b_class_share(monkeypatch, tmp_path):
+    """Class-share inputs ``BRK.B`` / ``BRK-B`` must surface the same data
+    as the canonical ``BRK/B`` form. Regression: the API request was
+    normalized but the renderer still keyed the response by the raw user
+    input, so values came back blank."""
+    _prep(monkeypatch, tmp_path)
+    payload = {
+        "BRK/B": {
+            "symbol": "BRK/B",
+            "quote": {"lastPrice": 450.0},
+            "fundamental": {"peRatio": 9.5, "epsTTM": 47.4},
+        }
+    }
+    for variant in ("BRK.B", "BRK-B", "BRK/B", "brk.b"):
+        with patch(
+            "schwab_cli.commands.fundamentals.get_quotes",
+            return_value=payload,
+        ):
+            result = runner.invoke(app, ["fundamentals", variant, "--json"])
+        assert result.exit_code == 0, result.output
+        import json
+        data = json.loads(result.stdout)
+        assert data[0]["symbol"] == "BRK/B"
+        assert data[0]["fundamental"]["peRatio"] == 9.5
