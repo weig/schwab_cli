@@ -33,18 +33,28 @@ confusing the two we surface a derived ``valuation`` section::
 
 Data quality
 ------------
-Dual-class tickers (BRK.A/B, BF.A/B, GOOG/GOOGL, UA/UAA, …) are
-sometimes served with the sister-class EPS leaked into the response
-(Schwab upstream bug). We detect this with three independent
-signals — known-dual-class membership, EPS too large, P/E too small —
-and emit a structured ``data_quality_warnings`` entry::
+Detection is **evidence-based**, not symbol-based. Some dual-class
+tickers (BRK.A/B at a 1500:1 ratio) are served with the sister-class
+EPS leaked into the response — a Schwab upstream bug. Other dual-class
+tickers (GOOG/GOOGL, 1:1 economics) are NOT affected — the data is
+returned correctly per ticker. So the heuristic looks at the numbers,
+not the symbol::
+
+    1. abs(eps) > 1000              # no real equity has EPS this large
+    2. 0 < peRatio < 1.0            # a positive P/E this small ⇒ EPS basis wrong
+    3. last > 0 and |eps/last| < 0.001  # EPS this tiny relative to price ⇒ P/E > 1000
+
+Any one of those firing emits a structured ``data_quality_warnings``
+entry. The ``code`` distinguishes class-share suspects from generic
+anomalies — ``POSSIBLE_DUAL_CLASS_LEAK`` when the symbol contains
+``/`` (the corruption is most plausibly sister-class smearing),
+``ANOMALOUS_FUNDAMENTALS`` otherwise. Downstream agents pattern-match
+on ``code`` rather than parsing free text::
 
     {"code": "POSSIBLE_DUAL_CLASS_LEAK",
      "message": "EPS=46563.02 P/E=0.01 likely contaminated by sister
-                share class",
-     "guidance": "Cross-check public sources (e.g. divide EPS by
-                  share-class ratio); known dual-class siblings often
-                  trade at a fixed economic ratio (BRK A:B = 1500:1)"}
+                share class (abs(EPS) > 1000; P/E < 1.0)",
+     "guidance": "Cross-check public sources..."}
 
 We do NOT mutate the numbers — Schwab may fix the bug at any time and
 a hard-coded ratio would silently corrupt correct data the day after.
@@ -214,76 +224,103 @@ def _compute_valuation(last: Any, fundamental: dict | None) -> dict | None:
     }
 
 
-# Known dual-class equities. Symbols *without* a ``/`` (e.g. ``UA`` /
-# ``UAA``, ``GOOG`` / ``GOOGL``) need explicit listing because the
-# numeric heuristics alone won't catch a smearing event on those — the
-# leaked EPS could be from any class. Membership doesn't imply the data
-# is wrong, only that downstream consumers should cross-check.
-_DUAL_CLASS_TICKERS: frozenset[str] = frozenset({
-    "BRK/A", "BRK/B",
-    "BF/A", "BF/B",
-    "GOOG", "GOOGL",
-    "UA", "UAA",
-    "LEN", "LEN/B",
-    "MOG/A", "MOG/B",
-    "HEI", "HEI/A",
-    "FOX", "FOXA",
-    "NWS", "NWSA",
-    "DISCA", "DISCB", "DISCK",
-    "VIAC", "VIACA",
-})
-
 # Numeric anomaly thresholds. These deliberately err on the side of
-# false negatives: any normal equity has EPS well under $1000 and P/E
-# well over 0.1, so anything outside that range is almost certainly
-# data corruption rather than a legitimate edge case.
-_ANOMALY_EPS_TOO_LARGE = 1000.0
-_ANOMALY_PE_TOO_SMALL = 0.1
+# false negatives — every healthy equity sits well inside these bounds,
+# so anything outside is almost certainly data corruption rather than a
+# legitimate edge case.
+#
+# Calibrated against real Schwab responses:
+# - GOOG (eps=10.80, pe=32.17, last=372): clean, must NOT fire
+# - TSLA (eps=1.08, pe=345.20, last=345): clean (high P/E is real, not noise)
+# - BRK/B leak (eps=46563, pe=0.01, last=474): MUST fire on all three
+_ANOMALY_EPS_ABS_TOO_LARGE = 1000.0
+_ANOMALY_PE_TOO_SMALL = 1.0
+_ANOMALY_EPS_TO_LAST_RATIO_FLOOR = 0.001
 
 
-def _data_quality_warnings(symbol: str, fundamental: dict | None) -> list[dict]:
+def _contamination_triggers(
+    eps: float | None, pe: float | None, last: float | None
+) -> list[str]:
+    """Return human-readable trigger descriptions for any signals that
+    fired. Empty list ⇒ data passes inspection.
+
+    Three independent signals; any one is sufficient:
+
+    1. ``abs(eps) > _ANOMALY_EPS_ABS_TOO_LARGE``. No real equity has
+       EPS in this range (BRK.A is the canonical exception, and it
+       leaks into BRK.B as a five-figure number).
+    2. ``0 < pe < _ANOMALY_PE_TOO_SMALL``. A positive P/E under 1.0
+       means the EPS basis used to compute it is wrong.
+    3. ``last > 0 and abs(eps/last) < _ANOMALY_EPS_TO_LAST_RATIO_FLOOR``.
+       EPS this small relative to price implies P/E > 1000 (the
+       inverse failure mode of #2).
+    """
+    triggers: list[str] = []
+    if eps is not None and abs(eps) > _ANOMALY_EPS_ABS_TOO_LARGE:
+        triggers.append(
+            f"abs(EPS)={abs(eps):,.2f} > ${_ANOMALY_EPS_ABS_TOO_LARGE:,.0f}"
+        )
+    if pe is not None and 0 < pe < _ANOMALY_PE_TOO_SMALL:
+        triggers.append(f"P/E={pe:.4f} < {_ANOMALY_PE_TOO_SMALL}")
+    if (
+        eps is not None
+        and last is not None
+        and last > 0
+        and abs(eps / last) < _ANOMALY_EPS_TO_LAST_RATIO_FLOOR
+    ):
+        triggers.append(
+            f"|EPS/last|={abs(eps / last):.5f} < "
+            f"{_ANOMALY_EPS_TO_LAST_RATIO_FLOOR}"
+        )
+    return triggers
+
+
+def _data_quality_warnings(
+    symbol: str, fundamental: dict | None, last: Any
+) -> list[dict]:
     """Detect upstream data oddities. Structured (non-string) entries
     so downstream agents can pattern-match on ``code`` rather than
     parse the human message.
 
-    Three independent triggers, OR'd together (any one fires):
-
-    1. Symbol is in the known dual-class set — even if EPS / P/E look
-       fine, a future smearing event would go silently undetected
-       without this safety net.
-    2. ``eps`` exceeds ``_ANOMALY_EPS_TOO_LARGE`` ($1000). No
-       legitimate non-bankrupt B-share equity has that EPS.
-    3. ``peRatio`` is under ``_ANOMALY_PE_TOO_SMALL`` (0.1) and
-       positive. A P/E that low means the EPS basis is wrong.
+    Returns at most one warning per row. The ``code`` reflects whether
+    the symbol *could* plausibly be a dual-class leak target (contains
+    ``/``) or is just a generic anomaly on a single-class ticker.
     """
     if not fundamental:
         return []
     eps = _to_float(fundamental.get("eps"))
     pe = _to_float(fundamental.get("peRatio"))
-    triggers: list[str] = []
-    if symbol in _DUAL_CLASS_TICKERS:
-        triggers.append("known dual-class symbol")
-    if eps is not None and eps > _ANOMALY_EPS_TOO_LARGE:
-        triggers.append(f"EPS={eps:,.2f} exceeds anomaly threshold "
-                        f"(${_ANOMALY_EPS_TOO_LARGE:,.0f})")
-    if pe is not None and 0 < pe < _ANOMALY_PE_TOO_SMALL:
-        triggers.append(f"P/E={pe:.4f} below anomaly threshold "
-                        f"({_ANOMALY_PE_TOO_SMALL})")
+    last_f = _to_float(last)
+    triggers = _contamination_triggers(eps, pe, last_f)
     if not triggers:
         return []
+    is_class_share = "/" in symbol
+    eps_str = f"{eps:.4f}" if eps is not None else "—"
+    pe_str = f"{pe:.4f}" if pe is not None else "—"
+    if is_class_share:
+        return [{
+            "code": "POSSIBLE_DUAL_CLASS_LEAK",
+            "message": (
+                f"EPS={eps_str} P/E={pe_str} likely contaminated by "
+                f"sister share class ({'; '.join(triggers)})"
+            ),
+            "guidance": (
+                "Cross-check public sources before relying on EPS / P/E. "
+                "Class-share siblings often trade at a fixed economic "
+                "ratio (e.g. BRK A:B = 1500:1) — divide the leaked EPS "
+                "by that ratio for an order-of-magnitude check."
+            ),
+        }]
     return [{
-        "code": "POSSIBLE_DUAL_CLASS_LEAK",
+        "code": "ANOMALOUS_FUNDAMENTALS",
         "message": (
-            f"EPS={eps if eps is not None else '—'} "
-            f"P/E={pe if pe is not None else '—'} "
-            f"likely contaminated by sister share class "
-            f"({'; '.join(triggers)})"
+            f"EPS={eps_str} P/E={pe_str} look anomalous "
+            f"({'; '.join(triggers)}); data quality unverified"
         ),
         "guidance": (
             "Cross-check public sources before relying on EPS / P/E. "
-            "Known dual-class siblings often trade at a fixed economic "
-            "ratio (e.g. BRK A:B = 1500:1) — divide the leaked EPS by "
-            "that ratio for an order-of-magnitude check."
+            "Schwab's fundamental block has been observed to return "
+            "stale or mis-mapped values for some symbols."
         ),
     }]
 
@@ -300,7 +337,7 @@ def _shape_row(symbol: str, payload: dict, invalid: set[str]) -> dict:
         "last": last,
         "fundamental": fundamental,
         "valuation": _compute_valuation(last, fundamental),
-        "data_quality_warnings": _data_quality_warnings(symbol, fundamental),
+        "data_quality_warnings": _data_quality_warnings(symbol, fundamental, last),
     }
 
 

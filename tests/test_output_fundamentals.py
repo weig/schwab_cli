@@ -184,10 +184,11 @@ def test_fundamentals_warns_on_dual_class_eps_leak_human():
     assert "share class" in out.lower()
 
 
-def test_fundamentals_warns_on_dual_class_known_symbol_clean_data():
-    """Membership in the dual-class set alone is enough to warn — even
-    if EPS / P/E happen to look fine, a future smearing event would go
-    silently undetected without this safety net."""
+def test_fundamentals_no_warning_for_clean_dual_class_payload():
+    """A class-share ticker with sane numbers must NOT fire — detection
+    is evidence-based, not membership-based. A hypothetical clean BRK/B
+    (post-fix) should not warn just because the symbol contains ``/``.
+    """
     payload = {
         "BRK/B": {
             "symbol": "BRK/B",
@@ -197,15 +198,30 @@ def test_fundamentals_warns_on_dual_class_known_symbol_clean_data():
     }
     out = render_fundamentals(["BRK/B"], payload, Format.JSON)
     data = json.loads(out)
-    warnings = data[0].get("data_quality_warnings") or []
-    assert len(warnings) == 1
-    assert warnings[0]["code"] == "POSSIBLE_DUAL_CLASS_LEAK"
+    assert not (data[0].get("data_quality_warnings") or [])
 
 
-def test_fundamentals_warns_on_anomalous_eps_for_unknown_symbol():
-    """Even a symbol not in the dual-class set must warn when EPS is
-    absurd — the smearing pattern can hit any class-share equity Schwab
-    hasn't been audited against yet."""
+def test_fundamentals_no_warning_for_goog_class_share():
+    """GOOG is dual-class governance (Class A / C, 1:1 economics) but
+    Schwab returns CLEAN per-ticker data — no smearing. A live response
+    (eps=10.80, pe=32.17, last=371.92) must NOT trip the warning.
+    Regression for false positive observed during validation."""
+    payload = {
+        "GOOG": {
+            "symbol": "GOOG",
+            "quote": {"lastPrice": 371.92},
+            "fundamental": {"peRatio": 32.17, "eps": 10.80},
+        }
+    }
+    out = render_fundamentals(["GOOG"], payload, Format.JSON)
+    data = json.loads(out)
+    assert not (data[0].get("data_quality_warnings") or [])
+
+
+def test_fundamentals_warns_on_anomalous_single_class_uses_generic_code():
+    """Single-class symbol with absurd EPS gets ANOMALOUS_FUNDAMENTALS,
+    not POSSIBLE_DUAL_CLASS_LEAK — there's no sister class to leak from,
+    so the dual-class explanation doesn't apply."""
     payload = {
         "ZZZZ": {
             "symbol": "ZZZZ",
@@ -217,7 +233,44 @@ def test_fundamentals_warns_on_anomalous_eps_for_unknown_symbol():
     data = json.loads(out)
     warnings = data[0].get("data_quality_warnings") or []
     assert len(warnings) == 1
-    assert warnings[0]["code"] == "POSSIBLE_DUAL_CLASS_LEAK"
+    assert warnings[0]["code"] == "ANOMALOUS_FUNDAMENTALS"
+    # And explicitly DOES NOT mislabel as dual-class leak
+    assert "sister share class" not in warnings[0]["message"].lower()
+
+
+def test_fundamentals_warns_on_eps_to_last_ratio_anomaly():
+    """The third trigger: EPS so tiny relative to price that the
+    implied P/E is > 1000. Catches the inverse failure mode of a
+    P/E < 1.0 — same data corruption from the other end."""
+    payload = {
+        "ZZZZ": {
+            "symbol": "ZZZZ",
+            "quote": {"lastPrice": 100.0},
+            # eps/last = 0.00005 (< 0.001 floor). Implies P/E ≈ 2_000_000.
+            "fundamental": {"peRatio": 50.0, "eps": 0.00005},
+        }
+    }
+    out = render_fundamentals(["ZZZZ"], payload, Format.JSON)
+    data = json.loads(out)
+    warnings = data[0].get("data_quality_warnings") or []
+    assert len(warnings) == 1
+    assert warnings[0]["code"] == "ANOMALOUS_FUNDAMENTALS"
+
+
+def test_fundamentals_no_warning_for_high_pe_low_eps_legit():
+    """A legitimate high-multiple stock (TSLA-style, eps=$1, pe=$345)
+    must NOT fire. The eps/last ratio sits comfortably above the
+    0.001 floor."""
+    payload = {
+        "TSLA": {
+            "symbol": "TSLA",
+            "quote": {"lastPrice": 372.85},
+            "fundamental": {"peRatio": 345.20, "eps": 1.08},
+        }
+    }
+    out = render_fundamentals(["TSLA"], payload, Format.JSON)
+    data = json.loads(out)
+    assert not (data[0].get("data_quality_warnings") or [])
 
 
 def test_fundamentals_no_warning_for_normal_single_class():
