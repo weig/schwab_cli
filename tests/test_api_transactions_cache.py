@@ -323,3 +323,115 @@ def test_fetched_data_is_stored_for_future_reads(
             start_ms=ms_start, end_ms=ms_end,
         )
     assert any(t["activityId"] == 42 for t in out)
+
+
+# ---- cache stats out-param ------------------------------------------------
+
+def test_stats_populated_for_cold_cache(
+    tmp_storage, patched_get_transactions, monkeypatch,
+):
+    """Cold cache, all-old range → all rows came from API; from_cache=0."""
+    monkeypatch.setattr(
+        "schwab_cli.api.transactions_cache._today",
+        lambda: date(2026, 5, 4),
+    )
+    patched_get_transactions(
+        lambda s, e: [_txn(1, "2026-01-15T10:00:00+00:00")]
+    )
+    client = _fake_client()
+    stats: dict = {}
+    fetch_cached(
+        client, "0756",
+        start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        stats=stats,
+    )
+    assert stats["total"] == 1
+    assert stats["from_api"] == 1
+    assert stats["from_cache"] == 0
+
+
+def test_stats_populated_for_warm_cache(
+    tmp_storage, patched_get_transactions, monkeypatch,
+):
+    """Warm cache, all-old range → all rows from cache; from_api=0."""
+    monkeypatch.setattr(
+        "schwab_cli.api.transactions_cache._today",
+        lambda: date(2026, 5, 4),
+    )
+    patched_get_transactions(
+        lambda s, e: [_txn(1, "2026-01-15T10:00:00+00:00")]
+    )
+    client = _fake_client()
+    # Warm the cache.
+    fetch_cached(
+        client, "0756",
+        start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    )
+    # Second call hits cache only.
+    stats: dict = {}
+    fetch_cached(
+        client, "0756",
+        start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        stats=stats,
+    )
+    assert stats["total"] == 1
+    assert stats["from_api"] == 0
+    assert stats["from_cache"] == 1
+
+
+def test_stats_split_for_straddling_range(
+    tmp_storage, patched_get_transactions, monkeypatch,
+):
+    """Range crosses cutoff. After warmup, old part is cached and fresh
+    part still re-fetches → from_cache reflects old portion."""
+    monkeypatch.setattr(
+        "schwab_cli.api.transactions_cache._today",
+        lambda: date(2026, 5, 4),
+    )
+    # Stub returns one transaction per fetch, time inside the requested window.
+    def stub(s, e):
+        return [_txn(int(s.timestamp()), s.isoformat())]
+    patched_get_transactions(stub)
+    client = _fake_client()
+    # Warm: Mar 1 → May 4 straddles cutoff (Apr 1).
+    # Cold call yields 2 rows (one for each gap chunk).
+    fetch_cached(
+        client, "0756",
+        start=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 5, 4, tzinfo=timezone.utc),
+    )
+    stats: dict = {}
+    fetch_cached(
+        client, "0756",
+        start=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 5, 4, tzinfo=timezone.utc),
+        stats=stats,
+    )
+    # Second call: only fresh gap re-fetches → from_api=1, total=2,
+    # from_cache=1.
+    assert stats["total"] >= 1
+    assert stats["from_api"] >= 1
+    assert stats["from_cache"] == stats["total"] - stats["from_api"]
+
+
+def test_stats_optional_default_none_no_op(
+    tmp_storage, patched_get_transactions, monkeypatch,
+):
+    """Omitting ``stats`` doesn't crash. Existing callers still work."""
+    monkeypatch.setattr(
+        "schwab_cli.api.transactions_cache._today",
+        lambda: date(2026, 5, 4),
+    )
+    patched_get_transactions(
+        lambda s, e: [_txn(1, "2026-01-15T10:00:00+00:00")]
+    )
+    client = _fake_client()
+    rows = fetch_cached(
+        client, "0756",
+        start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    )
+    assert isinstance(rows, list)

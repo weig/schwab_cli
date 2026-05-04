@@ -62,6 +62,7 @@ def run(
         raise typer.Exit(code=code)
 
     client = _client()
+    cache_stats: dict = {}
     try:
         # Cache always fetches the full type set; apply the user's
         # filter locally on the way to the renderer.
@@ -69,6 +70,7 @@ def run(
             client, account,
             start=start, end=end,
             refresh=refresh,
+            stats=cache_stats,
         )
     except (ApiError, SessionExpired) as e:
         msg = str(e) if str(e) else type(e).__name__
@@ -83,4 +85,5 @@ def run(
         # redundant Account column from human/MD output. JSON is
         # unaffected (stable shape for machine consumers).
         show_account=(account is None),
+        cache_stats=cache_stats,
     ))

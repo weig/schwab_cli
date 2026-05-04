@@ -144,7 +144,12 @@ def _render_json(rows: list[dict]) -> str:
 # HUMAN
 # ---------------------------------------------------------------------------
 
-def _render_human(rows: list[dict], *, show_account: bool = True) -> str:
+def _render_human(
+    rows: list[dict],
+    *,
+    show_account: bool = True,
+    cache_stats: dict | None = None,
+) -> str:
     buf = StringIO()
     console = Console(
         file=buf,
@@ -160,6 +165,17 @@ def _render_human(rows: list[dict], *, show_account: bool = True) -> str:
         f"Net cashflow: {_fmt_net_colored(net_total)}[/dim]"
     )
     console.print(header, highlight=False)
+    if cache_stats and cache_stats.get("total"):
+        # Phrase as two counts — the visible row count may differ from
+        # cache_stats["total"] when --type filters cull non-TRADE rows.
+        # Showing the pair (cache hits, API fetched) makes clear these
+        # are cache-layer events, not the displayed row total.
+        from_cache = int(cache_stats.get("from_cache", 0))
+        from_api = int(cache_stats.get("from_api", 0))
+        console.print(
+            f"[dim]Cache: {from_cache} hits, {from_api} fetched from Schwab[/dim]",
+            highlight=False,
+        )
     console.print("")
 
     if not rows:
@@ -252,7 +268,11 @@ def _render_md(rows: list[dict], *, show_account: bool = True) -> str:
 
 
 def render_transactions(
-    rows: list[dict], *, fmt: Format, show_account: bool = True,
+    rows: list[dict],
+    *,
+    fmt: Format,
+    show_account: bool = True,
+    cache_stats: dict | None = None,
 ) -> str:
     """Render shaped transaction rows.
 
@@ -260,11 +280,18 @@ def render_transactions(
     output — used when the caller has already filtered to a single
     account, making the column redundant. JSON output is unchanged
     for shape stability.
+
+    ``cache_stats`` (when provided) surfaces the cache hit ratio in
+    the human-view header. Format: ``{"total": N, "from_cache": M, ...}``.
+    Omitted from JSON / MD — those are for downstream consumers, not
+    diagnostics.
     """
     if fmt is Format.JSON:
         return _render_json(rows)
     if fmt is Format.MD:
         return _render_md(rows, show_account=show_account)
     if fmt is Format.HUMAN:
-        return _render_human(rows, show_account=show_account)
+        return _render_human(
+            rows, show_account=show_account, cache_stats=cache_stats,
+        )
     raise NotImplementedError(f"format {fmt} not yet implemented")

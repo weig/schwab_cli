@@ -315,3 +315,67 @@ def test_render_json_always_includes_account_field_regardless_of_flag():
     )
     assert out_with == out_without
     assert "account" in out_with[0]
+
+
+# ---- cache_stats line in human view --------------------------------------
+
+def test_render_human_shows_cache_stats_when_provided():
+    out = render_transactions(
+        [_SAMPLE_ROW], fmt=Format.HUMAN,
+        cache_stats={"total": 1, "from_cache": 1, "from_api": 0},
+    )
+    assert "Cache: 1 hits, 0 fetched from Schwab" in out
+
+
+def test_render_human_shows_partial_cache_hits():
+    rows = [_SAMPLE_ROW, dict(_SAMPLE_ROW, symbol="MSFT")]
+    out = render_transactions(
+        rows, fmt=Format.HUMAN,
+        cache_stats={"total": 2, "from_cache": 1, "from_api": 1},
+    )
+    assert "Cache: 1 hits, 1 fetched from Schwab" in out
+
+
+def test_render_human_shows_cold_cache_stats():
+    """Cold cache: 0 hits, all fetched. Format is unambiguous about
+    what the numbers mean (cache events vs displayed rows)."""
+    out = render_transactions(
+        [_SAMPLE_ROW], fmt=Format.HUMAN,
+        cache_stats={"total": 9, "from_cache": 0, "from_api": 9},
+    )
+    assert "Cache: 0 hits, 9 fetched from Schwab" in out
+
+
+def test_render_human_omits_cache_line_when_stats_none():
+    out = render_transactions([_SAMPLE_ROW], fmt=Format.HUMAN)
+    assert "Cache:" not in out
+
+
+def test_render_human_omits_cache_line_when_stats_empty():
+    """Empty dict (no 'total' key) is treated as no stats."""
+    out = render_transactions(
+        [_SAMPLE_ROW], fmt=Format.HUMAN, cache_stats={},
+    )
+    assert "Cache:" not in out
+
+
+def test_render_md_ignores_cache_stats():
+    """MD output is for downstream consumers; cache diagnostics aren't included."""
+    out = render_transactions(
+        [_SAMPLE_ROW], fmt=Format.MD,
+        cache_stats={"total": 1, "from_cache": 1, "from_api": 0},
+    )
+    assert "Cache:" not in out
+
+
+def test_render_json_ignores_cache_stats():
+    """JSON output stays a pure data shape."""
+    import json as _json
+    out = render_transactions(
+        [_SAMPLE_ROW], fmt=Format.JSON,
+        cache_stats={"total": 1, "from_cache": 1, "from_api": 0},
+    )
+    data = _json.loads(out)
+    assert isinstance(data, list)
+    assert "Cache:" not in out
+    assert "from_cache" not in out

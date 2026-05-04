@@ -74,6 +74,7 @@ def fetch_cached(
     start: datetime,
     end: datetime,
     refresh: bool = False,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Fetch transactions across one or all accounts, cache-aware.
 
@@ -82,6 +83,16 @@ def fetch_cached(
 
     No ``types`` / ``symbol`` kwargs by design: the cache stores the
     full set; callers filter locally on the returned list.
+
+    If ``stats`` is provided, it's populated as an out-parameter with::
+
+        stats["total"]      = total rows returned to caller
+        stats["from_api"]   = rows that came over the wire this run
+        stats["from_cache"] = rows served from local DB (total − from_api,
+                              clamped to ≥0)
+
+    Out-parameter style (rather than a richer return type) keeps the
+    backward-compatible shape so callers and tests can ignore stats.
     """
     if account_number is None:
         ids = client.account_ids()
@@ -89,15 +100,22 @@ def fetch_cached(
         ids = [client.resolve_account(account_number)]
 
     out: list[dict] = []
+    api_total = 0
     for acct in ids:
-        per_account = _fetch_one_account(
+        per_account, per_account_api = _fetch_one_account(
             client, acct.hash_value,
             start=start, end=end, refresh=refresh,
         )
+        api_total += per_account_api
         for txn in per_account:
             tagged = dict(txn)
             tagged["_account"] = acct.account_number
             out.append(tagged)
+
+    if stats is not None:
+        stats["total"] = len(out)
+        stats["from_api"] = api_total
+        stats["from_cache"] = max(0, len(out) - api_total)
     return out
 
 
@@ -108,7 +126,8 @@ def _fetch_one_account(
     start: datetime,
     end: datetime,
     refresh: bool,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
+    """Returns (rows, api_fetch_count) — caller aggregates across accounts."""
     start_ms = _to_ms(start)
     end_ms = _to_ms(end)
     cutoff_date = _fresh_cutoff(_today())
@@ -119,6 +138,7 @@ def _fetch_one_account(
     )
     cutoff_ms = _to_ms(cutoff_dt)
 
+    api_count = 0
     with th.connect() as conn:
         gaps: list[tuple[int, int]] = []
         if refresh:
@@ -145,6 +165,7 @@ def _fetch_one_account(
                     start=chunk_start, end=chunk_end,
                     types=None, symbol=None,
                 )
+                api_count += len(payloads)
                 th.upsert_many(conn, account_hash, payloads)
                 th.merge_coverage(
                     conn, account_hash,
@@ -152,10 +173,11 @@ def _fetch_one_account(
                     end_ms=_to_ms(chunk_end),
                 )
 
-        return th.read_range(
+        rows = th.read_range(
             conn, account_hash=account_hash,
             start_ms=start_ms, end_ms=end_ms,
         )
+        return rows, api_count
 
 
 def _chunk_range(
