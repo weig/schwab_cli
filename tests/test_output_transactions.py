@@ -265,3 +265,53 @@ def test_render_md_has_all_columns():
 def test_render_md_empty():
     out = render_transactions([], fmt=Format.MD)
     assert "Transactions" in out
+
+
+# ---- show_account toggle --------------------------------------------------
+
+_SAMPLE_ROW = {
+    "account": "57410756",
+    "date": "2026-04-15",
+    "time": "2026-04-15T10:00:00+00:00",
+    "type": "TRADE",
+    "symbol": "JPM",
+    "qty": 1.0,
+    "price": 100.0,
+    "effect": "OPENING",
+    "netAmount": -100.0,
+}
+
+
+def test_render_human_default_shows_account_column():
+    out = render_transactions([_SAMPLE_ROW], fmt=Format.HUMAN)
+    assert "Account" in out
+    assert "0756" in out  # masked suffix
+
+
+def test_render_human_hides_account_column_when_show_account_false():
+    out = render_transactions(
+        [_SAMPLE_ROW], fmt=Format.HUMAN, show_account=False,
+    )
+    assert "Account" not in out
+    assert "0756" not in out
+
+
+def test_render_md_hides_account_column_when_show_account_false():
+    out = render_transactions(
+        [_SAMPLE_ROW], fmt=Format.MD, show_account=False,
+    )
+    assert "| Account |" not in out
+    assert "57410756" not in out
+    assert "...0756" not in out
+
+
+def test_render_json_always_includes_account_field_regardless_of_flag():
+    """JSON consumers want a stable shape. ``show_account=False`` is
+    a presentation hint for human/MD only."""
+    import json as _json
+    out_with = _json.loads(render_transactions([_SAMPLE_ROW], fmt=Format.JSON))
+    out_without = _json.loads(
+        render_transactions([_SAMPLE_ROW], fmt=Format.JSON, show_account=False),
+    )
+    assert out_with == out_without
+    assert "account" in out_with[0]

@@ -144,7 +144,7 @@ def _render_json(rows: list[dict]) -> str:
 # HUMAN
 # ---------------------------------------------------------------------------
 
-def _render_human(rows: list[dict]) -> str:
+def _render_human(rows: list[dict], *, show_account: bool = True) -> str:
     buf = StringIO()
     console = Console(
         file=buf,
@@ -168,7 +168,8 @@ def _render_human(rows: list[dict]) -> str:
 
     t = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     t.add_column("Date")
-    t.add_column("Account")
+    if show_account:
+        t.add_column("Account")
     t.add_column("Type")
     t.add_column("Symbol")
     t.add_column("Effect")
@@ -177,16 +178,18 @@ def _render_human(rows: list[dict]) -> str:
     t.add_column("Net", justify="right")
 
     for r in rows:
-        t.add_row(
-            r["date"],
-            _mask_account(r["account"]),
+        cells = [r["date"]]
+        if show_account:
+            cells.append(_mask_account(r["account"]))
+        cells += [
             r["type"],
             r["symbol"] or "—",
             r["effect"] or "—",
             _fmt_qty(r["qty"]),
             _fmt(r["price"]) if r["price"] is not None else "—",
             _fmt_net_colored(r["netAmount"]),
-        )
+        ]
+        t.add_row(*cells)
     console.print(t)
     return buf.getvalue()
 
@@ -195,7 +198,7 @@ def _render_human(rows: list[dict]) -> str:
 # MD
 # ---------------------------------------------------------------------------
 
-def _render_md(rows: list[dict]) -> str:
+def _render_md(rows: list[dict], *, show_account: bool = True) -> str:
     count = len(rows)
     net_total = sum((r["netAmount"] or 0.0) for r in rows)
     lines = [
@@ -209,31 +212,59 @@ def _render_md(rows: list[dict]) -> str:
         lines.append("_(no transactions in range)_")
         return "\n".join(lines) + "\n"
 
-    lines += [
-        "| Date | Account | Type | Symbol | Effect | Qty | Price | Net |",
-        "|------|---------|------|--------|--------|-----|-------|-----|",
-    ]
+    if show_account:
+        lines += [
+            "| Date | Account | Type | Symbol | Effect | Qty | Price | Net |",
+            "|------|---------|------|--------|--------|-----|-------|-----|",
+        ]
+    else:
+        lines += [
+            "| Date | Type | Symbol | Effect | Qty | Price | Net |",
+            "|------|------|--------|--------|-----|-------|-----|",
+        ]
     for r in rows:
-        lines.append(
-            "| {date} | {acct} | {type} | {sym} | {eff} | {qty} | {price} | {net} |".format(
-                date=r["date"],
-                acct=_mask_account(r["account"]),
-                type=r["type"],
-                sym=r["symbol"] or "—",
-                eff=r["effect"] or "—",
-                qty=_fmt_qty(r["qty"]),
-                price=_fmt(r["price"]) if r["price"] is not None else "—",
-                net=_fmt_net_plain(r["netAmount"]),
+        if show_account:
+            lines.append(
+                "| {date} | {acct} | {type} | {sym} | {eff} | {qty} | {price} | {net} |".format(
+                    date=r["date"],
+                    acct=_mask_account(r["account"]),
+                    type=r["type"],
+                    sym=r["symbol"] or "—",
+                    eff=r["effect"] or "—",
+                    qty=_fmt_qty(r["qty"]),
+                    price=_fmt(r["price"]) if r["price"] is not None else "—",
+                    net=_fmt_net_plain(r["netAmount"]),
+                )
             )
-        )
+        else:
+            lines.append(
+                "| {date} | {type} | {sym} | {eff} | {qty} | {price} | {net} |".format(
+                    date=r["date"],
+                    type=r["type"],
+                    sym=r["symbol"] or "—",
+                    eff=r["effect"] or "—",
+                    qty=_fmt_qty(r["qty"]),
+                    price=_fmt(r["price"]) if r["price"] is not None else "—",
+                    net=_fmt_net_plain(r["netAmount"]),
+                )
+            )
     return "\n".join(lines) + "\n"
 
 
-def render_transactions(rows: list[dict], *, fmt: Format) -> str:
+def render_transactions(
+    rows: list[dict], *, fmt: Format, show_account: bool = True,
+) -> str:
+    """Render shaped transaction rows.
+
+    ``show_account=False`` drops the Account column from human and MD
+    output — used when the caller has already filtered to a single
+    account, making the column redundant. JSON output is unchanged
+    for shape stability.
+    """
     if fmt is Format.JSON:
         return _render_json(rows)
     if fmt is Format.MD:
-        return _render_md(rows)
+        return _render_md(rows, show_account=show_account)
     if fmt is Format.HUMAN:
-        return _render_human(rows)
+        return _render_human(rows, show_account=show_account)
     raise NotImplementedError(f"format {fmt} not yet implemented")

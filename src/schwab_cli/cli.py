@@ -680,11 +680,14 @@ def notify_setup(
     help="List account transactions over a date range (default: last 7 days, TRADE only).",
 )
 def transactions(
-    account: str = typer.Argument(
-        None, help="Optional account number or suffix. Default: all accounts.",
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Account number or suffix to filter to (e.g. '0756'). "
+             "Omit to show all accounts. When supplied, the Account column "
+             "is dropped from human/MD output (redundant).",
     ),
     range_str: str = typer.Option(
-        "-7d..now", "--range",
+        "-7d..now", "--range", "-r",
         help="Date range: '<start>..<end>' or one of: ytd, mtd, wtd. "
              "Endpoints: YYYYMMDD, -Nu (u in d/w/mo/y), or 'now'.",
     ),
@@ -695,6 +698,11 @@ def transactions(
     ),
     as_json: bool = typer.Option(False, "--json", help="Output JSON."),
     as_md: bool = typer.Option(False, "--md", help="Output GitHub-flavored markdown."),
+    refresh: bool = typer.Option(
+        False, "--refresh",
+        help="Bypass the local cache for this run and re-fetch from Schwab. "
+             "Result still upserts into the cache.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     transactions_cmd.run(
@@ -703,6 +711,7 @@ def transactions(
         type_filter=type_filter,
         as_json=as_json,
         as_md=as_md,
+        refresh=refresh,
     )
 
 
