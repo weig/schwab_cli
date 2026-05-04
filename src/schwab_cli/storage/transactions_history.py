@@ -269,3 +269,103 @@ def read_range(
         (account_hash, start_ms, end_ms),
     ).fetchall()
     return [json.loads(r["payload"]) for r in rows]
+
+
+def read_coverage(
+    conn: sqlite3.Connection, *, account_hash: str,
+) -> list[tuple[int, int]]:
+    """Return [(start_ms, end_ms), ...] sorted ascending. Non-overlapping."""
+    rows = conn.execute(
+        """
+        SELECT start_ms, end_ms FROM transactions_coverage
+        WHERE account_hash = ?
+        ORDER BY start_ms ASC
+        """,
+        (account_hash,),
+    ).fetchall()
+    return [(int(r["start_ms"]), int(r["end_ms"])) for r in rows]
+
+
+def merge_coverage(
+    conn: sqlite3.Connection,
+    account_hash: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> None:
+    """Insert [start_ms, end_ms] and merge with overlapping/adjacent rows.
+
+    "Adjacent" = ``end_ms + 1 == next start_ms``. We treat ms-touching
+    as contiguous so 60-day chunked fetches collapse into one row
+    instead of fragmenting the table.
+
+    Implementation: pull all overlapping/adjacent rows, compute the
+    union, delete them, insert one merged row. O(n) per call but n is
+    tiny in practice (typically <10 rows per account).
+    """
+    if start_ms > end_ms:
+        return
+    now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    # Adjacent + overlapping selector: any existing row whose
+    # [s, e] satisfies s <= end_ms + 1 AND e >= start_ms - 1.
+    rows = conn.execute(
+        """
+        SELECT start_ms, end_ms FROM transactions_coverage
+        WHERE account_hash = ? AND start_ms <= ? AND end_ms >= ?
+        """,
+        (account_hash, end_ms + 1, start_ms - 1),
+    ).fetchall()
+    new_start = start_ms
+    new_end = end_ms
+    for r in rows:
+        new_start = min(new_start, int(r["start_ms"]))
+        new_end = max(new_end, int(r["end_ms"]))
+    conn.execute(
+        """
+        DELETE FROM transactions_coverage
+        WHERE account_hash = ? AND start_ms <= ? AND end_ms >= ?
+        """,
+        (account_hash, end_ms + 1, start_ms - 1),
+    )
+    conn.execute(
+        """
+        INSERT INTO transactions_coverage (
+            account_hash, start_ms, end_ms, fetched_at_ms
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (account_hash, new_start, new_end, now_ms),
+    )
+
+
+def coverage_gaps(
+    conn: sqlite3.Connection,
+    *,
+    account_hash: str,
+    start_ms: int,
+    end_ms: int,
+) -> list[tuple[int, int]]:
+    """Return sub-ranges of [start_ms, end_ms] not covered by cache.
+
+    Each returned range is inclusive on both ends. Caller is expected
+    to fetch each range from the API and call ``merge_coverage`` after.
+
+    Empty list ⇒ fully covered by cache.
+    """
+    if start_ms > end_ms:
+        return []
+    cov = read_coverage(conn, account_hash=account_hash)
+    gaps: list[tuple[int, int]] = []
+    cursor = start_ms
+    for cs, ce in cov:
+        if ce < cursor:
+            continue
+        if cs > end_ms:
+            break
+        if cs > cursor:
+            gaps.append((cursor, cs - 1))
+        cursor = max(cursor, ce + 1)
+        if cursor > end_ms:
+            return gaps
+    if cursor <= end_ms:
+        gaps.append((cursor, end_ms))
+    return gaps

@@ -210,3 +210,117 @@ def test_read_range_inclusive_boundaries(tmp_storage):
             start_ms=exact_ms, end_ms=exact_ms,
         )
     assert len(out) == 1
+
+
+# ---- Coverage tracking ----------------------------------------------------
+
+def test_coverage_starts_empty(tmp_storage):
+    with th.connect() as conn:
+        cov = th.read_coverage(conn, account_hash="HASH-A")
+    assert cov == []
+
+
+def test_merge_coverage_inserts_first_range(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=200)
+        cov = th.read_coverage(conn, account_hash="HASH-A")
+    assert cov == [(100, 200)]
+
+
+def test_merge_coverage_merges_overlapping(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=200)
+        th.merge_coverage(conn, "HASH-A", start_ms=150, end_ms=250)
+        cov = th.read_coverage(conn, account_hash="HASH-A")
+    assert cov == [(100, 250)]
+
+
+def test_merge_coverage_merges_adjacent(tmp_storage):
+    """Adjacent ranges (end+1 == next start) merge into one."""
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=200)
+        th.merge_coverage(conn, "HASH-A", start_ms=201, end_ms=300)
+        cov = th.read_coverage(conn, account_hash="HASH-A")
+    assert cov == [(100, 300)]
+
+
+def test_merge_coverage_keeps_disjoint(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=200)
+        th.merge_coverage(conn, "HASH-A", start_ms=500, end_ms=600)
+        cov = th.read_coverage(conn, account_hash="HASH-A")
+    assert cov == [(100, 200), (500, 600)]
+
+
+def test_merge_coverage_subsumes_contained(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=300)
+        th.merge_coverage(conn, "HASH-A", start_ms=150, end_ms=250)
+        cov = th.read_coverage(conn, account_hash="HASH-A")
+    assert cov == [(100, 300)]
+
+
+def test_merge_coverage_scoped_per_account(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=200)
+        th.merge_coverage(conn, "HASH-B", start_ms=100, end_ms=200)
+        a = th.read_coverage(conn, account_hash="HASH-A")
+        b = th.read_coverage(conn, account_hash="HASH-B")
+    assert a == [(100, 200)]
+    assert b == [(100, 200)]
+
+
+def test_coverage_gaps_full_miss(tmp_storage):
+    with th.connect() as conn:
+        gaps = th.coverage_gaps(
+            conn, account_hash="HASH-A", start_ms=100, end_ms=200,
+        )
+    assert gaps == [(100, 200)]
+
+
+def test_coverage_gaps_full_hit(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=50, end_ms=300)
+        gaps = th.coverage_gaps(
+            conn, account_hash="HASH-A", start_ms=100, end_ms=200,
+        )
+    assert gaps == []
+
+
+def test_coverage_gaps_partial_left(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=150, end_ms=250)
+        gaps = th.coverage_gaps(
+            conn, account_hash="HASH-A", start_ms=100, end_ms=200,
+        )
+    assert gaps == [(100, 149)]
+
+
+def test_coverage_gaps_partial_right(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=150)
+        gaps = th.coverage_gaps(
+            conn, account_hash="HASH-A", start_ms=120, end_ms=200,
+        )
+    assert gaps == [(151, 200)]
+
+
+def test_coverage_gaps_middle_hole(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=150)
+        th.merge_coverage(conn, "HASH-A", start_ms=200, end_ms=250)
+        gaps = th.coverage_gaps(
+            conn, account_hash="HASH-A", start_ms=100, end_ms=250,
+        )
+    assert gaps == [(151, 199)]
+
+
+def test_coverage_gaps_multi_holes(tmp_storage):
+    with th.connect() as conn:
+        th.merge_coverage(conn, "HASH-A", start_ms=100, end_ms=120)
+        th.merge_coverage(conn, "HASH-A", start_ms=140, end_ms=160)
+        th.merge_coverage(conn, "HASH-A", start_ms=180, end_ms=200)
+        gaps = th.coverage_gaps(
+            conn, account_hash="HASH-A", start_ms=100, end_ms=200,
+        )
+    assert gaps == [(121, 139), (161, 179)]
