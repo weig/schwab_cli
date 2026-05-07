@@ -21,17 +21,10 @@ DEFAULT_CONFIG: dict = {
         "groups":  {"volatility": "0 22 * * *"},
     },
     "thresholds": {
-        "indices": {
-            "active_min_chain_volume":             5000,
-            "active_min_front2_oi":                10000,
-            "watch_demote_after_trading_days":     7,
-            "frozen_demote_after_calendar_days":   30,
-        },
         "position": {
             "watch_demote_after_calendar_days":    30,
             "frozen_demote_after_calendar_days":   90,
         },
-        "grace_trading_days":                      7,
     },
     "indices_provider": {
         "primary":  "stockanalysis",

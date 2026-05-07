@@ -277,14 +277,17 @@ def run_volatility_update(
     # mid-run crash doesn't lose the position reconciliation work.
     conn.commit()
 
-    # Step 2 — build working set.
-    active_rows = list_active_subscriptions(conn, group_name=group_name)
+    # Step 2 — build working set. Pass ``now_ms`` so indices members
+    # removed within the last 30 days stay sampled through the exit
+    # (see store.INDICES_GRACE_DAYS_AFTER_REMOVAL).
+    active_rows = list_active_subscriptions(
+        conn, group_name=group_name, now_ms=now_ms,
+    )
     symbols = sorted({r["symbol"] for r in active_rows})
 
     # Step 3 — partition.
     now_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
     is_monday = now_dt.astimezone(_NY).weekday() == 0
-    is_trading_day = now_dt.astimezone(_NY).weekday() < 5
 
     sampled: list[str] = []
     skipped: list[str] = []
@@ -418,13 +421,9 @@ def run_volatility_update(
         sampled.append(sym)
 
         # Step 5 — tier re-evaluation.
-        chain_volume = _today_chain_volume(chain)
-        front2_oi = _front2_oi(chain)
-        threshold_pass = (
-            chain_volume >= cfg["thresholds"]["indices"]["active_min_chain_volume"]
-            or front2_oi >= cfg["thresholds"]["indices"]["active_min_front2_oi"]
+        sources = sources_for_symbol(
+            conn, symbol=sym, group_name=group_name, now_ms=now_ms,
         )
-        sources = sources_for_symbol(conn, symbol=sym, group_name=group_name)
         last_close_ms = last_close_at_for_symbol(
             conn, symbol=sym, group_name=group_name
         )
@@ -433,13 +432,8 @@ def run_volatility_update(
             if last_close_ms is not None else None
         )
         thr = Thresholds(
-            active_min_chain_volume=cfg["thresholds"]["indices"]["active_min_chain_volume"],
-            active_min_front2_oi=cfg["thresholds"]["indices"]["active_min_front2_oi"],
-            watch_demote_after_trading_days=cfg["thresholds"]["indices"]["watch_demote_after_trading_days"],
-            frozen_demote_after_calendar_days=cfg["thresholds"]["indices"]["frozen_demote_after_calendar_days"],
             position_watch_days=cfg["thresholds"]["position"]["watch_demote_after_calendar_days"],
             position_frozen_days=cfg["thresholds"]["position"]["frozen_demote_after_calendar_days"],
-            grace_trading_days=cfg["thresholds"]["grace_trading_days"],
         )
         old = TierState(
             tier=tier,
@@ -448,7 +442,6 @@ def run_volatility_update(
         )
         new = resolve_tier(
             old, sources=sources, now=now_dt,
-            threshold_pass=threshold_pass, is_trading_day=is_trading_day,
             has_active_position=("position" in sources and last_close_dt is None),
             last_close_at=last_close_dt, thr=thr,
         )
@@ -516,23 +509,3 @@ def _symbols_observed_on_ny_day(
         if ts.astimezone(_NY).date().isoformat() == ny_day:
             out.add(r["symbol"])
     return out
-
-
-def _today_chain_volume(chain: dict) -> int:
-    total = 0
-    for exp in chain.get("expiries") or []:
-        for c in (exp.get("contracts") or []):
-            total += int(c.get("volume") or 0)
-    return total
-
-
-def _front2_oi(chain: dict) -> int:
-    expiries = sorted(
-        chain.get("expiries") or [],
-        key=lambda e: e.get("dte") or 99999,
-    )[:2]
-    total = 0
-    for exp in expiries:
-        for c in (exp.get("contracts") or []):
-            total += int(c.get("openInterest") or 0)
-    return total

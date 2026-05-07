@@ -16,6 +16,14 @@ def _now_ms() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
 
 
+# After the indices weekly cron drops a symbol, we keep sampling it for
+# this many calendar days so the IV trail through the index exit is
+# captured. Once the window elapses, the row drops out of the working
+# set on the next vol cron run.
+INDICES_GRACE_DAYS_AFTER_REMOVAL = 30
+_INDICES_GRACE_MS = INDICES_GRACE_DAYS_AFTER_REMOVAL * 86_400_000
+
+
 # ---- equity subscriptions ----------------------------------------------
 
 
@@ -72,21 +80,36 @@ def list_active_subscriptions(
     conn: sqlite3.Connection,
     *,
     group_name: str | None = None,
+    now_ms: int | None = None,
 ) -> list[sqlite3.Row]:
-    """Return all rows in ``subscriptions`` where ``unsubscribed_at`` is NULL."""
-    if group_name is None:
-        rows = conn.execute(
-            "SELECT * FROM subscriptions WHERE unsubscribed_at IS NULL "
-            "ORDER BY symbol, source, source_key"
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM subscriptions "
-            "WHERE unsubscribed_at IS NULL AND group_name = ? "
-            "ORDER BY symbol, source, source_key",
-            (group_name,),
-        ).fetchall()
-    return rows
+    """Return active subscription rows.
+
+    A row is "active" if ``unsubscribed_at IS NULL``, OR — for indices
+    source only — it was unsubscribed within the last
+    :data:`INDICES_GRACE_DAYS_AFTER_REMOVAL` days. The grace lets us
+    keep sampling an ex-index member through its exit. Pass ``now_ms``
+    to enable the grace window; without it the strict NULL filter
+    applies (callers that don't care about wall time stay backwards
+    compatible).
+    """
+    grace_floor = (
+        now_ms - _INDICES_GRACE_MS if now_ms is not None else None
+    )
+    where = (
+        "(unsubscribed_at IS NULL "
+        " OR (source = 'indices' AND unsubscribed_at >= ?))"
+        if grace_floor is not None
+        else "unsubscribed_at IS NULL"
+    )
+    params: tuple = (grace_floor,) if grace_floor is not None else ()
+    if group_name is not None:
+        where += " AND group_name = ?"
+        params = params + (group_name,)
+    return conn.execute(
+        f"SELECT * FROM subscriptions WHERE {where} "
+        "ORDER BY symbol, source, source_key",
+        params,
+    ).fetchall()
 
 
 # ---- supported indices ------------------------------------------------
@@ -216,13 +239,31 @@ def sources_for_symbol(
     *,
     symbol: str,
     group_name: str,
+    now_ms: int | None = None,
 ) -> set[str]:
-    """Return the set of distinct active source labels for a symbol."""
-    rows = conn.execute(
-        "SELECT DISTINCT source FROM subscriptions "
-        "WHERE symbol = ? AND group_name = ? AND unsubscribed_at IS NULL",
-        (symbol, group_name),
-    ).fetchall()
+    """Return the set of distinct active source labels for a symbol.
+
+    Honors the same indices grace window as
+    :func:`list_active_subscriptions` when ``now_ms`` is supplied.
+    """
+    grace_floor = (
+        now_ms - _INDICES_GRACE_MS if now_ms is not None else None
+    )
+    if grace_floor is not None:
+        rows = conn.execute(
+            "SELECT DISTINCT source FROM subscriptions "
+            "WHERE symbol = ? AND group_name = ? "
+            "  AND (unsubscribed_at IS NULL "
+            "       OR (source = 'indices' AND unsubscribed_at >= ?))",
+            (symbol, group_name, grace_floor),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT source FROM subscriptions "
+            "WHERE symbol = ? AND group_name = ? "
+            "  AND unsubscribed_at IS NULL",
+            (symbol, group_name),
+        ).fetchall()
     return {r["source"] for r in rows}
 
 

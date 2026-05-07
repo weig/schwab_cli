@@ -141,6 +141,114 @@ def test_sources_excludes_unsubscribed(conn):
     assert out == set()
 
 
+# ---- indices grace window after removal -------------------------------
+#
+# Index members removed by the weekly cron stay in the working set for
+# 30 days so the IV trail is captured all the way through the exit; once
+# past 30 days they drop out naturally on the next sample run.
+
+_DAY_MS = 86_400_000
+_GRACE_MS = 30 * _DAY_MS
+
+
+def test_list_active_includes_indices_within_grace(conn):
+    subscribe_index(conn, index_name="SPX", group_name="volatility")
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+          (symbol, group_name, source, source_key,
+           subscribed_at, unsubscribed_at)
+        VALUES ('NVDA', 'volatility', 'indices', 'SPX', 1000, ?)
+        """,
+        (10 * _DAY_MS,),
+    )
+    now_ms = 10 * _DAY_MS + 5 * _DAY_MS  # 5 days after removal
+    rows = list_active_subscriptions(
+        conn, group_name="volatility", now_ms=now_ms,
+    )
+    assert any(r["symbol"] == "NVDA" for r in rows)
+
+
+def test_list_active_drops_indices_past_grace(conn):
+    subscribe_index(conn, index_name="SPX", group_name="volatility")
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+          (symbol, group_name, source, source_key,
+           subscribed_at, unsubscribed_at)
+        VALUES ('NVDA', 'volatility', 'indices', 'SPX', 1000, ?)
+        """,
+        (10 * _DAY_MS,),
+    )
+    now_ms = 10 * _DAY_MS + _GRACE_MS + _DAY_MS  # past grace
+    rows = list_active_subscriptions(
+        conn, group_name="volatility", now_ms=now_ms,
+    )
+    assert not any(r["symbol"] == "NVDA" for r in rows)
+
+
+def test_list_active_grace_only_for_indices_source(conn):
+    """Grace is indices-only — equity / position unsubscribes drop immediately."""
+    subscribe_equity(conn, symbol="EQ", group_name="volatility",
+                     captured_at_ms=1000)
+    unsubscribe_equity(conn, symbol="EQ", group_name="volatility",
+                       captured_at_ms=10 * _DAY_MS)
+    now_ms = 10 * _DAY_MS + 5 * _DAY_MS
+    rows = list_active_subscriptions(
+        conn, group_name="volatility", now_ms=now_ms,
+    )
+    assert not any(r["symbol"] == "EQ" for r in rows)
+
+
+def test_list_active_without_now_ms_keeps_strict_filter(conn):
+    """Backward compat: caller that doesn't pass now_ms gets old behavior."""
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+          (symbol, group_name, source, source_key,
+           subscribed_at, unsubscribed_at)
+        VALUES ('NVDA', 'volatility', 'indices', 'SPX', 1000, ?)
+        """,
+        (10 * _DAY_MS,),
+    )
+    rows = list_active_subscriptions(conn, group_name="volatility")
+    assert not any(r["symbol"] == "NVDA" for r in rows)
+
+
+def test_sources_for_symbol_includes_indices_within_grace(conn):
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+          (symbol, group_name, source, source_key,
+           subscribed_at, unsubscribed_at)
+        VALUES ('NVDA', 'volatility', 'indices', 'SPX', 1000, ?)
+        """,
+        (10 * _DAY_MS,),
+    )
+    now_ms = 10 * _DAY_MS + 5 * _DAY_MS
+    out = sources_for_symbol(
+        conn, symbol="NVDA", group_name="volatility", now_ms=now_ms,
+    )
+    assert "indices" in out
+
+
+def test_sources_for_symbol_drops_indices_past_grace(conn):
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+          (symbol, group_name, source, source_key,
+           subscribed_at, unsubscribed_at)
+        VALUES ('NVDA', 'volatility', 'indices', 'SPX', 1000, ?)
+        """,
+        (10 * _DAY_MS,),
+    )
+    now_ms = 10 * _DAY_MS + _GRACE_MS + _DAY_MS
+    out = sources_for_symbol(
+        conn, symbol="NVDA", group_name="volatility", now_ms=now_ms,
+    )
+    assert "indices" not in out
+
+
 def test_last_close_at_picks_most_recent(conn):
     subscribe_position(conn, symbol="NVDA", group_name="volatility",
                        account_hash_last4="aaaa", captured_at_ms=1)
