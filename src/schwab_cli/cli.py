@@ -948,6 +948,33 @@ def order_cancel(
     )
 
 
+@order_app.command(
+    "replace",
+    help="Replace an existing limit order — V1 supports price overrides only.",
+)
+def order_replace(
+    order_id: str = typer.Argument(..., help="Schwab order id to replace."),
+    account: str = typer.Option(
+        None, "--account", "-a",
+        help="Account number / suffix. Omit to scan every account (warned).",
+    ),
+    price: float = typer.Option(
+        ..., "--price",
+        help="New limit price. Required.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes",
+        help='Skip the "yes" confirmation prompt.',
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+    doc: bool = doc_option(),
+) -> None:
+    order_cmd.run_replace(
+        order_id=order_id, account=account,
+        new_price=price, yes=yes, as_json=as_json,
+    )
+
+
 # ---- profile subcommand group -------------------------------------------
 
 profile_app = typer.Typer(

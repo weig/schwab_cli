@@ -76,6 +76,16 @@ class SchwabClient:
         """
         return self._authed_request("POST", url, json=json, params=params)
 
+    def put(
+        self, url: str, *, json: dict | None = None, params: dict | None = None,
+    ) -> httpx.Response:
+        """Authed PUT. Returns the raw :class:`httpx.Response` so the
+        caller can read headers — Schwab's ``replaceOrder`` returns 201
+        with the new order id in the ``Location`` header, like
+        ``placeOrder``.
+        """
+        return self._authed_request("PUT", url, json=json, params=params)
+
     def delete(self, url: str, *, params: dict | None = None) -> httpx.Response:
         """Authed DELETE. Returns raw :class:`httpx.Response` (Schwab's
         ``cancelOrder`` returns 200/204 with no body)."""

@@ -68,6 +68,24 @@ def place_order(
     return order_id, resp
 
 
+def replace_order(
+    client: SchwabClient, account_hash: str, order_id: str, body: dict,
+) -> tuple[str, httpx.Response]:
+    """``PUT /accounts/{hash}/orders/{id}``. Returns ``(new_order_id, response)``.
+
+    Schwab atomically cancels the original order and creates a new one.
+    The body shape is identical to ``placeOrder``, and the response is
+    201 with the new order detail URL in the ``Location`` header — the
+    new ``orderId`` may differ from ``order_id``.
+    """
+    resp = client.put(
+        f"{SchwabClient.TRADER_BASE}/accounts/{account_hash}/orders/{order_id}",
+        json=body,
+    )
+    new_order_id = parse_order_id_from_location(resp)
+    return new_order_id, resp
+
+
 def preview_order(
     client: SchwabClient, account_hash: str, body: dict,
 ) -> dict:

@@ -24,6 +24,7 @@ from schwab_cli.api.orders import (
     parse_order_id_from_location,
     place_order,
     preview_order,
+    replace_order,
 )
 from schwab_cli.config import Config
 from schwab_cli.session import Session
@@ -248,3 +249,54 @@ def test_cancel_order_sends_delete():
     resp = cancel_order(_client(), _HASH, "777")
     assert resp.status_code == 200
     assert route.called
+
+
+# ---- replace_order --------------------------------------------------------
+
+
+@respx.mock
+def test_replace_order_returns_new_id_from_location_header():
+    """Schwab's replace returns 201 + Location header to the *new* order
+    (the original is canceled atomically). New id may differ from old."""
+    old_id = "777"
+    new_id = "888"
+    url = f"{_ORDER_URL}/{old_id}"
+    route = respx.put(url).mock(
+        return_value=httpx.Response(
+            201,
+            headers={"Location": f"{_ORDER_URL}/{new_id}"},
+        ),
+    )
+    body = {"orderType": "LIMIT", "quantity": 1, "price": "1.50",
+            "duration": "DAY", "session": "NORMAL",
+            "orderStrategyType": "SINGLE", "orderLegCollection": []}
+    out_id, resp = replace_order(_client(), _HASH, old_id, body)
+    assert out_id == new_id
+    assert resp.status_code == 201
+    assert route.called
+    sent = route.calls.last.request
+    assert sent.method == "PUT"
+    assert sent.headers["Authorization"] == "Bearer atok"
+    import json as _json
+    assert _json.loads(sent.content)["price"] == "1.50"
+
+
+@respx.mock
+def test_replace_order_4xx_surfaces_apierror():
+    url = f"{_ORDER_URL}/777"
+    respx.put(url).mock(
+        return_value=httpx.Response(
+            400,
+            text='{"errors":[{"message":"Order not in replaceable state"}]}',
+        ),
+    )
+    with pytest.raises(ApiError, match="400"):
+        replace_order(_client(), _HASH, "777", {"x": "y"})
+
+
+@respx.mock
+def test_replace_order_missing_location_raises():
+    url = f"{_ORDER_URL}/777"
+    respx.put(url).mock(return_value=httpx.Response(201))  # no Location
+    with pytest.raises(ApiError, match="Location header"):
+        replace_order(_client(), _HASH, "777", {"x": "y"})

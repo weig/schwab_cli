@@ -46,6 +46,7 @@ from schwab_cli.api.orders import (
     list_orders_for_account,
     place_order,
     preview_order,
+    replace_order,
 )
 from schwab_cli.history_spec import RangeSpecError, parse_range
 from schwab_cli.order_pipeline import (
@@ -1652,6 +1653,168 @@ def _find_order_for_cancel(
     if last_err:
         raise last_err
     raise ApiError(f"order {order_id} not found in any account")
+
+
+# ---- run_replace ----------------------------------------------------------
+
+
+# Schwab statuses that are sane targets for replace. Not a hard gate —
+# Schwab is the authority — but informs the warning we print.
+_REPLACEABLE_STATUSES = frozenset({
+    "WORKING", "PENDING_ACTIVATION", "ACCEPTED",
+    "AWAITING_PARENT_ORDER", "AWAITING_CONDITION", "AWAITING_MANUAL_REVIEW",
+    "QUEUED", "AWAITING_RELEASE_TIME", "AWAITING_STOP_CONDITION",
+})
+
+
+def _replace_body_from_order_detail(detail: dict, *, new_price: float) -> dict:
+    """Project a Schwab order-detail payload into the place-shape body
+    Schwab's PUT replace expects, applying the user's price override.
+
+    Strips response-only metadata (orderId, status, enteredTime, fills,
+    accountNumber, …) and emits each leg as the minimal shape Schwab
+    accepts (instruction + quantity + instrument:{assetType,symbol}).
+    """
+    body: dict = {
+        "session": detail.get("session", "NORMAL"),
+        "duration": detail.get("duration", "DAY"),
+        "orderType": detail["orderType"],
+        "complexOrderStrategyType":
+            detail.get("complexOrderStrategyType") or "NONE",
+        "quantity": detail.get("quantity"),
+        "orderStrategyType": detail.get("orderStrategyType", "SINGLE"),
+        "price": f"{new_price:.2f}",
+        "orderLegCollection": [
+            {
+                "instruction": leg["instruction"],
+                "quantity": leg["quantity"],
+                "instrument": {
+                    "assetType": (leg.get("instrument") or {}).get("assetType"),
+                    "symbol": (leg.get("instrument") or {}).get("symbol"),
+                },
+            }
+            for leg in detail.get("orderLegCollection") or []
+        ],
+    }
+    # Carry through stop / trailing fields if the original had them.
+    for k in ("stopPrice", "stopPriceOffset",
+              "stopPriceLinkBasis", "stopPriceLinkType",
+              "specialInstruction"):
+        if k in detail:
+            body[k] = detail[k]
+    return body
+
+
+def run_replace(
+    *,
+    order_id: str,
+    account: str | None,
+    new_price: float,
+    yes: bool,
+    as_json: bool,
+) -> None:
+    """V1: price-only override. Quantity / duration / leg edits are a
+    follow-up — they need full pipeline (policy gate, preview) routing
+    because they materially change the order's risk profile."""
+    _audit(
+        "replace", "invoked",
+        order_id=order_id, account=account, new_price=new_price, yes=yes,
+    )
+    client = _client()
+    try:
+        acct, order = _find_order_for_cancel(client, account, order_id)
+    except (ApiError, SessionExpired) as e:
+        _audit("replace", "lookup_failed", order_id=order_id, error=str(e))
+        _handle_api_error(e)
+
+    status = order.get("status")
+    if order.get("orderType") not in (
+        "LIMIT", "NET_DEBIT", "NET_CREDIT",
+        "STOP_LIMIT", "TRAILING_STOP_LIMIT", "LIMIT_ON_CLOSE",
+    ):
+        typer.secho(
+            f"order {order_id} has orderType={order.get('orderType')!r}; "
+            "--price only applies to limit-style orders.",
+            fg=typer.colors.RED, err=True,
+        )
+        _audit(
+            "replace", "rejected_non_limit",
+            order_id=order_id, order_type=order.get("orderType"),
+        )
+        raise typer.Exit(code=EXIT_USAGE)
+
+    if status not in _REPLACEABLE_STATUSES:
+        typer.secho(
+            f"warning: order {order_id} status={status!r} is not in the "
+            "usual replaceable set — Schwab will likely reject. "
+            "Continuing anyway so the API error surfaces.",
+            fg=typer.colors.YELLOW, err=True,
+        )
+
+    old_price = _price_to_float(order.get("price"))
+    body = _replace_body_from_order_detail(order, new_price=new_price)
+
+    typer.echo(
+        f"About to replace order {order_id} on account "
+        f"...{acct.account_number[-4:]}:",
+        err=True,
+    )
+    typer.echo(render_order_detail_human(order), err=True)
+    delta = (
+        f"  price: {old_price:.2f} → {new_price:.2f}"
+        if old_price is not None
+        else f"  price: {order.get('price')} → {new_price:.2f}"
+    )
+    typer.echo(delta, err=True)
+
+    _audit(
+        "replace", "diff_built",
+        order_id=order_id, account=acct.account_number,
+        status=status, old_price=old_price, new_price=new_price,
+    )
+
+    try:
+        if not yes:
+            typer.echo("", err=True)
+        _confirm_or_abort(yes=yes)
+    except typer.Exit as exit_:
+        if int(exit_.exit_code or 0) == 0:
+            _audit(
+                "replace", "aborted",
+                order_id=order_id, account=acct.account_number,
+            )
+        raise
+
+    _audit(
+        "replace", "confirmed",
+        order_id=order_id, account=acct.account_number,
+        via="--yes" if yes else "yes",
+    )
+
+    try:
+        new_id, _resp = replace_order(client, acct.hash_value, order_id, body)
+    except (ApiError, SessionExpired) as e:
+        _audit(
+            "replace", "replace_failed",
+            order_id=order_id, account=acct.account_number, error=str(e),
+        )
+        _handle_api_error(e)
+
+    _audit(
+        "replace", "replaced",
+        order_id=order_id, account=acct.account_number,
+        new_order_id=new_id,
+    )
+
+    if as_json:
+        typer.echo(_json.dumps(
+            {"orderId": new_id, "replacedOrderId": order_id},
+        ))
+    else:
+        typer.echo(
+            f"Schwab: replaced order {order_id} → new id {new_id}",
+            err=True,
+        )
 
 
 def _resolve_account_for_read(

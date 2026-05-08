@@ -585,6 +585,125 @@ def test_cancel_aborts_without_yea(monkeypatch, tmp_path):
     assert "aborted" in result.stderr
 
 
+# ---- order replace -------------------------------------------------------
+
+
+_REPLACE_ORDER = {
+    "orderId": 777, "status": "WORKING",
+    "orderType": "LIMIT", "duration": "GOOD_TILL_CANCEL", "session": "NORMAL",
+    "complexOrderStrategyType": "NONE",
+    "quantity": 1,
+    "orderStrategyType": "SINGLE",
+    "price": 1.20,
+    "orderLegCollection": [
+        {
+            "orderLegType": "OPTION",
+            "legId": 1,
+            "instrument": {
+                "assetType": "OPTION",
+                "symbol": "AMZN  270115P00190000",
+                "underlyingSymbol": "AMZN",
+            },
+            "instruction": "SELL_TO_OPEN",
+            "positionEffect": "OPENING",
+            "quantity": 1,
+        },
+    ],
+}
+
+
+def test_replace_with_yes_calls_replace_order(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    patches = _patches(get_payload=_REPLACE_ORDER)
+    replace_calls: list = []
+    p = patch(
+        "schwab_cli.commands.order.replace_order",
+        side_effect=lambda c, h, oid, body: (
+            replace_calls.append((h, oid, body))
+            or ("888", httpx.Response(201))
+        ),
+    )
+    _enter_all(patches)
+    p.__enter__()
+    try:
+        result = runner.invoke(app, [
+            "order", "replace", "777",
+            "--account", "5678", "--price", "1.50", "--yes",
+        ])
+    finally:
+        p.__exit__(None, None, None)
+        _exit_all(patches)
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert len(replace_calls) == 1
+    h, oid, body = replace_calls[0]
+    assert h == "HASH"
+    assert oid == "777"
+    # Price override applied; quantity / legs preserved.
+    assert body["price"] == "1.50"
+    assert body["quantity"] == 1
+    assert body["orderLegCollection"][0]["instruction"] == "SELL_TO_OPEN"
+    assert (
+        body["orderLegCollection"][0]["instrument"]["symbol"]
+        == "AMZN  270115P00190000"
+    )
+    # No response-only metadata leaked into the request body.
+    assert "orderId" not in body
+    assert "status" not in body
+    assert "replaced order 777" in result.stderr
+    assert "888" in result.stderr
+
+
+def test_replace_aborts_when_user_does_not_confirm(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    patches = _patches(get_payload=_REPLACE_ORDER)
+    replace_calls: list = []
+    p = patch(
+        "schwab_cli.commands.order.replace_order",
+        side_effect=lambda c, h, oid, body: (
+            replace_calls.append((h, oid, body))
+            or ("888", httpx.Response(201))
+        ),
+    )
+    _enter_all(patches)
+    p.__enter__()
+    try:
+        result = runner.invoke(
+            app,
+            ["order", "replace", "777", "--account", "5678", "--price", "1.50"],
+            input="nope\n",
+        )
+    finally:
+        p.__exit__(None, None, None)
+        _exit_all(patches)
+    assert result.exit_code == 0
+    assert replace_calls == []
+    assert "aborted" in result.stderr
+
+
+def test_replace_rejects_non_limit_order(monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    market_order = dict(_REPLACE_ORDER, orderType="MARKET", price=None)
+    patches = _patches(get_payload=market_order)
+    replace_calls: list = []
+    p = patch(
+        "schwab_cli.commands.order.replace_order",
+        side_effect=lambda c, h, oid, body: replace_calls.append(...) or ("x", None),
+    )
+    _enter_all(patches)
+    p.__enter__()
+    try:
+        result = runner.invoke(app, [
+            "order", "replace", "777",
+            "--account", "5678", "--price", "1.50", "--yes",
+        ])
+    finally:
+        p.__exit__(None, None, None)
+        _exit_all(patches)
+    assert result.exit_code != 0
+    assert replace_calls == []
+    assert "only applies to limit-style" in result.stderr
+
+
 # ---- verify-and-rollback safety net --------------------------------------
 
 
