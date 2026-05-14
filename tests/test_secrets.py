@@ -1,9 +1,12 @@
-import subprocess
-from unittest.mock import patch
+"""``resolve_secret`` is a pass-through after the auth refactor.
 
-import pytest
+The ``op://`` 1Password branch was removed — credentials live as plain
+strings in ``config.json``. The function survives as a single seam for
+future re-introduction of a real secret resolver.
+"""
+from __future__ import annotations
 
-from schwab_cli.secrets import SecretError, resolve_secret
+from schwab_cli.secrets import resolve_secret
 
 
 def test_literal_value_returned_verbatim():
@@ -11,49 +14,23 @@ def test_literal_value_returned_verbatim():
 
 
 def test_empty_value_returned_verbatim():
-    # Empty is a literal too — caller decides what to do with empty.
     assert resolve_secret("") == ""
 
 
-def test_op_reference_calls_op_read():
-    fake = subprocess.CompletedProcess(
-        args=["op", "read", "op://Personal/Schwab/password"],
-        returncode=0,
-        stdout="my_secret_password\n",
-        stderr="",
-    )
-    with patch("schwab_cli.secrets.subprocess.run", return_value=fake) as run:
-        result = resolve_secret("op://Personal/Schwab/password")
-    assert result == "my_secret_password"
-    args, kwargs = run.call_args
-    assert args[0] == ["op", "read", "op://Personal/Schwab/password"]
-    assert kwargs.get("capture_output") is True
-    assert kwargs.get("text") is True
-    assert kwargs.get("check") is True
+def test_op_prefix_passes_through_unchanged():
+    """Belt-and-braces: stale ``op://`` strings in old configs must NOT
+    cause a crash (no ``op`` shell-out). They flow through as literal
+    strings and fail downstream at the actual consumer if used."""
+    assert resolve_secret("op://Personal/Schwab/password") == \
+        "op://Personal/Schwab/password"
 
 
-def test_op_missing_raises_secret_error():
-    with patch("schwab_cli.secrets.subprocess.run", side_effect=FileNotFoundError):
-        with pytest.raises(SecretError, match="not found on PATH"):
-            resolve_secret("op://X/Y/Z")
+def test_unicode_passes_through():
+    assert resolve_secret("配置密码") == "配置密码"
 
 
-def test_op_failure_surfaces_stderr_in_secret_error():
-    err = subprocess.CalledProcessError(
-        returncode=1,
-        cmd=["op", "read", "op://X/Y/Z"],
-        output="",
-        stderr="[ERROR] item X not found\n",
-    )
-    with patch("schwab_cli.secrets.subprocess.run", side_effect=err):
-        with pytest.raises(SecretError, match="item X not found"):
-            resolve_secret("op://X/Y/Z")
-
-
-def test_op_failure_with_no_stderr_uses_generic_message():
-    err = subprocess.CalledProcessError(
-        returncode=1, cmd=["op", "read", "op://X/Y/Z"], output="", stderr=""
-    )
-    with patch("schwab_cli.secrets.subprocess.run", side_effect=err):
-        with pytest.raises(SecretError, match="unknown error"):
-            resolve_secret("op://X/Y/Z")
+def test_secret_error_no_longer_exported():
+    """SecretError was removed when the 1Password branch was deleted.
+    Documenting this explicitly so re-introduction is intentional."""
+    import schwab_cli.secrets as mod
+    assert not hasattr(mod, "SecretError")

@@ -1,6 +1,6 @@
+"""``schwab_cli auth`` — refresh existing session, else open browser for fresh login."""
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timezone
 
@@ -9,13 +9,13 @@ import typer
 
 from schwab_cli import config as config_module
 from schwab_cli import oauth
-from schwab_cli.auth_flows import AuthFlowError, get_code
-from schwab_cli.browser._seleniumbase_flow import AuthError
-from schwab_cli.utils import _summarize_error
-from schwab_cli.secrets import SecretError
+from schwab_cli.auth_flows import AuthFlowError, get_auth_response
+from schwab_cli.auth_handlers import AuthHandlerError
+from schwab_cli.oauth import TokenResponse
 from schwab_cli.session import Session, SessionError
 from schwab_cli.session import save as save_session
 from schwab_cli.session import load as load_session
+from schwab_cli.utils import _summarize_error
 
 
 def _iso(epoch: int) -> str:
@@ -23,12 +23,22 @@ def _iso(epoch: int) -> str:
 
 
 def run(force: bool, manual: bool = False) -> None:
-    # `--manual` turns off saved-credential automation and forces a visible
-    # browser by setting HEADLESS=0 for the remainder of this invocation; the
-    # user drives the Schwab login themselves. The configured auth_flow
-    # (client / code_relay) still owns how the callback code is captured.
-    if manual:
-        os.environ["HEADLESS"] = "0"
+    """Refresh-or-fresh auth orchestration.
+
+    1. Load config; bail if missing or unreadable.
+    2. Unless ``--force``: try to refresh the existing session. On success,
+       save and exit.
+    3. Otherwise (forced, or refresh failed): run ``get_auth_response()``
+       — opens the user's default browser, races configured handlers,
+       returns either a ``code`` (needs exchange) or a fully-exchanged
+       token bundle.
+    4. Save the resulting session.
+
+    ``manual`` is a deprecated no-op kept for backward compatibility with
+    older invocations. There is no longer an automated browser flow to
+    opt out of.
+    """
+    del manual  # deprecated; flag kept in CLI for backward compat
 
     try:
         cfg = config_module.load()
@@ -72,24 +82,31 @@ def run(force: bool, manual: bool = False) -> None:
                 # fall through
 
     try:
-        code = get_code(cfg, manual=manual)
-    except (AuthError, AuthFlowError, SecretError) as e:
+        result = get_auth_response(cfg)
+    except (AuthFlowError, AuthHandlerError) as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    try:
-        tr = oauth.exchange_code(cfg, code)
-    except (httpx.HTTPStatusError, httpx.RequestError, oauth.OAuthError) as e:
-        typer.secho(
-            f"Token exchange failed: {_summarize_error(e)}",
-            fg=typer.colors.RED,
-            err=True,
+    if result["kind"] == "code":
+        try:
+            tr = oauth.exchange_code(cfg, result["code"])
+        except (httpx.HTTPStatusError, httpx.RequestError, oauth.OAuthError) as e:
+            typer.secho(
+                f"Token exchange failed: {_summarize_error(e)}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+    else:  # "token" — handler already exchanged (future AuthServerHandler)
+        tr = TokenResponse(
+            access_token=result["access_token"],
+            refresh_token=result["refresh_token"],
+            expires_in=result["expires_in"],
         )
-        raise typer.Exit(code=1)
 
     new_session = Session.from_token_response(tr, now=int(time.time()))
     save_session(new_session)
     typer.secho(
-        f"Authenticated. Access token expires at {_iso(new_session.expires_at)}.",
+        f"\nAuthenticated. Access token expires at {_iso(new_session.expires_at)}.",
         fg=typer.colors.GREEN,
     )

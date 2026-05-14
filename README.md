@@ -6,21 +6,17 @@ A CLI for Charles Schwab API access.
 
 - Python 3.11+
 - [`uv`](https://github.com/astral-sh/uv)
-- [Playwright Chromium](https://playwright.dev) (installed via `playwright install chromium`)
-- [1Password CLI `op`](https://developer.1password.com/docs/cli/) (only required if you use `op://` references for username/password)
 
 ## Install (dev)
 
 ```bash
 uv sync --extra dev
-uv run playwright install chromium
 ```
 
 ## Install (global)
 
 ```bash
 uv tool install --editable .
-playwright install chromium
 ```
 
 ## First-time setup
@@ -29,57 +25,59 @@ playwright install chromium
 schwab_cli setup
 ```
 
-Interactive prompts capture your Schwab API credentials and (optionally) auto-login credentials. Saved to `~/.config/schwab_cli/config.json` (mode `0600`).
-
-The auto-login `password` field accepts either a literal value or a 1Password Secret Reference (`op://<vault>/<item>/<field>`). `op://` values are resolved at auth time via the `op` CLI; nothing sensitive ever lands in your shell history.
+Interactive prompts capture your Schwab API credentials and the code-relay
+URL. Saved to `~/.config/schwab_cli/config.json` (mode `0600`, plain text —
+keep this file out of git, cloud-sync, and shared backups).
 
 ## Authenticate
 
 ```bash
-schwab_cli auth          # refresh existing session if present, else full OAuth
-schwab_cli auth --force  # skip refresh; always run the full OAuth flow
+schwab_cli auth          # refresh existing session if present, else open browser
+schwab_cli auth --force  # skip refresh; always open browser for fresh login
 ```
 
 Tokens are saved to `~/.config/schwab_cli/session.json` (mode `0600`).
 
-The flow also handles Schwab's MFA when it shows. After login, if Schwab presents the device-verification page, `schwab_cli auth`:
+### How auth works
 
-1. Selects the **Schwab App** option. If the option isn't present, auth fails with a clear message telling you to re-run with `DEBUG=1` and inspect the dumped page source.
-2. Prints `"Schwab App MFA: check your phone to approve (up to 30s)..."` to stderr and waits up to 30 seconds for approval.
-3. If Schwab shows the **Trust this device** page afterwards, selects *Yes, trust this device* and clicks **Next**.
-4. Proceeds to the consent page.
+1. If you have a valid refresh token, `auth` refreshes it via HTTP — no
+   browser involved. Quick path that runs on every invocation.
+2. If refresh fails (or you passed `--force`):
+   - The CLI prints the Schwab OAuth URL to stderr and asks your OS
+     default browser to open it.
+   - You complete login + MFA in your normal browser (passwords, MFA,
+     "trust this device" — all handled by Schwab, not by the CLI).
+   - Schwab redirects to your configured `redirect_uri`. Two paths run
+     **concurrently** to capture the `code` query parameter:
+     - **Paste path** (always on): the CLI shows a prompt; paste the
+       code, the querystring, or the full redirect URL.
+     - **Relay path** (active when `auth_flow="code_relay"`): the CLI
+       long-polls `code_relay_url` for a code your relay captured.
+   - Whichever path returns first wins; the CLI exchanges the code for
+     tokens and saves the session.
 
-If the device is already trusted, the MFA and/or trust steps are skipped automatically.
+### `auth_flow` config field
 
-**Persistent browser profile.** Auth uses a persistent Chromium profile at `~/.config/schwab_cli/chromium/` (mode `0700`) so cookies — including Schwab's Trust Device cookie — survive across runs. The first successful auth that goes through MFA + "trust this device" should be the only one that needs the phone-tap; subsequent runs reuse the trust cookie and skip MFA entirely. To force a fresh device (e.g., after revoking trust on Schwab's side), delete the directory:
+Only `"code_relay"` is supported today. Setting `auth_flow="code_relay"`
+requires both `redirect_uri` (the relay's callback URL) and
+`code_relay_url` (the relay's wait endpoint) in `config.json`. Future
+versions will add a server-side flow (`AuthServerHandler`).
+
+### Testing without touching your live config + session
+
+Use `SCHWAB_CLI_CONFIG_DIR` to point both `config.json` and
+`session.json` at an isolated directory. Unlike `XDG_CONFIG_HOME`, it
+points **directly** at the schwab_cli dir (no `schwab_cli` suffix
+appended) so you can use any folder name:
 
 ```bash
-rm -rf ~/.config/schwab_cli/chromium
+mkdir -p ./test-config
+cp ~/.config/schwab_cli/config.json ./test-config/   # or hand-write one
+SCHWAB_CLI_CONFIG_DIR=./test-config schwab_cli auth --force
+SCHWAB_CLI_CONFIG_DIR=./test-config schwab_cli accounts
 ```
 
-**Headless mode:** Schwab's OAuth UI sits behind Akamai Bot Manager, which blocks vanilla Playwright headless at the TLS/HTTP fingerprint layer. Two backends live in the codebase:
-
-| Mode | Backend | When |
-|---|---|---|
-| Default (visible) | Playwright | Fast, quiet, same first-run trust-device cookie reuse across runs |
-| `HEADLESS=1` | SeleniumBase UC | Bypasses Akamai for true headless operation (CI / cron / servers) |
-
-Both perform the same flow (login → MFA → trust → consent → accept → accounts → confirm → done → code → exchange). The persistent profile lives at `~/.config/schwab_cli/chromium/` (Playwright) or `~/.config/schwab_cli/chromium-uc/` (SeleniumBase) — both keep the Trust Device cookie so subsequent runs skip MFA.
-
-The refresh path (used every run after the first, while the 7-day refresh token is valid) is pure HTTP via `httpx` and doesn't touch a browser at all — headless-safe regardless of which backend is wired for full auth.
-
-Set `DEBUG=1` (or `true` / `yes`, case-insensitive) to:
-
-- Slow down each Playwright action by 1 second so the flow is watchable
-- Emit `[debug] <step>` progress logs to stderr at each phase (navigating, waiting for login, filling credentials, consent, account selection, redirect capture)
-- Dump the HTML source of each page checkpoint to `~/.config/schwab_cli/auth-debug/<timestamp>/<NN>-<label>.html` — useful when Schwab changes their UI and you need to find the right selectors. Resolved username/password are stripped before writing.
-- Hold the browser open for 60 seconds after the flow ends (success or failure) so you can inspect the final page — press Ctrl+C during the hold to close immediately
-
-```bash
-DEBUG=1 schwab_cli auth --force
-```
-
-Debug logs never contain credentials, resolved secrets, tokens, or the auth code — only phase names. If Schwab changes their UI, update `src/schwab_cli/browser/selectors.py`.
+Your real `~/.config/schwab_cli/session.json` stays untouched.
 
 ## Data commands
 

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import json
-import sys
 
 import typer
 
 from schwab_cli.config import (
-    AUTH_FLOWS,
     Config,
     ConfigError,
     config_path,
@@ -46,89 +44,10 @@ def _prompt_value(
         typer.secho(f"{label} {error_suffix}", fg=typer.colors.RED, err=True)
 
 
-_AUTH_FLOW_DESCRIPTIONS: dict[str, str] = {
-    "client": (
-        "Schwab redirects to your loopback redirect_uri (e.g. "
-        "https://127.0.0.1:8443). The CLI reads the OAuth code straight "
-        "from the browser's URL bar. No external server required."
-    ),
-    "code_relay": (
-        "Your redirect_uri points to a pre-deployed public relay "
-        "(e.g. a Cloudflare Worker). The relay catches the callback and "
-        "the CLI polls it for the OAuth code. Use this when the loopback "
-        "redirect isn't reachable (remote shells, mobile login, etc.)."
-    ),
-}
-
-
-def _prompt_auth_flow(default: str) -> str:
-    """Prompt for an auth_flow.
-
-    In an interactive terminal, shows an arrow-key-navigable select menu
-    (one choice per flow). When stdin is not a TTY — i.e. tests or pipes —
-    falls back to a numbered text prompt that accepts either the flow
-    name or its menu number.
-    """
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        return _prompt_auth_flow_tty(default)
-    return _prompt_auth_flow_text(default)
-
-
-def _prompt_auth_flow_tty(default: str) -> str:
-    """Arrow-key auth_flow selector for interactive terminals."""
-    import questionary
-
-    choices = [
-        questionary.Choice(
-            title=f"{name}  —  {_AUTH_FLOW_DESCRIPTIONS[name].split('. ')[0]}.",
-            value=name,
-        )
-        for name in AUTH_FLOWS
-    ]
-    answer = questionary.select(
-        "Auth flow (how the CLI captures the OAuth `code`):",
-        choices=choices,
-        default=default if default in AUTH_FLOWS else None,
-        instruction="(↑/↓ to move, Enter to select)",
-        use_shortcuts=True,
-    ).ask()
-    if answer is None:
-        # Ctrl-C inside questionary returns None.
-        raise typer.Abort()
-    return answer
-
-
-def _prompt_auth_flow_text(default: str) -> str:
-    """Numbered-menu fallback for non-TTY stdin (tests, pipes, CI)."""
-    typer.echo("")
-    typer.echo("Auth flow — how the CLI captures the OAuth `code`:")
-    for idx, name in enumerate(AUTH_FLOWS, start=1):
-        typer.echo("")
-        typer.echo(f"  {idx}. {name}")
-        for line in _AUTH_FLOW_DESCRIPTIONS[name].split(". "):
-            line = line.strip().rstrip(".")
-            if line:
-                typer.echo(f"     {line}.")
-    typer.echo("")
-
-    while True:
-        entered = typer.prompt(
-            "Auth flow (name or number)",
-            default=default,
-            show_default=True,
-        ).strip()
-        if entered.isdigit():
-            idx = int(entered)
-            if 1 <= idx <= len(AUTH_FLOWS):
-                return AUTH_FLOWS[idx - 1]
-        if entered in AUTH_FLOWS:
-            return entered
-        typer.secho(
-            f"Auth flow must be one of: {', '.join(AUTH_FLOWS)} "
-            f"(or a number 1-{len(AUTH_FLOWS)}).",
-            fg=typer.colors.RED,
-            err=True,
-        )
+# Only one auth flow is supported today (``code_relay``). The previous
+# multi-choice prompt is removed because the menu would have a single
+# option. Future additions (e.g. AuthServerHandler) will reintroduce a
+# selector at the same insertion point in ``_run`` below.
 
 
 def run(*, dry_run: bool = False) -> None:
@@ -177,16 +96,16 @@ def _run(*, dry_run: bool) -> None:
         sensitive=False,
     )
 
-    auth_flow = _prompt_auth_flow(existing.auth_flow if existing else "client")
-
-    code_relay_url: str | None = None
-    if auth_flow == "code_relay":
-        code_relay_url = _prompt_value(
-            "Code Relay URL",
-            existing.code_relay_url if existing else None,
-            sensitive=False,
-            hint="the URL the CLI polls for the captured OAuth code",
-        )
+    # Only one auth flow today; setup hardcodes ``code_relay`` and prompts
+    # for its required ``code_relay_url``. When more handlers ship, this
+    # block grows back into a selector — see the comment above.
+    auth_flow = "code_relay"
+    code_relay_url = _prompt_value(
+        "Code Relay URL",
+        existing.code_relay_url if existing else None,
+        sensitive=False,
+        hint="the URL the CLI polls for the captured OAuth code",
+    )
 
     auto_default = bool(existing and existing.auto_login_enabled)
     enable_auto = typer.confirm("Enable automatic login?", default=auto_default)
@@ -205,7 +124,7 @@ def _run(*, dry_run: bool) -> None:
             existing.password if existing else None,
             sensitive=True,
             error_suffix="is required when auto-login is enabled.",
-            hint="supports op:// 1Password references",
+            hint="stored in plain text at ~/.config/schwab_cli/config.json (mode 0600)",
         )
 
     cfg = Config(

@@ -5,27 +5,28 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from schwab_cli.paths import config_dir
+
 
 def config_path() -> Path:
     """Return the absolute path to config.json.
 
     Resolution order (first match wins):
-      1. ``SCHWAB_CLI_CONFIG`` — absolute path override. Use this for
-         ad-hoc shell runs or scripted setups; it bypasses every other
-         lookup so there's no risk of a stray ``HOME`` tweak pointing at
-         the real file.
-      2. ``XDG_CONFIG_HOME/schwab_cli/config.json``.
-      3. ``~/.config/schwab_cli/config.json``.
+      1. ``SCHWAB_CLI_CONFIG`` — absolute path override (file-level).
+         Use this for ad-hoc shell runs or scripted setups when you only
+         want to swap out the config file without moving the session.
+      2. ``SCHWAB_CLI_CONFIG_DIR/config.json`` — directory-level override
+         (also moves ``session.json``); see ``schwab_cli.paths``.
+      3. ``XDG_CONFIG_HOME/schwab_cli/config.json``.
+      4. ``~/.config/schwab_cli/config.json``.
     """
     override = os.environ.get("SCHWAB_CLI_CONFIG")
     if override:
         return Path(override)
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "schwab_cli" / "config.json"
+    return config_dir() / "config.json"
 
 
-AUTH_FLOWS = ("client", "code_relay")
+AUTH_FLOWS = ("code_relay",)
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class Config:
     client_id: str
     client_secret: str
     redirect_uri: str
-    auth_flow: str = "client"
+    auth_flow: str = "code_relay"
     code_relay_url: str | None = None
     username: str | None = None
     password: str | None = None
@@ -105,10 +106,10 @@ def load() -> Config | None:
             f"expected one of: {', '.join(AUTH_FLOWS)}"
         )
     code_relay_url = raw.get("code_relay_url")
-    if auth_flow == "code_relay" and not code_relay_url:
-        raise ConfigError(
-            f"auth_flow='code_relay' requires 'code_relay_url' in {path}"
-        )
+    # Note: ``code_relay_url`` is not validated here — missing-when-needed
+    # is detected at auth time in ``auth_flows._build_handlers`` so that
+    # commands which don't touch auth (e.g. ``schwab_cli --help``,
+    # ``schwab_cli vol``) can still load a partial config.
     return Config(
         client_id=raw["client_id"],
         client_secret=raw["client_secret"],

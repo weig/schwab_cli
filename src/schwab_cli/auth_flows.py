@@ -1,132 +1,127 @@
-"""Auth-code retrieval flows.
+"""Orchestrate the OAuth ``code`` capture as a race of handlers.
 
-Each flow returns the OAuth ``code`` query parameter that Schwab's authorize
-endpoint hands back; the caller then exchanges it for tokens.
+``get_auth_response(cfg)`` builds an OAuth ``state`` token, opens the
+authorize URL in the user's default browser (also prints the URL to
+stderr as a fallback), and races a set of handlers in daemon threads.
+The first handler to produce a valid :data:`AuthResult` wins; the rest
+are signalled to stop via a shared :class:`threading.Event`.
 
-Two flows are supported:
+Today's handler set:
 
-- ``client``      : A SeleniumBase browser on this machine drives the login
-                    (or waits for the user to drive it when ``manual=True``).
-                    The authorization ``code`` is read out of the browser's
-                    redirect to the loopback ``redirect_uri``.
-- ``code_relay``  : Same browser session, but the configured ``redirect_uri``
-                    is a pre-deployed relay endpoint. Once the browser hits
-                    the relay, we long-poll ``code_relay_url`` to retrieve
-                    the captured ``code``.
+* :class:`UserInputHandler` — always present. Prompts the user to paste
+  the code, querystring, or full redirect URL.
+* :class:`CodeRelayHandler` — added when ``cfg.auth_flow == "code_relay"``
+  and ``cfg.code_relay_url`` is set.
 
-Browser visibility follows the ``HEADLESS`` env var for both flows. The
-``--manual`` CLI flag sets ``HEADLESS=0`` and passes ``manual=True`` so the
-user can drive the login in a visible window (e.g., when saved credentials
-are missing or MFA is being rotated).
+The :class:`AuthHandler` Protocol + :data:`AuthResult` union are the
+extension seam for ``AuthServerHandler``-style handlers that return
+fully-exchanged token bundles.
 """
-
 from __future__ import annotations
 
+import queue
 import secrets
-import time
-import urllib.parse
+import threading
+import webbrowser
 
-import httpx
+import typer
 
+from schwab_cli.auth_handlers import (
+    AuthHandler,
+    AuthResult,
+    CodeRelayHandler,
+    UserInputHandler,
+)
 from schwab_cli.config import Config
+from schwab_cli.oauth import build_auth_url
 
 
 class AuthFlowError(Exception):
-    """Raised when an auth flow fails to obtain a usable authorization code."""
+    """Raised when the auth flow as a whole fails (e.g., bad config,
+    every handler errored)."""
 
 
-# Total wall-clock budget for polling the relay after the browser confirmed
-# the redirect. The callback is already stored by that point, so this should
-# return on the first poll unless the relay is flaky.
-_RELAY_POLL_TIMEOUT_SECONDS = 30
+def get_auth_response(cfg: Config) -> AuthResult:
+    """Run the full auth-code capture: open browser, race handlers, return result.
 
-# Per-poll connection budget — must exceed the relay's long-poll window.
-_POLL_HTTP_TIMEOUT_SECONDS = 40
-
-
-def get_code(cfg: Config, *, manual: bool = False) -> str:
-    """Run the configured auth flow and return the OAuth ``code``.
-
-    ``manual=False`` runs saved-credential automation; ``manual=True`` lets
-    the user drive the Schwab login in a visible browser window.
+    Generates a fresh OAuth ``state`` token; each handler is responsible
+    for verifying it against its response.
     """
-    if cfg.auth_flow == "client":
-        return _client_get_code(cfg, manual=manual)
-    if cfg.auth_flow == "code_relay":
-        return _code_relay_get_code(cfg, manual=manual)
-    raise AuthFlowError(f"unknown auth_flow {cfg.auth_flow!r}")
-
-
-def _client_get_code(cfg: Config, *, manual: bool) -> str:
-    """Loopback-redirect flow: parse ``code`` out of the browser's redirect URL."""
-    from schwab_cli.browser._seleniumbase_flow import run_browser_auth
-
     state = secrets.token_urlsafe(32)
-    redirect_url = run_browser_auth(cfg, automate=not manual, state=state)
-    parsed = urllib.parse.urlparse(redirect_url)
-    return _extract_code_from_query(parsed.query, expected_state=state)
+    auth_url = build_auth_url(cfg, state=state)
+    _open_and_print(auth_url)
+    handlers = _build_handlers(cfg)
+    return _race_handlers(handlers, expected_state=state)
 
 
-def _code_relay_get_code(cfg: Config, *, manual: bool) -> str:
-    """Relay flow: browser hits the relay's redirect; we poll the relay for the code."""
-    from schwab_cli.browser._seleniumbase_flow import run_browser_auth
-
-    if not cfg.code_relay_url:
-        # The config loader normally catches this; defensive only.
-        raise AuthFlowError("auth_flow='code_relay' requires code_relay_url")
-
-    state = secrets.token_urlsafe(32)
-    # Returned URL is unused; we trust the relay to have captured the callback.
-    run_browser_auth(cfg, automate=not manual, state=state)
-    return _poll_relay(cfg, expected_state=state)
-
-
-def _poll_relay(cfg: Config, *, expected_state: str) -> str:
-    assert cfg.code_relay_url is not None  # validated by caller
-    deadline = time.time() + _RELAY_POLL_TIMEOUT_SECONDS
-    while time.time() < deadline:
-        try:
-            resp = httpx.get(cfg.code_relay_url, timeout=_POLL_HTTP_TIMEOUT_SECONDS)
-        except httpx.ReadTimeout:
-            continue
-        except httpx.RequestError as e:
-            raise AuthFlowError(
-                f"relay request failed: {type(e).__name__}: {e}"
-            ) from e
-
-        if resp.status_code == 200:
-            return _extract_code_from_query(resp.text, expected_state=expected_state)
-        if resp.status_code == 408:
-            continue
-        if resp.status_code == 403:
-            raise AuthFlowError(
-                "Relay rejected request (403). Verify code_relay_url and the "
-                "matching redirect_uri are correct."
-            )
-        raise AuthFlowError(
-            f"Relay returned unexpected status {resp.status_code}: "
-            f"{resp.text[:200]}"
-        )
-
-    raise AuthFlowError(
-        "Browser reached redirect but relay never returned the code (30s)."
+def _open_and_print(auth_url: str) -> None:
+    """Print the auth URL to stderr and best-effort open the default browser."""
+    typer.echo(f"\nOpening browser to:\n  {auth_url}\n", err=True)
+    typer.echo(
+        "If the browser does not open automatically, copy the URL above "
+        "and paste it into any browser.\n",
+        err=True,
     )
+    try:
+        webbrowser.open(auth_url)
+    except webbrowser.Error:
+        # URL is already printed; the user can still complete the flow
+        # manually in any browser.
+        pass
 
 
-def _extract_code_from_query(querystring: str, *, expected_state: str) -> str:
-    """Parse a callback querystring and extract ``code``, verifying ``state``."""
-    params = dict(urllib.parse.parse_qsl(querystring, keep_blank_values=True))
-    if "error" in params:
-        desc = params.get("error_description") or ""
-        suffix = f": {desc}" if desc else ""
-        raise AuthFlowError(f"Schwab returned OAuth error '{params['error']}'{suffix}")
-    received_state = params.get("state")
-    if received_state != expected_state:
-        raise AuthFlowError(
-            "OAuth state mismatch — possible CSRF or stale callback. "
-            "Restart the auth flow."
-        )
-    code = params.get("code")
-    if not code:
-        raise AuthFlowError("Callback querystring did not contain a `code` value.")
-    return code
+def _build_handlers(cfg: Config) -> list[AuthHandler]:
+    """Pick which handlers join the race for this config.
+
+    ``UserInputHandler`` is always present. ``CodeRelayHandler`` joins
+    when ``auth_flow="code_relay"`` and a ``code_relay_url`` is set.
+    """
+    handlers: list[AuthHandler] = [UserInputHandler()]
+    if cfg.auth_flow == "code_relay":
+        if not cfg.code_relay_url:
+            raise AuthFlowError(
+                "auth_flow='code_relay' requires 'code_relay_url' in config"
+            )
+        handlers.append(CodeRelayHandler(cfg.code_relay_url))
+    return handlers
+
+
+def _race_handlers(
+    handlers: list[AuthHandler], *, expected_state: str,
+) -> AuthResult:
+    """Run handlers concurrently; return the first ``AuthResult``.
+
+    Each handler runs on a daemon thread. The first successful result
+    wins; the shared ``cancel`` event tells the losers to stop. If every
+    handler fails, raises :class:`AuthFlowError` aggregating their errors.
+    """
+    result_q: queue.Queue = queue.Queue()
+    cancel = threading.Event()
+
+    def _runner(h: AuthHandler) -> None:
+        try:
+            r = h.wait_for_response(expected_state=expected_state, cancel=cancel)
+            result_q.put(("ok", h, r))
+        except BaseException as e:  # noqa: BLE001 — propagate via queue
+            result_q.put(("err", h, e))
+
+    threads = [
+        threading.Thread(target=_runner, args=(h,), daemon=True, name=type(h).__name__)
+        for h in handlers
+    ]
+    for t in threads:
+        t.start()
+
+    errors: list[tuple[AuthHandler, BaseException]] = []
+    while True:
+        kind, handler, val = result_q.get()
+        if kind == "ok":
+            cancel.set()
+            return val
+        errors.append((handler, val))
+        if len(errors) >= len(handlers):
+            cancel.set()
+            detail = "; ".join(
+                f"{type(h).__name__}: {e}" for h, e in errors
+            )
+            raise AuthFlowError(f"all auth handlers failed: {detail}")

@@ -1,30 +1,22 @@
+"""Credential resolution seam.
+
+Per the auth refactor's "Credentials: plain-text only" decision,
+:func:`resolve_secret` is currently a pass-through. The module stays
+so any future caller has a stable seam to swap in a real resolver
+(keychain, 1Password CLI, env-var indirection, …) without churning
+call sites.
+
+Today's behavior: return the input verbatim. Even ``op://...`` strings
+pass through unchanged — a previously-configured 1Password reference
+will land at downstream consumers as the literal string. That is
+preferable to crashing on a missing ``op`` CLI.
+"""
 from __future__ import annotations
-
-import subprocess
-
-
-class SecretError(Exception):
-    """Raised when a secret reference cannot be resolved."""
 
 
 def resolve_secret(value: str) -> str:
-    """Resolve a secret reference.
+    """Return ``value`` unchanged.
 
-    `op://...` values are passed to the 1Password CLI (`op read <ref>`); anything
-    else is returned verbatim. The resolved value is never logged.
+    Reserved as a future extension point. See module docstring.
     """
-    if not value.startswith("op://"):
-        return value
-    try:
-        result = subprocess.run(
-            ["op", "read", value],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except FileNotFoundError as e:
-        raise SecretError("1Password CLI (`op`) not found on PATH.") from e
-    except subprocess.CalledProcessError as e:
-        msg = (e.stderr or "").strip() or "unknown error"
-        raise SecretError(f"op read failed: {msg}") from e
-    return result.stdout.rstrip("\n")
+    return value

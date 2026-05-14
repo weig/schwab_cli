@@ -65,8 +65,9 @@ def auth(
         False,
         "--manual",
         help=(
-            "Skip saved-credential automation and drive the Schwab login "
-            "yourself in a visible browser (forces HEADLESS=0 for this run)."
+            "Deprecated no-op. The auth flow always opens your default "
+            "browser now; the SeleniumBase auto-login it used to disable "
+            "no longer exists."
         ),
     ),
     doc: bool = doc_option(),

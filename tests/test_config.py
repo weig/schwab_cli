@@ -71,6 +71,23 @@ def test_config_path_override_env_wins_over_xdg_and_home(monkeypatch, tmp_path):
     assert config_path() == Path("/tmp/explicit-override.json")
 
 
+def test_config_path_honors_schwab_cli_config_dir(monkeypatch, tmp_path):
+    """SCHWAB_CLI_CONFIG_DIR points directly at the schwab_cli dir;
+    config.json lives in that dir (no extra ``schwab_cli`` suffix)."""
+    monkeypatch.delenv("SCHWAB_CLI_CONFIG", raising=False)
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path / "iso"))
+    assert config_path() == tmp_path / "iso" / "config.json"
+
+
+def test_config_path_file_override_beats_dir_override(monkeypatch, tmp_path):
+    """SCHWAB_CLI_CONFIG (file-level) wins over SCHWAB_CLI_CONFIG_DIR
+    (dir-level). Lets you point at a specific config while still using
+    the dir-default for session.json."""
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG", "/tmp/specific.json")
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path / "iso"))
+    assert config_path() == Path("/tmp/specific.json")
+
+
 from schwab_cli.config import ConfigError, load
 
 
@@ -97,7 +114,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "client",
+        "auth_flow": "code_relay",
         "username": "u",
         "password": "op://Personal/Schwab/password",
     })
@@ -106,7 +123,7 @@ def test_load_parses_full_config(monkeypatch, tmp_path):
         client_id="cid",
         client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
-        auth_flow="client",
+        auth_flow="code_relay",
         username="u",
         password="op://Personal/Schwab/password",
     )
@@ -121,7 +138,7 @@ def test_load_parses_minimal_config_without_auto_login(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "client",
+        "auth_flow": "code_relay",
     })
     cfg = load()
     assert cfg.username is None
@@ -137,7 +154,7 @@ def test_load_ignores_unknown_fields(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "client",
+        "auth_flow": "code_relay",
         "future_field": "ignore me",
     })
     cfg = load()
@@ -162,7 +179,7 @@ def test_load_raises_on_unsupported_future_version(monkeypatch, tmp_path):
         "client_id": "cid",
         "client_secret": "csec",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "client",
+        "auth_flow": "code_relay",
     })
     with pytest.raises(ConfigError, match="version"):
         load()
@@ -175,7 +192,7 @@ def test_load_raises_on_missing_required_field(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "redirect_uri": "https://127.0.0.1:8443",
-        "auth_flow": "client",
+        "auth_flow": "code_relay",
     })  # no client_secret
     with pytest.raises(ConfigError, match="client_secret"):
         load()
@@ -188,7 +205,7 @@ def test_load_raises_on_missing_redirect_uri(monkeypatch, tmp_path):
         "version": 1,
         "client_id": "cid",
         "client_secret": "csec",
-        "auth_flow": "client",
+        "auth_flow": "code_relay",
     })
     with pytest.raises(ConfigError, match="redirect_uri"):
         load()
@@ -221,7 +238,11 @@ def test_load_raises_on_invalid_auth_flow_value(monkeypatch, tmp_path):
         load()
 
 
-def test_load_raises_on_code_relay_without_url(monkeypatch, tmp_path):
+def test_load_succeeds_for_code_relay_without_url(monkeypatch, tmp_path):
+    """Missing ``code_relay_url`` no longer fails at load time — the check
+    moved to ``auth_flows._build_handlers`` so non-auth commands can still
+    use a partial config.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     _write_config(tmp_path, {
@@ -231,8 +252,9 @@ def test_load_raises_on_code_relay_without_url(monkeypatch, tmp_path):
         "redirect_uri": "https://127.0.0.1:8443",
         "auth_flow": "code_relay",
     })
-    with pytest.raises(ConfigError, match="code_relay_url"):
-        load()
+    cfg = load()
+    assert cfg.auth_flow == "code_relay"
+    assert cfg.code_relay_url is None
 
 
 def test_load_parses_code_relay_with_url(monkeypatch, tmp_path):
