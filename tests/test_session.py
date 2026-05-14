@@ -26,8 +26,32 @@ def test_session_path_defaults_to_home(monkeypatch, tmp_path):
 
 
 def test_session_path_honors_xdg(monkeypatch, tmp_path):
+    monkeypatch.delenv("SCHWAB_CLI_CONFIG_DIR", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     assert session_path() == tmp_path / "xdg" / "schwab_cli" / "session.json"
+
+
+def test_session_path_honors_schwab_cli_config_dir(monkeypatch, tmp_path):
+    """SCHWAB_CLI_CONFIG_DIR points directly at the schwab_cli dir
+    (no ``schwab_cli`` suffix), and the session file sits in that dir."""
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path / "isolated"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))  # ignored
+    assert session_path() == tmp_path / "isolated" / "session.json"
+
+
+def test_session_save_load_roundtrip_with_config_dir(monkeypatch, tmp_path):
+    """End-to-end: writing then reading through SCHWAB_CLI_CONFIG_DIR
+    keeps everything inside the override directory."""
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path / "iso"))
+    s = Session(
+        access_token="a", refresh_token="r",
+        expires_at=100, refresh_token_expires_at=200,
+    )
+    save(s)
+    assert (tmp_path / "iso" / "session.json").exists()
+    # No file written under the real home / xdg location.
+    assert not (tmp_path / "xdg" / "schwab_cli" / "session.json").exists()
+    assert load() == s
 
 
 def test_session_is_frozen():

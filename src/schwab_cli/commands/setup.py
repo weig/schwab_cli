@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import sys
+import shlex
 
 import typer
 
@@ -34,8 +34,6 @@ def _prompt_value(
     if existing:
         shown = mask_secret(existing) if sensitive else existing
         typer.echo(f"  Current {label}: {shown}  (press Enter to keep)")
-    # Hide echo only for fresh sensitive entry; when keeping an existing value,
-    # showing nothing would leave the user wondering if input was captured.
     hide = sensitive and not existing
     while True:
         entered = typer.prompt(label, default="", show_default=False, hide_input=hide)
@@ -46,89 +44,104 @@ def _prompt_value(
         typer.secho(f"{label} {error_suffix}", fg=typer.colors.RED, err=True)
 
 
-_AUTH_FLOW_DESCRIPTIONS: dict[str, str] = {
-    "client": (
-        "Schwab redirects to your loopback redirect_uri (e.g. "
-        "https://127.0.0.1:8443). The CLI reads the OAuth code straight "
-        "from the browser's URL bar. No external server required."
-    ),
-    "code_relay": (
-        "Your redirect_uri points to a pre-deployed public relay "
-        "(e.g. a Cloudflare Worker). The relay catches the callback and "
-        "the CLI polls it for the OAuth code. Use this when the loopback "
-        "redirect isn't reachable (remote shells, mobile login, etc.)."
-    ),
-}
-
-
 def _prompt_auth_flow(default: str) -> str:
-    """Prompt for an auth_flow.
-
-    In an interactive terminal, shows an arrow-key-navigable select menu
-    (one choice per flow). When stdin is not a TTY — i.e. tests or pipes —
-    falls back to a numbered text prompt that accepts either the flow
-    name or its menu number.
-    """
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        return _prompt_auth_flow_tty(default)
-    return _prompt_auth_flow_text(default)
-
-
-def _prompt_auth_flow_tty(default: str) -> str:
-    """Arrow-key auth_flow selector for interactive terminals."""
-    import questionary
-
-    choices = [
-        questionary.Choice(
-            title=f"{name}  —  {_AUTH_FLOW_DESCRIPTIONS[name].split('. ')[0]}.",
-            value=name,
-        )
-        for name in AUTH_FLOWS
-    ]
-    answer = questionary.select(
-        "Auth flow (how the CLI captures the OAuth `code`):",
-        choices=choices,
-        default=default if default in AUTH_FLOWS else None,
-        instruction="(↑/↓ to move, Enter to select)",
-        use_shortcuts=True,
-    ).ask()
-    if answer is None:
-        # Ctrl-C inside questionary returns None.
-        raise typer.Abort()
-    return answer
-
-
-def _prompt_auth_flow_text(default: str) -> str:
-    """Numbered-menu fallback for non-TTY stdin (tests, pipes, CI)."""
+    """Prompt for ``auth_flow`` ∈ AUTH_FLOWS, re-prompting on invalid input."""
     typer.echo("")
-    typer.echo("Auth flow — how the CLI captures the OAuth `code`:")
-    for idx, name in enumerate(AUTH_FLOWS, start=1):
-        typer.echo("")
-        typer.echo(f"  {idx}. {name}")
-        for line in _AUTH_FLOW_DESCRIPTIONS[name].split(". "):
-            line = line.strip().rstrip(".")
-            if line:
-                typer.echo(f"     {line}.")
-    typer.echo("")
-
+    typer.echo("Auth flow (how schwab_cli captures the OAuth code):")
+    typer.echo("  code_relay  — schwab_cli polls a remote relay URL")
+    typer.echo("  client      — schwab_cli stands up a local HTTP listener")
     while True:
         entered = typer.prompt(
-            "Auth flow (name or number)",
+            "Auth flow",
             default=default,
             show_default=True,
         ).strip()
-        if entered.isdigit():
-            idx = int(entered)
-            if 1 <= idx <= len(AUTH_FLOWS):
-                return AUTH_FLOWS[idx - 1]
         if entered in AUTH_FLOWS:
             return entered
         typer.secho(
-            f"Auth flow must be one of: {', '.join(AUTH_FLOWS)} "
-            f"(or a number 1-{len(AUTH_FLOWS)}).",
-            fg=typer.colors.RED,
-            err=True,
+            f"Must be one of: {', '.join(AUTH_FLOWS)}.",
+            fg=typer.colors.RED, err=True,
         )
+
+
+def _prompt_auto_login_command(
+    existing: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Prompt for the optional auto-login command (parsed via ``shlex.split``).
+
+    Returns:
+        * ``None`` when the user declines auto-login.
+        * Tuple of argv tokens otherwise.
+    """
+    auto_default = existing is not None
+    enable_auto = typer.confirm(
+        "Configure auto-login subprocess (e.g. webauto-cli)?",
+        default=auto_default,
+    )
+    if not enable_auto:
+        return None
+
+    if existing:
+        typer.echo(
+            f"  Current command: {shlex.join(existing)}  "
+            "(press Enter to keep)"
+        )
+    typer.echo(
+        "  Examples:\n"
+        "    webauto-cli ~/.config/schwab_cli/scripts/auth_automation.py "
+        "--env ~/.config/schwab_cli/auto_login.env"
+    )
+    while True:
+        entered = typer.prompt(
+            "Auto-login command", default="", show_default=False,
+        ).strip()
+        if entered:
+            try:
+                tokens = shlex.split(entered)
+            except ValueError as e:
+                typer.secho(
+                    f"Could not parse: {e}", fg=typer.colors.RED, err=True,
+                )
+                continue
+            if not tokens:
+                typer.secho(
+                    "Command is empty.", fg=typer.colors.RED, err=True,
+                )
+                continue
+            return tuple(tokens)
+        if existing:
+            return existing
+        typer.secho(
+            "Auto-login command is required when this section is enabled.",
+            fg=typer.colors.RED, err=True,
+        )
+
+
+def _prompt_timeout(existing: int) -> int:
+    """Prompt for ``auto_login_timeout_seconds`` (positive int)."""
+    while True:
+        entered = typer.prompt(
+            "Auto-login timeout in seconds",
+            default=str(existing),
+            show_default=True,
+        ).strip()
+        if not entered:
+            return existing
+        try:
+            value = int(entered)
+        except ValueError:
+            typer.secho(
+                "Must be a positive integer.",
+                fg=typer.colors.RED, err=True,
+            )
+            continue
+        if value <= 0:
+            typer.secho(
+                "Must be a positive integer.",
+                fg=typer.colors.RED, err=True,
+            )
+            continue
+        return value
 
 
 def run(*, dry_run: bool = False) -> None:
@@ -155,7 +168,10 @@ def _run(*, dry_run: bool) -> None:
     try:
         existing = load()
     except ConfigError as e:
-        typer.secho(f"Existing config is unusable: {e}", fg=typer.colors.YELLOW, err=True)
+        typer.secho(
+            f"Existing config is unusable: {e}",
+            fg=typer.colors.YELLOW, err=True,
+        )
         overwrite = typer.confirm("Overwrite with new setup?", default=False)
         if not overwrite:
             raise typer.Exit(code=0)
@@ -177,7 +193,9 @@ def _run(*, dry_run: bool) -> None:
         sensitive=False,
     )
 
-    auth_flow = _prompt_auth_flow(existing.auth_flow if existing else "client")
+    auth_flow = _prompt_auth_flow(
+        existing.auth_flow if existing else "code_relay",
+    )
 
     code_relay_url: str | None = None
     if auth_flow == "code_relay":
@@ -188,25 +206,16 @@ def _run(*, dry_run: bool) -> None:
             hint="the URL the CLI polls for the captured OAuth code",
         )
 
-    auto_default = bool(existing and existing.auto_login_enabled)
-    enable_auto = typer.confirm("Enable automatic login?", default=auto_default)
+    auto_login_command = _prompt_auto_login_command(
+        existing.auto_login_command if existing else None,
+    )
 
-    username: str | None = None
-    password: str | None = None
-    if enable_auto:
-        username = _prompt_value(
-            "Username",
-            existing.username if existing else None,
-            sensitive=False,
-            error_suffix="is required when auto-login is enabled.",
+    if auto_login_command is not None:
+        auto_login_timeout_seconds = _prompt_timeout(
+            existing.auto_login_timeout_seconds if existing else 300,
         )
-        password = _prompt_value(
-            "Password",
-            existing.password if existing else None,
-            sensitive=True,
-            error_suffix="is required when auto-login is enabled.",
-            hint="supports op:// 1Password references",
-        )
+    else:
+        auto_login_timeout_seconds = 300
 
     cfg = Config(
         client_id=client_id,
@@ -214,8 +223,8 @@ def _run(*, dry_run: bool) -> None:
         redirect_uri=redirect_uri,
         auth_flow=auth_flow,
         code_relay_url=code_relay_url,
-        username=username,
-        password=password,
+        auto_login_command=auto_login_command,
+        auto_login_timeout_seconds=auto_login_timeout_seconds,
     )
 
     if dry_run:
@@ -227,7 +236,7 @@ def _run(*, dry_run: bool) -> None:
         typer.echo(json.dumps(cfg.to_payload(), indent=2))
         typer.secho("--- not saved ---", fg=typer.colors.YELLOW)
         typer.echo(
-            f"Auto-login: {'enabled' if cfg.auto_login_enabled else 'disabled'} "
+            f"Auto-login: {'enabled' if auto_login_command else 'disabled'} "
             "(dry-run)"
         )
         return
@@ -240,4 +249,6 @@ def _run(*, dry_run: bool) -> None:
 
     typer.echo("")
     typer.secho(f"Saved to {path}.", fg=typer.colors.GREEN)
-    typer.echo(f"Auto-login: {'enabled' if cfg.auto_login_enabled else 'disabled'}")
+    typer.echo(
+        f"Auto-login: {'enabled' if auto_login_command else 'disabled'}"
+    )

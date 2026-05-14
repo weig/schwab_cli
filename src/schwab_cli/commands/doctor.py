@@ -289,8 +289,12 @@ def _check_auth() -> None:
         return
     _ok("Config", f"~/.config/schwab_cli/config.json (auth_flow={cfg.auth_flow})")
 
-    if cfg.auto_login_enabled:
-        _ok("Auto-login enabled", _redact_user(cfg.username))
+    if cfg.auto_login_command is not None:
+        _ok(
+            "Auto-login enabled",
+            f"command={cfg.auto_login_command[0]} ... "
+            f"(timeout={cfg.auto_login_timeout_seconds}s)",
+        )
     else:
         _info("Auto-login disabled", "(manual OAuth on every run)")
 
@@ -319,15 +323,6 @@ def _check_auth() -> None:
         _hint("schwab_cli auth --force")
 
 
-def _redact_user(username: str | None) -> str:
-    if not username:
-        return ""
-    if username.startswith("op://"):
-        return f"1Password ref ({username})"
-    if "@" in username:
-        local, _, dom = username.partition("@")
-        return f"{local[:2]}***@{dom}"
-    return f"{username[:2]}***"
 
 
 # ---- 4. Telegram notifications ----------------------------------------

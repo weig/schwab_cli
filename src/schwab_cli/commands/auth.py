@@ -1,6 +1,6 @@
+"""``schwab_cli auth`` — refresh existing session, else open browser for fresh login."""
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timezone
 
@@ -9,13 +9,12 @@ import typer
 
 from schwab_cli import config as config_module
 from schwab_cli import oauth
-from schwab_cli.auth_flows import AuthFlowError, get_code
-from schwab_cli.browser._seleniumbase_flow import AuthError
-from schwab_cli.utils import _summarize_error
-from schwab_cli.secrets import SecretError
+from schwab_cli.auth_flows import AuthFlowError, get_auth_response
+from schwab_cli.auth_handlers import AuthHandlerError
 from schwab_cli.session import Session, SessionError
 from schwab_cli.session import save as save_session
 from schwab_cli.session import load as load_session
+from schwab_cli.utils import _summarize_error
 
 
 def _iso(epoch: int) -> str:
@@ -23,13 +22,23 @@ def _iso(epoch: int) -> str:
 
 
 def run(force: bool, manual: bool = False) -> None:
-    # `--manual` turns off saved-credential automation and forces a visible
-    # browser by setting HEADLESS=0 for the remainder of this invocation; the
-    # user drives the Schwab login themselves. The configured auth_flow
-    # (client / code_relay) still owns how the callback code is captured.
-    if manual:
-        os.environ["HEADLESS"] = "0"
+    """Refresh-or-fresh auth orchestration.
 
+    1. Load config; bail if missing or unreadable.
+    2. Unless ``--force``: try to refresh the existing session. On success,
+       save and exit.
+    3. Otherwise (forced, or refresh failed): run ``get_auth_response()``
+       — opens the user's default browser, races configured handlers
+       (paste fallback always; auto-login subprocess if configured;
+       relay polling if configured), returns an ``AuthResult``.
+    4. Hand the ``AuthResult`` to :func:`schwab_cli.oauth.resolve_auth_result`
+       — the access-token layer that maps every variant (code / token /
+       error) to a ``TokenResponse`` or surfaces an ``OAuthAuthorizationError``.
+    5. Save the resulting session.
+
+    ``manual=True`` skips the auto-login subprocess (if configured) and
+    drives the race with just the paste fallback + any relay handler.
+    """
     try:
         cfg = config_module.load()
     except config_module.ConfigError as e:
@@ -72,16 +81,23 @@ def run(force: bool, manual: bool = False) -> None:
                 # fall through
 
     try:
-        code = get_code(cfg, manual=manual)
-    except (AuthError, AuthFlowError, SecretError) as e:
+        result = get_auth_response(cfg, manual=manual)
+    except (AuthFlowError, AuthHandlerError) as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     try:
-        tr = oauth.exchange_code(cfg, code)
+        tr = oauth.resolve_auth_result(cfg, result)
+    except oauth.OAuthAuthorizationError as e:
+        typer.secho(
+            f"\nOAuth error from Schwab: {e}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
     except (httpx.HTTPStatusError, httpx.RequestError, oauth.OAuthError) as e:
         typer.secho(
-            f"Token exchange failed: {_summarize_error(e)}",
+            f"\nToken exchange failed: {_summarize_error(e)}",
             fg=typer.colors.RED,
             err=True,
         )
@@ -90,6 +106,6 @@ def run(force: bool, manual: bool = False) -> None:
     new_session = Session.from_token_response(tr, now=int(time.time()))
     save_session(new_session)
     typer.secho(
-        f"Authenticated. Access token expires at {_iso(new_session.expires_at)}.",
+        f"\nAuthenticated. Access token expires at {_iso(new_session.expires_at)}.",
         fg=typer.colors.GREEN,
     )

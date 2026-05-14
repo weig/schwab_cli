@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from schwab_cli.paths import config_dir
+
 if TYPE_CHECKING:
     from schwab_cli.oauth import TokenResponse
 
@@ -25,9 +27,13 @@ class SessionError(Exception):
 
 
 def session_path() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "schwab_cli" / "session.json"
+    """Return the absolute path to session.json.
+
+    Resolution follows ``schwab_cli.paths.config_dir()``: respects
+    ``SCHWAB_CLI_CONFIG_DIR`` (test-isolation override) and
+    ``XDG_CONFIG_HOME``, falling back to ``~/.config/schwab_cli``.
+    """
+    return config_dir() / "session.json"
 
 
 @dataclass(frozen=True)

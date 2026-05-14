@@ -5,27 +5,38 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from schwab_cli.paths import config_dir
+
 
 def config_path() -> Path:
     """Return the absolute path to config.json.
 
     Resolution order (first match wins):
-      1. ``SCHWAB_CLI_CONFIG`` — absolute path override. Use this for
-         ad-hoc shell runs or scripted setups; it bypasses every other
-         lookup so there's no risk of a stray ``HOME`` tweak pointing at
-         the real file.
-      2. ``XDG_CONFIG_HOME/schwab_cli/config.json``.
-      3. ``~/.config/schwab_cli/config.json``.
+      1. ``SCHWAB_CLI_CONFIG`` — absolute path override (file-level).
+         Use this for ad-hoc shell runs or scripted setups when you only
+         want to swap out the config file without moving the session.
+      2. ``SCHWAB_CLI_CONFIG_DIR/config.json`` — directory-level override
+         (also moves ``session.json``); see ``schwab_cli.paths``.
+      3. ``XDG_CONFIG_HOME/schwab_cli/config.json``.
+      4. ``~/.config/schwab_cli/config.json``.
     """
     override = os.environ.get("SCHWAB_CLI_CONFIG")
     if override:
         return Path(override)
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "schwab_cli" / "config.json"
+    return config_dir() / "config.json"
 
 
-AUTH_FLOWS = ("client", "code_relay")
+AUTH_FLOWS = ("code_relay", "client")
+"""
+Allowed values for ``Config.auth_flow``.
+
+- ``code_relay``: schwab_cli polls a remote relay URL for the captured OAuth
+  ``code``. Used when ``redirect_uri`` points at a public endpoint that
+  captures and stores the callback server-side.
+- ``client``: schwab_cli stands up a local HTTP listener; the auto-login
+  subprocess (or anything else with the listener URL) POSTs the captured
+  code directly to it.
+"""
 
 
 @dataclass(frozen=True)
@@ -33,15 +44,11 @@ class Config:
     client_id: str
     client_secret: str
     redirect_uri: str
-    auth_flow: str = "client"
+    auth_flow: str = "code_relay"
     code_relay_url: str | None = None
-    username: str | None = None
-    password: str | None = None
+    auto_login_command: tuple[str, ...] | None = None
+    auto_login_timeout_seconds: int = 300
     version: int = 1
-
-    @property
-    def auto_login_enabled(self) -> bool:
-        return self.username is not None and self.password is not None
 
     def to_payload(self) -> dict:
         """Return the on-disk JSON representation of this config.
@@ -59,10 +66,9 @@ class Config:
         }
         if self.code_relay_url is not None:
             payload["code_relay_url"] = self.code_relay_url
-        if self.username is not None:
-            payload["username"] = self.username
-        if self.password is not None:
-            payload["password"] = self.password
+        if self.auto_login_command is not None:
+            payload["auto_login_command"] = list(self.auto_login_command)
+            payload["auto_login_timeout_seconds"] = self.auto_login_timeout_seconds
         return payload
 
 
@@ -78,7 +84,13 @@ def load() -> Config | None:
     """Load config from disk.
 
     Returns None if the file does not exist. Raises ConfigError on malformed
-    JSON, unsupported schema versions, or missing required fields.
+    JSON, unsupported schema versions, or missing/invalid required fields.
+
+    Unknown fields (e.g. legacy ``username`` / ``password`` from before the
+    auth refactor) are silently ignored. ``code_relay_url`` is not validated
+    here — missing-when-needed is caught at auth time in
+    ``auth_flows._build_handlers`` so non-auth commands can still load
+    a partial config.
     """
     path = config_path()
     if not path.exists():
@@ -95,30 +107,82 @@ def load() -> Config | None:
             f"unsupported config version {version} in {path} "
             f"(this build supports version {SUPPORTED_VERSION})"
         )
-    for field in _REQUIRED_FIELDS:
-        if field not in raw:
-            raise ConfigError(f"missing required field '{field}' in {path}")
+    for required in _REQUIRED_FIELDS:
+        if required not in raw:
+            raise ConfigError(f"missing required field '{required}' in {path}")
     auth_flow = raw["auth_flow"]
     if auth_flow not in AUTH_FLOWS:
         raise ConfigError(
             f"invalid auth_flow {auth_flow!r} in {path}; "
             f"expected one of: {', '.join(AUTH_FLOWS)}"
         )
-    code_relay_url = raw.get("code_relay_url")
-    if auth_flow == "code_relay" and not code_relay_url:
-        raise ConfigError(
-            f"auth_flow='code_relay' requires 'code_relay_url' in {path}"
-        )
+    auto_login_command = _parse_auto_login_command(raw.get("auto_login_command"), path)
+    auto_login_timeout_seconds = _parse_timeout(
+        raw.get("auto_login_timeout_seconds"), path,
+    )
     return Config(
         client_id=raw["client_id"],
         client_secret=raw["client_secret"],
         redirect_uri=raw["redirect_uri"],
         auth_flow=auth_flow,
-        code_relay_url=code_relay_url,
-        username=raw.get("username"),
-        password=raw.get("password"),
+        code_relay_url=raw.get("code_relay_url"),
+        auto_login_command=auto_login_command,
+        auto_login_timeout_seconds=auto_login_timeout_seconds,
         version=version,
     )
+
+
+def _parse_auto_login_command(
+    raw: object, path: Path,
+) -> tuple[str, ...] | None:
+    """Validate the optional ``auto_login_command`` field.
+
+    Accepted shapes:
+      * absent / null → None
+      * list of strings (non-empty) → tuple of strings (frozen)
+
+    Anything else is a ``ConfigError``.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ConfigError(
+            f"auto_login_command in {path} must be a list of strings; "
+            f"got {type(raw).__name__}"
+        )
+    if not raw:
+        raise ConfigError(
+            f"auto_login_command in {path} cannot be empty (use null/omit "
+            f"to disable auto-login)"
+        )
+    for i, token in enumerate(raw):
+        if not isinstance(token, str):
+            raise ConfigError(
+                f"auto_login_command[{i}] in {path} must be a string; "
+                f"got {type(token).__name__}"
+            )
+    return tuple(raw)
+
+
+def _parse_timeout(raw: object, path: Path) -> int:
+    """Validate the optional ``auto_login_timeout_seconds`` field.
+
+    Default 300 when absent. Must be a positive int when present.
+    """
+    if raw is None:
+        return 300
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        # Reject bool too — bool is a subclass of int but `True == 1` is
+        # almost certainly a user error in a config file.
+        raise ConfigError(
+            f"auto_login_timeout_seconds in {path} must be an integer; "
+            f"got {type(raw).__name__}"
+        )
+    if raw <= 0:
+        raise ConfigError(
+            f"auto_login_timeout_seconds in {path} must be positive; got {raw}"
+        )
+    return raw
 
 
 def save(cfg: Config) -> None:
