@@ -232,3 +232,63 @@ def test_stream_quote_cleans_up_when_anyio_scope_cancelled():
     )
     session_id, token = bridge.remove_calls[0]
     assert (session_id, token) == bridge.add_calls[0][:2]
+
+
+# ---- auth subprocess timeout resolver ---------------------------------
+
+
+def _resolver_logbook() -> LogBook:
+    return LogBook(stream=io.StringIO())
+
+
+def test_resolve_auth_timeout_reads_config_and_adds_buffer():
+    """Outer kill must be longer than the inner auto_login budget so
+    webauto isn't SIGKILLed mid-flow. Buffer covers the post-webauto
+    token exchange + session.json write."""
+    from schwab_cli.mcp_server import app as app_module
+
+    fake_cfg = type(
+        "Cfg", (),
+        {"auto_login_timeout_seconds": 250},
+    )()
+    with patch.object(
+        app_module.config_module, "load", return_value=fake_cfg,
+    ):
+        timeout = app_module._resolve_auth_subprocess_timeout(
+            _resolver_logbook(),
+        )
+    assert timeout == 250 + app_module._AUTH_SUBPROCESS_BUFFER_SECONDS
+
+
+def test_resolve_auth_timeout_falls_back_when_config_missing():
+    """No config on disk yet (e.g. fresh machine). Monitor still
+    starts — just with the module default envelope."""
+    from schwab_cli.mcp_server import app as app_module
+    from schwab_cli.mcp_server.auth_monitor import (
+        DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    with patch.object(app_module.config_module, "load", return_value=None):
+        timeout = app_module._resolve_auth_subprocess_timeout(
+            _resolver_logbook(),
+        )
+    assert timeout == DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
+
+
+def test_resolve_auth_timeout_falls_back_on_config_error():
+    """Malformed config shouldn't crash the daemon — fall back to
+    the default and log a warning so the operator can see it."""
+    from schwab_cli.mcp_server import app as app_module
+    from schwab_cli.mcp_server.auth_monitor import (
+        DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    def _boom():
+        raise app_module.config_module.ConfigError("bad json")
+
+    buf = io.StringIO()
+    lb = LogBook(stream=buf)
+    with patch.object(app_module.config_module, "load", side_effect=_boom):
+        timeout = app_module._resolve_auth_subprocess_timeout(lb)
+    assert timeout == DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
+    assert "auth_monitor.config_load_failed" in buf.getvalue()

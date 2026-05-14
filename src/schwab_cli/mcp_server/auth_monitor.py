@@ -39,7 +39,7 @@ from schwab_cli.session import Session, load as load_session
 DEFAULT_THRESHOLD_SECONDS = 3600          # 1 hour
 DEFAULT_ANTI_THRASH_SECONDS = 3600        # 1 hour between attempts
 DEFAULT_POLL_SECONDS = 60                 # tick every minute
-DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120  # 2 minutes for browser auth
+DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 330  # auto_login_timeout (300s) + 30s buffer
 DEFAULT_REFRESH_EXPIRING_WARN_SECONDS = 900  # 15-minute danger zone
 
 
