@@ -11,7 +11,6 @@ from schwab_cli import config as config_module
 from schwab_cli import oauth
 from schwab_cli.auth_flows import AuthFlowError, get_auth_response
 from schwab_cli.auth_handlers import AuthHandlerError
-from schwab_cli.oauth import TokenResponse
 from schwab_cli.session import Session, SessionError
 from schwab_cli.session import save as save_session
 from schwab_cli.session import load as load_session
@@ -29,17 +28,17 @@ def run(force: bool, manual: bool = False) -> None:
     2. Unless ``--force``: try to refresh the existing session. On success,
        save and exit.
     3. Otherwise (forced, or refresh failed): run ``get_auth_response()``
-       — opens the user's default browser, races configured handlers,
-       returns either a ``code`` (needs exchange) or a fully-exchanged
-       token bundle.
-    4. Save the resulting session.
+       — opens the user's default browser, races configured handlers
+       (paste fallback always; auto-login subprocess if configured;
+       relay polling if configured), returns an ``AuthResult``.
+    4. Hand the ``AuthResult`` to :func:`schwab_cli.oauth.resolve_auth_result`
+       — the access-token layer that maps every variant (code / token /
+       error) to a ``TokenResponse`` or surfaces an ``OAuthAuthorizationError``.
+    5. Save the resulting session.
 
-    ``manual`` is a deprecated no-op kept for backward compatibility with
-    older invocations. There is no longer an automated browser flow to
-    opt out of.
+    ``manual=True`` skips the auto-login subprocess (if configured) and
+    drives the race with just the paste fallback + any relay handler.
     """
-    del manual  # deprecated; flag kept in CLI for backward compat
-
     try:
         cfg = config_module.load()
     except config_module.ConfigError as e:
@@ -82,27 +81,27 @@ def run(force: bool, manual: bool = False) -> None:
                 # fall through
 
     try:
-        result = get_auth_response(cfg)
+        result = get_auth_response(cfg, manual=manual)
     except (AuthFlowError, AuthHandlerError) as e:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    if result["kind"] == "code":
-        try:
-            tr = oauth.exchange_code(cfg, result["code"])
-        except (httpx.HTTPStatusError, httpx.RequestError, oauth.OAuthError) as e:
-            typer.secho(
-                f"Token exchange failed: {_summarize_error(e)}",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(code=1)
-    else:  # "token" — handler already exchanged (future AuthServerHandler)
-        tr = TokenResponse(
-            access_token=result["access_token"],
-            refresh_token=result["refresh_token"],
-            expires_in=result["expires_in"],
+    try:
+        tr = oauth.resolve_auth_result(cfg, result)
+    except oauth.OAuthAuthorizationError as e:
+        typer.secho(
+            f"\nOAuth error from Schwab: {e}",
+            fg=typer.colors.RED,
+            err=True,
         )
+        raise typer.Exit(code=1)
+    except (httpx.HTTPStatusError, httpx.RequestError, oauth.OAuthError) as e:
+        typer.secho(
+            f"\nToken exchange failed: {_summarize_error(e)}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     new_session = Session.from_token_response(tr, now=int(time.time()))
     save_session(new_session)

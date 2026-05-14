@@ -227,23 +227,70 @@ def test_auth_token_exchange_failure_after_full_auth(monkeypatch, tmp_path):
     assert load_session() is None
 
 
-def test_manual_flag_is_no_op(monkeypatch, tmp_path):
-    """``--manual`` is preserved for backward compat but should not change
-    any observable behavior."""
+def test_manual_flag_propagates_to_get_auth_response(monkeypatch, tmp_path):
+    """``--manual`` is meaningful again — it's passed through to
+    ``get_auth_response(cfg, manual=True)`` which then skips the auto-login
+    subprocess. Asserted by capturing the kwarg."""
     _setup_env(monkeypatch, tmp_path)
     _seed_config()
     fake_tr = TokenResponse(access_token="a", refresh_token="r", expires_in=1800)
+    captured = {}
+
+    def fake_get_auth_response(cfg, *, manual=False):
+        captured["manual"] = manual
+        return _CODE_RESULT
+
     with patch(
-        "schwab_cli.commands.auth.get_auth_response", return_value=_CODE_RESULT,
+        "schwab_cli.commands.auth.get_auth_response",
+        side_effect=fake_get_auth_response,
     ), patch(
         "schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr,
     ):
-        result_with = runner.invoke(app, ["auth", "--manual"])
-        save_session(Session(  # restore so the second run also goes to fresh auth
-            access_token="x", refresh_token="x",
-            expires_at=0, refresh_token_expires_at=0,
-        ))
-        # Force = skip refresh so this also exercises the fresh-auth path.
-    # The --manual run should succeed identically to the plain run.
-    assert result_with.exit_code == 0
-    assert "Authenticated" in result_with.output
+        result = runner.invoke(app, ["auth", "--manual"])
+    assert result.exit_code == 0, result.output
+    assert captured["manual"] is True
+
+
+def test_no_manual_flag_passes_manual_false(monkeypatch, tmp_path):
+    _setup_env(monkeypatch, tmp_path)
+    _seed_config()
+    fake_tr = TokenResponse(access_token="a", refresh_token="r", expires_in=1800)
+    captured = {}
+
+    def fake_get_auth_response(cfg, *, manual=False):
+        captured["manual"] = manual
+        return _CODE_RESULT
+
+    with patch(
+        "schwab_cli.commands.auth.get_auth_response",
+        side_effect=fake_get_auth_response,
+    ), patch(
+        "schwab_cli.commands.auth.oauth.exchange_code", return_value=fake_tr,
+    ):
+        result = runner.invoke(app, ["auth"])
+    assert result.exit_code == 0, result.output
+    assert captured["manual"] is False
+
+
+def test_auth_surfaces_oauth_authorization_error(monkeypatch, tmp_path):
+    """When a handler returns ``kind="error"``, ``resolve_auth_result``
+    raises ``OAuthAuthorizationError`` and ``auth.run`` prints a clear
+    message and exits 1 — without writing a session."""
+    _setup_env(monkeypatch, tmp_path)
+    _seed_config()
+
+    error_result = {
+        "kind": "error",
+        "error": "access_denied",
+        "error_description": "user rejected consent",
+        "state": "S",
+    }
+    with patch(
+        "schwab_cli.commands.auth.get_auth_response", return_value=error_result,
+    ):
+        result = runner.invoke(app, ["auth"])
+    assert result.exit_code == 1
+    assert "OAuth error from Schwab" in result.output
+    assert "access_denied" in result.output
+    assert "user rejected consent" in result.output
+    assert load_session() is None

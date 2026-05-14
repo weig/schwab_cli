@@ -33,52 +33,109 @@ from schwab_cli.auth_handlers import (
 from schwab_cli.config import Config
 
 
-def _cfg_code_relay() -> Config:
-    return Config(
+def _cfg_code_relay(**overrides) -> Config:
+    base = dict(
         client_id="cid",
         client_secret="csec",
         redirect_uri="https://relay.example.com/uuid/callback",
         auth_flow="code_relay",
         code_relay_url="https://relay.example.com/uuid/wait",
     )
+    base.update(overrides)
+    return Config(**base)
 
 
-def _cfg_user_input_only() -> Config:
-    """A non-code_relay config — only UserInputHandler will run."""
-    return Config(
+def _cfg_client(**overrides) -> Config:
+    base = dict(
         client_id="cid",
         client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
-        auth_flow="other",  # any value that isn't "code_relay"
+        auth_flow="client",
     )
+    base.update(overrides)
+    return Config(**base)
 
 
-# ----- _build_handlers ----------------------------------------------------
+_AUTH_URL = "https://schwab/auth?state=S"
 
 
-def test_build_handlers_user_input_only_when_not_code_relay():
-    handlers = _build_handlers(_cfg_user_input_only())
-    assert len(handlers) == 1
-    assert isinstance(handlers[0], UserInputHandler)
+def _names(handlers):
+    return {type(h).__name__ for h in handlers}
 
 
-def test_build_handlers_adds_relay_when_code_relay_configured():
-    handlers = _build_handlers(_cfg_code_relay())
-    assert len(handlers) == 2
-    assert any(isinstance(h, UserInputHandler) for h in handlers)
-    assert any(isinstance(h, CodeRelayHandler) for h in handlers)
+# ----- _build_handlers — dispatch matrix --------------------------------
+
+
+def test_build_handlers_code_relay_no_auto_login_no_manual():
+    """Human-driven, code_relay: {UserInput, CodeRelay}."""
+    handlers = _build_handlers(
+        _cfg_code_relay(), manual=False, auth_url=_AUTH_URL,
+    )
+    assert _names(handlers) == {"UserInputHandler", "CodeRelayHandler"}
+
+
+def test_build_handlers_code_relay_with_auto_login_no_manual():
+    """Auto-driven, code_relay: just {CodeRelay}. UserInput excluded —
+    auto-login is hands-off, no terminal interaction expected. The
+    supervisor (spawned in ``get_auth_response``) drives webauto outside
+    the race."""
+    handlers = _build_handlers(
+        _cfg_code_relay(auto_login_command=("webauto", "script.py")),
+        manual=False, auth_url=_AUTH_URL,
+    )
+    assert _names(handlers) == {"CodeRelayHandler"}
+
+
+def test_build_handlers_client_no_auto_login():
+    """Human-driven, client: {UserInput} only (no relay configured)."""
+    handlers = _build_handlers(
+        _cfg_client(), manual=False, auth_url=_AUTH_URL,
+    )
+    assert _names(handlers) == {"UserInputHandler"}
+
+
+def test_build_handlers_client_with_auto_login_no_manual():
+    """Auto-driven, client: just {AutoLogin}. UserInput excluded."""
+    handlers = _build_handlers(
+        _cfg_client(auto_login_command=("webauto", "script.py")),
+        manual=False, auth_url=_AUTH_URL,
+    )
+    assert _names(handlers) == {"AutoLoginHandler"}
+
+
+def test_build_handlers_client_with_auto_login_and_manual():
+    """``--manual`` overrides auto-login → human-driven path is restored."""
+    handlers = _build_handlers(
+        _cfg_client(auto_login_command=("webauto", "script.py")),
+        manual=True, auth_url=_AUTH_URL,
+    )
+    assert _names(handlers) == {"UserInputHandler"}
+
+
+def test_build_handlers_code_relay_with_auto_login_and_manual():
+    """``--manual`` overrides auto-login → human-driven path with relay
+    polling."""
+    handlers = _build_handlers(
+        _cfg_code_relay(auto_login_command=("webauto", "script.py")),
+        manual=True, auth_url=_AUTH_URL,
+    )
+    assert _names(handlers) == {"UserInputHandler", "CodeRelayHandler"}
 
 
 def test_build_handlers_raises_when_code_relay_url_missing():
-    cfg = Config(
-        client_id="cid",
-        client_secret="csec",
-        redirect_uri="https://relay.example.com",
-        auth_flow="code_relay",
+    cfg = _cfg_code_relay(code_relay_url=None)
+    with pytest.raises(AuthFlowError, match="code_relay_url"):
+        _build_handlers(cfg, manual=False, auth_url=_AUTH_URL)
+
+
+def test_build_handlers_auto_login_code_relay_missing_url_still_raises():
+    """Even on the auto-login path, missing code_relay_url is a config error."""
+    cfg = _cfg_code_relay(
         code_relay_url=None,
+        auto_login_command=("webauto", "script.py"),
     )
     with pytest.raises(AuthFlowError, match="code_relay_url"):
-        _build_handlers(cfg)
+        _build_handlers(cfg, manual=False, auth_url=_AUTH_URL)
 
 
 # ----- _open_and_print -----------------------------------------------------
@@ -110,6 +167,79 @@ def test_open_and_print_handles_open_returning_false(capsys, monkeypatch):
     monkeypatch.setattr("webbrowser.open", lambda *a, **kw: False)
     _open_and_print("https://x/y")
     assert "https://x/y" in capsys.readouterr().err
+
+
+def test_open_and_print_skips_browser_when_open_browser_false(
+    capsys, monkeypatch,
+):
+    """When ``open_browser=False`` (auto-login active), do NOT call
+    ``webbrowser.open`` and emit a short "Auto-login to schwab..." banner
+    instead of the paste-prompt banner. UserInputHandler is excluded from
+    the race in this mode so the URL doesn't need to be visible."""
+    calls = []
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: calls.append(a) or True)
+    _open_and_print("https://x/y", open_browser=False)
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "Auto-login to schwab" in err
+
+
+def test_get_auth_response_does_not_open_browser_with_auto_login(monkeypatch):
+    """When auto_login_command is set, webauto opens its own browser —
+    schwab_cli must NOT call ``webbrowser.open``."""
+    calls = []
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: calls.append(a) or True)
+    canned: AuthResult = {"kind": "code", "code": "X", "state": "S"}
+
+    class _RelayOK:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            return canned
+
+    class _NopSupervisor:
+        def __init__(self, *args, **kwargs): pass
+        def start(self): pass
+        def terminate(self): pass
+
+    cfg = _cfg_code_relay(auto_login_command=("webauto", "script.py"))
+    with patch("schwab_cli.auth_flows.CodeRelayHandler", return_value=_RelayOK()), \
+         patch("schwab_cli.auth_flows.AutoLoginSupervisor", _NopSupervisor):
+        get_auth_response(cfg, manual=False)
+    assert calls == [], "webbrowser.open must not be called when auto-login is active"
+
+
+def test_get_auth_response_opens_browser_without_auto_login(monkeypatch):
+    """Without auto_login_command, schwab_cli IS responsible for opening
+    the default browser."""
+    calls = []
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: calls.append(a) or True)
+    canned: AuthResult = {"kind": "code", "code": "X", "state": "S"}
+
+    class _UserOK:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            return canned
+
+    with patch("schwab_cli.auth_flows.UserInputHandler", return_value=_UserOK()):
+        get_auth_response(_cfg_client(), manual=False)
+    assert len(calls) == 1
+
+
+def test_get_auth_response_opens_browser_when_manual_overrides_auto_login(
+    monkeypatch,
+):
+    """--manual disables auto-login → schwab_cli must open the browser
+    itself (since webauto won't)."""
+    calls = []
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: calls.append(a) or True)
+    canned: AuthResult = {"kind": "code", "code": "X", "state": "S"}
+
+    class _RelayOK:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            return canned
+
+    cfg = _cfg_code_relay(auto_login_command=("webauto", "script.py"))
+    with patch("schwab_cli.auth_flows.CodeRelayHandler", return_value=_RelayOK()):
+        get_auth_response(cfg, manual=True)
+    assert len(calls) == 1
 
 
 # ----- _race_handlers -----------------------------------------------------
@@ -204,6 +334,23 @@ def test_race_all_handlers_fail_raises_aggregate():
     assert "second error" in msg
 
 
+def test_race_error_result_short_circuits():
+    """ErrorResult is a valid race winner (Schwab said 'no'); the race
+    short-circuits the same way it does on CodeResult."""
+    error_result: AuthResult = {
+        "kind": "error",
+        "error": "access_denied",
+        "error_description": "user rejected",
+        "state": "S",
+    }
+    fast_error = _ImmediateOK(error_result)
+    slow_code = _SlowOK({"kind": "code", "code": "LATE", "state": "S"}, sleep=0.3)
+    result = _race_handlers([fast_error, slow_code], expected_state="S")
+    assert result == error_result
+    # The loser saw cancel.
+    assert isinstance(fast_error.last_cancel, threading.Event)
+
+
 def test_race_state_propagated_to_every_handler():
     h1 = _ImmediateOK(_OK_RESULT)
     h2 = _ImmediateFail()
@@ -231,7 +378,128 @@ def test_get_auth_response_opens_browser_and_returns_handler_result(
         "schwab_cli.auth_flows.UserInputHandler",
         return_value=_UserInputOK(),
     ):
-        result = get_auth_response(_cfg_user_input_only())
+        result = get_auth_response(_cfg_client())
     assert result == canned
     err = capsys.readouterr().err
     assert "https://api.schwabapi.com/v1/oauth/authorize" in err
+
+
+# ----- AutoLoginSupervisor wiring in get_auth_response --------------------
+
+
+def test_get_auth_response_starts_supervisor_for_code_relay_with_auto_login(
+    monkeypatch,
+):
+    """code_relay + auto_login_command + !manual → supervisor.start() called,
+    and supervisor.terminate() called in finally."""
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: True)
+    canned: AuthResult = {"kind": "code", "code": "FROM_RELAY", "state": "S"}
+
+    class _RelayOK:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            return canned
+
+    class _FakeSupervisor:
+        instances: list = []
+
+        def __init__(self, *args, **kwargs):
+            self.started = False
+            self.terminated = False
+            _FakeSupervisor.instances.append(self)
+
+        def start(self):
+            self.started = True
+
+        def terminate(self):
+            self.terminated = True
+
+    cfg = _cfg_code_relay(auto_login_command=("webauto", "script.py"))
+    with patch("schwab_cli.auth_flows.CodeRelayHandler", return_value=_RelayOK()), \
+         patch("schwab_cli.auth_flows.AutoLoginSupervisor", _FakeSupervisor):
+        result = get_auth_response(cfg, manual=False)
+
+    assert result == canned
+    assert len(_FakeSupervisor.instances) == 1
+    sup = _FakeSupervisor.instances[0]
+    assert sup.started is True
+    assert sup.terminated is True
+
+
+def test_get_auth_response_skips_supervisor_for_client_flow(monkeypatch):
+    """auth_flow=client + auto_login is the AutoLoginHandler path, not the
+    supervisor path. No AutoLoginSupervisor instances should be created."""
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: True)
+    canned: AuthResult = {"kind": "code", "code": "X", "state": "S"}
+
+    class _AutoOK:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            return canned
+
+    class _NeverConstructed:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "AutoLoginSupervisor must NOT be constructed for client flow"
+            )
+
+    cfg = _cfg_client(auto_login_command=("webauto", "script.py"))
+    with patch("schwab_cli.auth_flows.AutoLoginHandler", return_value=_AutoOK()), \
+         patch("schwab_cli.auth_flows.AutoLoginSupervisor", _NeverConstructed):
+        result = get_auth_response(cfg, manual=False)
+    assert result == canned
+
+
+def test_get_auth_response_skips_supervisor_on_manual(monkeypatch):
+    """--manual must skip supervisor spawning even for code_relay."""
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: True)
+    canned: AuthResult = {"kind": "code", "code": "X", "state": "S"}
+
+    class _RelayOK:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            return canned
+
+    class _NeverConstructed:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "AutoLoginSupervisor must NOT be constructed under --manual"
+            )
+
+    cfg = _cfg_code_relay(auto_login_command=("webauto", "script.py"))
+    with patch("schwab_cli.auth_flows.CodeRelayHandler", return_value=_RelayOK()), \
+         patch("schwab_cli.auth_flows.AutoLoginSupervisor", _NeverConstructed):
+        result = get_auth_response(cfg, manual=True)
+    assert result == canned
+
+
+def test_get_auth_response_terminates_supervisor_even_on_race_failure(monkeypatch):
+    """If all handlers fail, supervisor.terminate() still runs (finally)."""
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: True)
+
+    class _FailingRelay:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            raise AuthHandlerError("relay 500")
+
+    class _FailingUser:
+        def wait_for_response(self, *, expected_state, cancel=None):
+            raise AuthHandlerError("empty input")
+
+    terminated = {"flag": False}
+
+    class _FakeSupervisor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def terminate(self):
+            terminated["flag"] = True
+
+    cfg = _cfg_code_relay(auto_login_command=("webauto", "script.py"))
+    with patch("schwab_cli.auth_flows.UserInputHandler",
+               return_value=_FailingUser()), \
+         patch("schwab_cli.auth_flows.CodeRelayHandler",
+               return_value=_FailingRelay()), \
+         patch("schwab_cli.auth_flows.AutoLoginSupervisor", _FakeSupervisor):
+        with pytest.raises(AuthFlowError):
+            get_auth_response(cfg, manual=False)
+    assert terminated["flag"] is True

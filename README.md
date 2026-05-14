@@ -32,8 +32,9 @@ keep this file out of git, cloud-sync, and shared backups).
 ## Authenticate
 
 ```bash
-schwab_cli auth          # refresh existing session if present, else open browser
-schwab_cli auth --force  # skip refresh; always open browser for fresh login
+schwab_cli auth            # refresh existing session if present, else open browser
+schwab_cli auth --force    # skip refresh; always open browser for fresh login
+schwab_cli auth --manual   # skip the auto-login subprocess (if configured)
 ```
 
 Tokens are saved to `~/.config/schwab_cli/session.json` (mode `0600`).
@@ -45,23 +46,90 @@ Tokens are saved to `~/.config/schwab_cli/session.json` (mode `0600`).
 2. If refresh fails (or you passed `--force`):
    - The CLI prints the Schwab OAuth URL to stderr and asks your OS
      default browser to open it.
-   - You complete login + MFA in your normal browser (passwords, MFA,
-     "trust this device" — all handled by Schwab, not by the CLI).
-   - Schwab redirects to your configured `redirect_uri`. Two paths run
-     **concurrently** to capture the `code` query parameter:
-     - **Paste path** (always on): the CLI shows a prompt; paste the
-       code, the querystring, or the full redirect URL.
-     - **Relay path** (active when `auth_flow="code_relay"`): the CLI
-       long-polls `code_relay_url` for a code your relay captured.
-   - Whichever path returns first wins; the CLI exchanges the code for
-     tokens and saves the session.
+   - You complete login + MFA in your normal browser. Schwab redirects
+     to your configured `redirect_uri`.
+   - Up to **three handlers race concurrently** to capture the `code`:
+     - **Paste fallback** — always on. The CLI shows a prompt; paste
+       the code / querystring / full redirect URL into it.
+     - **Auto-login subprocess** — when `auto_login_command` is set
+       and `--manual` is not passed. schwab_cli spawns the configured
+       command (typically a [webauto-cli](https://github.com/weig/webauto)
+       invocation) with `stdin=DEVNULL` and the right flags for the
+       active `auth_flow`. The subprocess drives the browser through
+       Schwab on your behalf.
+     - **Code-relay polling** — when `auth_flow="code_relay"`. schwab_cli
+       long-polls `code_relay_url` for a code your remote relay captured.
+   - First valid result wins; losing handlers are cancelled and the
+     subprocess is terminated (SIGTERM → 5s → SIGKILL).
+   - `oauth.resolve_auth_result` converts the result to a `TokenResponse`:
+     `code` → calls Schwab's token endpoint; `token` → already exchanged,
+     wrap and save; `error` → surfaces the OAuth error and exits 1.
 
 ### `auth_flow` config field
 
-Only `"code_relay"` is supported today. Setting `auth_flow="code_relay"`
-requires both `redirect_uri` (the relay's callback URL) and
-`code_relay_url` (the relay's wait endpoint) in `config.json`. Future
-versions will add a server-side flow (`AuthServerHandler`).
+| Value | Meaning |
+|---|---|
+| `"code_relay"` | schwab_cli polls a remote relay URL. `redirect_uri` points at the relay; `code_relay_url` is the polling endpoint. |
+| `"client"` | schwab_cli stands up a local HTTP listener; the auto-login subprocess (or any other client) POSTs the captured code there. |
+
+### Auto-login (optional, via webauto)
+
+schwab_cli can delegate browser driving to an external subprocess.
+The reference implementation is the [`webauto`](https://github.com/weig/webauto)
+framework — installed separately, with its own venv and browser deps.
+schwab_cli stays browser-dep-free.
+
+Set `auto_login_command` in your config to an argv list pointing at
+`webauto-cli` (or any equivalent tool that respects the wire protocol below):
+
+```json
+{
+  "auto_login_command": [
+    "webauto-cli",
+    "~/.config/schwab_cli/scripts/auth_automation.py",
+    "--env", "~/.config/schwab_cli/auto_login.env"
+  ],
+  "auto_login_timeout_seconds": 300
+}
+```
+
+The credentials (Schwab username/password) live in webauto's `--env` file
+— **never** in schwab_cli's config. Use `webauto-cli secrets keygen` +
+`webauto-cli secrets encrypt` to keep that file encrypted at rest:
+
+```bash
+# One-time
+webauto-cli secrets keygen
+cat > /tmp/plain.env <<EOF
+URL=https://api.schwabapi.com/v1/oauth/authorize?...
+USERNAME=alice
+PASSWORD=hunter2
+EOF
+webauto-cli secrets encrypt /tmp/plain.env \
+    --out ~/.config/schwab_cli/auto_login.env
+rm -P /tmp/plain.env
+```
+
+**Wire protocol** — schwab_cli appends per-run flags to your `auto_login_command`
+before spawning:
+
+| `auth_flow` | Appended flags |
+|---|---|
+| `client` | `--notification-endpoint http://127.0.0.1:<port>/oauth/<token>` + `--state <state>` + `-a URL=<auth URL>` |
+| `code_relay` | `--no-notify` + `--state <state>` + `-a URL=<auth URL>` |
+
+The action script is your own — typically a copy of one of webauto's
+examples (`~/Projects/finance/webauto/examples/schwab_auth_code_relay.py`
+for relay flow, `examples/schwab_auth.py` for client flow). It reads
+credentials from the env webauto loaded via `--env` and either:
+
+- POSTs `{"kind": "code", "code": ..., "state": ...}` to the listener
+  (client flow), or
+- Calls `done()` after the browser hits the relay (code_relay flow);
+  the relay captures and schwab_cli polls for it.
+
+OAuth errors flow through as `{"kind": "error", "error": ..., "error_description": ...}`
+and schwab_cli surfaces them with exit code 1.
 
 ### Testing without touching your live config + session
 

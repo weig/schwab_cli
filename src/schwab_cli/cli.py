@@ -65,9 +65,10 @@ def auth(
         False,
         "--manual",
         help=(
-            "Deprecated no-op. The auth flow always opens your default "
-            "browser now; the SeleniumBase auto-login it used to disable "
-            "no longer exists."
+            "Skip the auto-login subprocess (if configured) and drive the "
+            "Schwab login yourself in the browser; paste the redirect URL "
+            "when prompted. The CodeRelayHandler (when configured) still "
+            "joins the race alongside the paste fallback."
         ),
     ),
     doc: bool = doc_option(),

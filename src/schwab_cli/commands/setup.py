@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import shlex
 
 import typer
 
 from schwab_cli.config import (
+    AUTH_FLOWS,
     Config,
     ConfigError,
     config_path,
@@ -32,8 +34,6 @@ def _prompt_value(
     if existing:
         shown = mask_secret(existing) if sensitive else existing
         typer.echo(f"  Current {label}: {shown}  (press Enter to keep)")
-    # Hide echo only for fresh sensitive entry; when keeping an existing value,
-    # showing nothing would leave the user wondering if input was captured.
     hide = sensitive and not existing
     while True:
         entered = typer.prompt(label, default="", show_default=False, hide_input=hide)
@@ -44,10 +44,104 @@ def _prompt_value(
         typer.secho(f"{label} {error_suffix}", fg=typer.colors.RED, err=True)
 
 
-# Only one auth flow is supported today (``code_relay``). The previous
-# multi-choice prompt is removed because the menu would have a single
-# option. Future additions (e.g. AuthServerHandler) will reintroduce a
-# selector at the same insertion point in ``_run`` below.
+def _prompt_auth_flow(default: str) -> str:
+    """Prompt for ``auth_flow`` ∈ AUTH_FLOWS, re-prompting on invalid input."""
+    typer.echo("")
+    typer.echo("Auth flow (how schwab_cli captures the OAuth code):")
+    typer.echo("  code_relay  — schwab_cli polls a remote relay URL")
+    typer.echo("  client      — schwab_cli stands up a local HTTP listener")
+    while True:
+        entered = typer.prompt(
+            "Auth flow",
+            default=default,
+            show_default=True,
+        ).strip()
+        if entered in AUTH_FLOWS:
+            return entered
+        typer.secho(
+            f"Must be one of: {', '.join(AUTH_FLOWS)}.",
+            fg=typer.colors.RED, err=True,
+        )
+
+
+def _prompt_auto_login_command(
+    existing: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Prompt for the optional auto-login command (parsed via ``shlex.split``).
+
+    Returns:
+        * ``None`` when the user declines auto-login.
+        * Tuple of argv tokens otherwise.
+    """
+    auto_default = existing is not None
+    enable_auto = typer.confirm(
+        "Configure auto-login subprocess (e.g. webauto-cli)?",
+        default=auto_default,
+    )
+    if not enable_auto:
+        return None
+
+    if existing:
+        typer.echo(
+            f"  Current command: {shlex.join(existing)}  "
+            "(press Enter to keep)"
+        )
+    typer.echo(
+        "  Examples:\n"
+        "    webauto-cli ~/.config/schwab_cli/scripts/auth_automation.py "
+        "--env ~/.config/schwab_cli/auto_login.env"
+    )
+    while True:
+        entered = typer.prompt(
+            "Auto-login command", default="", show_default=False,
+        ).strip()
+        if entered:
+            try:
+                tokens = shlex.split(entered)
+            except ValueError as e:
+                typer.secho(
+                    f"Could not parse: {e}", fg=typer.colors.RED, err=True,
+                )
+                continue
+            if not tokens:
+                typer.secho(
+                    "Command is empty.", fg=typer.colors.RED, err=True,
+                )
+                continue
+            return tuple(tokens)
+        if existing:
+            return existing
+        typer.secho(
+            "Auto-login command is required when this section is enabled.",
+            fg=typer.colors.RED, err=True,
+        )
+
+
+def _prompt_timeout(existing: int) -> int:
+    """Prompt for ``auto_login_timeout_seconds`` (positive int)."""
+    while True:
+        entered = typer.prompt(
+            "Auto-login timeout in seconds",
+            default=str(existing),
+            show_default=True,
+        ).strip()
+        if not entered:
+            return existing
+        try:
+            value = int(entered)
+        except ValueError:
+            typer.secho(
+                "Must be a positive integer.",
+                fg=typer.colors.RED, err=True,
+            )
+            continue
+        if value <= 0:
+            typer.secho(
+                "Must be a positive integer.",
+                fg=typer.colors.RED, err=True,
+            )
+            continue
+        return value
 
 
 def run(*, dry_run: bool = False) -> None:
@@ -74,7 +168,10 @@ def _run(*, dry_run: bool) -> None:
     try:
         existing = load()
     except ConfigError as e:
-        typer.secho(f"Existing config is unusable: {e}", fg=typer.colors.YELLOW, err=True)
+        typer.secho(
+            f"Existing config is unusable: {e}",
+            fg=typer.colors.YELLOW, err=True,
+        )
         overwrite = typer.confirm("Overwrite with new setup?", default=False)
         if not overwrite:
             raise typer.Exit(code=0)
@@ -96,36 +193,29 @@ def _run(*, dry_run: bool) -> None:
         sensitive=False,
     )
 
-    # Only one auth flow today; setup hardcodes ``code_relay`` and prompts
-    # for its required ``code_relay_url``. When more handlers ship, this
-    # block grows back into a selector — see the comment above.
-    auth_flow = "code_relay"
-    code_relay_url = _prompt_value(
-        "Code Relay URL",
-        existing.code_relay_url if existing else None,
-        sensitive=False,
-        hint="the URL the CLI polls for the captured OAuth code",
+    auth_flow = _prompt_auth_flow(
+        existing.auth_flow if existing else "code_relay",
     )
 
-    auto_default = bool(existing and existing.auto_login_enabled)
-    enable_auto = typer.confirm("Enable automatic login?", default=auto_default)
-
-    username: str | None = None
-    password: str | None = None
-    if enable_auto:
-        username = _prompt_value(
-            "Username",
-            existing.username if existing else None,
+    code_relay_url: str | None = None
+    if auth_flow == "code_relay":
+        code_relay_url = _prompt_value(
+            "Code Relay URL",
+            existing.code_relay_url if existing else None,
             sensitive=False,
-            error_suffix="is required when auto-login is enabled.",
+            hint="the URL the CLI polls for the captured OAuth code",
         )
-        password = _prompt_value(
-            "Password",
-            existing.password if existing else None,
-            sensitive=True,
-            error_suffix="is required when auto-login is enabled.",
-            hint="stored in plain text at ~/.config/schwab_cli/config.json (mode 0600)",
+
+    auto_login_command = _prompt_auto_login_command(
+        existing.auto_login_command if existing else None,
+    )
+
+    if auto_login_command is not None:
+        auto_login_timeout_seconds = _prompt_timeout(
+            existing.auto_login_timeout_seconds if existing else 300,
         )
+    else:
+        auto_login_timeout_seconds = 300
 
     cfg = Config(
         client_id=client_id,
@@ -133,8 +223,8 @@ def _run(*, dry_run: bool) -> None:
         redirect_uri=redirect_uri,
         auth_flow=auth_flow,
         code_relay_url=code_relay_url,
-        username=username,
-        password=password,
+        auto_login_command=auto_login_command,
+        auto_login_timeout_seconds=auto_login_timeout_seconds,
     )
 
     if dry_run:
@@ -146,7 +236,7 @@ def _run(*, dry_run: bool) -> None:
         typer.echo(json.dumps(cfg.to_payload(), indent=2))
         typer.secho("--- not saved ---", fg=typer.colors.YELLOW)
         typer.echo(
-            f"Auto-login: {'enabled' if cfg.auto_login_enabled else 'disabled'} "
+            f"Auto-login: {'enabled' if auto_login_command else 'disabled'} "
             "(dry-run)"
         )
         return
@@ -159,4 +249,6 @@ def _run(*, dry_run: bool) -> None:
 
     typer.echo("")
     typer.secho(f"Saved to {path}.", fg=typer.colors.GREEN)
-    typer.echo(f"Auto-login: {'enabled' if cfg.auto_login_enabled else 'disabled'}")
+    typer.echo(
+        f"Auto-login: {'enabled' if auto_login_command else 'disabled'}"
+    )
