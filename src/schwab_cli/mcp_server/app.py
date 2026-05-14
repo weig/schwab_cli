@@ -31,10 +31,14 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from schwab_cli import config as config_module
 from schwab_cli.api.chains import get_chain
 from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
 from schwab_cli.api.quotes import get_quotes
-from schwab_cli.mcp_server.auth_monitor import AuthMonitor
+from schwab_cli.mcp_server.auth_monitor import (
+    DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
+    AuthMonitor,
+)
 from schwab_cli.mcp_server.logbook import LogBook
 from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
@@ -460,6 +464,9 @@ class SchwabMcpServer:
             self._auth_monitor = AuthMonitor(
                 self._logbook,
                 self._notifier,
+                subprocess_timeout_seconds=_resolve_auth_subprocess_timeout(
+                    self._logbook,
+                ),
                 on_rotation_success=self._on_rotation_success,
             )
             self._auth_monitor.start()
@@ -721,3 +728,30 @@ def _iso_from_epoch(ts: int | None) -> str | None:
         return datetime.utcfromtimestamp(int(ts)).isoformat() + "Z"
     except (ValueError, OSError):
         return None
+
+
+# Outer subprocess kill must be longer than the inner auto-login budget
+# so webauto isn't SIGKILLed mid-flow. The buffer covers the post-webauto
+# OAuth code-for-token exchange + session.json write.
+_AUTH_SUBPROCESS_BUFFER_SECONDS = 30
+
+
+def _resolve_auth_subprocess_timeout(logbook: LogBook) -> int:
+    """Pick the outer ``schwab_cli auth --force`` subprocess timeout.
+
+    Reads ``auto_login_timeout_seconds`` from config and adds a fixed
+    buffer for the post-webauto token exchange. Falls back to the module
+    default if the config can't be loaded — the monitor still runs, just
+    with the old 2-minute envelope.
+    """
+    try:
+        cfg = config_module.load()
+    except config_module.ConfigError as e:
+        logbook.warning(
+            "auth_monitor.config_load_failed", error=str(e),
+            fallback_seconds=DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
+    if cfg is None:
+        return DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
+    return cfg.auto_login_timeout_seconds + _AUTH_SUBPROCESS_BUFFER_SECONDS
