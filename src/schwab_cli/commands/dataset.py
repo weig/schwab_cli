@@ -211,11 +211,24 @@ def status(
     )
     groups = [group] if group else ["volatility"]
     out_rows: list[dict] = []
+    ohlcv_counts: dict[str, int] = {}
     with vol_history.connect() as conn:
         for g in groups:
             out_rows.extend(read_status_rows(
                 conn, group_name=g, tier=tier, source=source, symbols=syms,
             ))
+        # Per-symbol OHLCV cache size — shown alongside the existing
+        # snapshot stats so the operator can see at a glance whether
+        # the daily cron is actually populating ohlcv_daily.
+        for r in conn.execute(
+            "SELECT symbol, count(*) AS n FROM ohlcv_daily GROUP BY symbol"
+        ).fetchall():
+            ohlcv_counts[r["symbol"]] = r["n"]
+
+    # Decorate each row with its cached OHLCV bar count so the JSON
+    # consumer sees it too.
+    for r in out_rows:
+        r["ohlcv_rows"] = ohlcv_counts.get(r["symbol"], 0)
 
     if as_json:
         typer.echo(json.dumps(out_rows, indent=2))
@@ -226,7 +239,7 @@ def status(
         return
 
     cols = ("SYMBOL", "GROUP", "TIER", "SOURCES",
-            "FIRST", "LAST", "DAYS")
+            "FIRST", "LAST", "DAYS", "OHLCV")
     typer.echo(f"{'  '.join(cols)}")
     for r in out_rows:
         typer.echo(
@@ -234,7 +247,8 @@ def status(
             f"{','.join(r['sources']):<35}  "
             f"{r['first_date'] or '—':<10}  "
             f"{r['last_date'] or '—':<10}  "
-            f"{r['n_days']}"
+            f"{r['n_days']:<6}  "
+            f"{r['ohlcv_rows']}"
         )
 
 
