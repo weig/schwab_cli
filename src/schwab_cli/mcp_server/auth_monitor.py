@@ -191,10 +191,17 @@ class AuthMonitor:
         env = {**os.environ, "HEADLESS": "1"}
         # Shell out to our own `auth --force` — single source of
         # truth for the browser flow lives in commands/auth.py.
+        # Console-script renamed schwab_cli → schwab in PR #6.
+        import shutil
+        binary = (
+            shutil.which("schwab")
+            or shutil.which("schwab_cli")
+            or "schwab"
+        )
         started = self._clock()
         try:
             returncode, stderr = await self._subprocess_runner(
-                ["schwab_cli", "auth", "--force"],
+                [binary, "auth", "--force"],
                 env=env,
                 timeout=self._subprocess_timeout,
             )

@@ -528,12 +528,13 @@ def run_install_service(
         write_plist,
     )
 
-    # Resolve the absolute path to schwab_cli so launchd doesn't
-    # depend on $PATH at login time.
-    binary = shutil.which("schwab_cli")
+    # Resolve the absolute path to the binary so launchd doesn't
+    # depend on $PATH at login time. PR #6 renamed schwab_cli → schwab;
+    # legacy `schwab_cli` is checked second for back-compat.
+    binary = shutil.which("schwab") or shutil.which("schwab_cli")
     if not binary:
         typer.secho(
-            "schwab_cli not found on PATH; install it with "
+            "schwab not found on PATH; install it with "
             "`uv tool install --from . schwab_cli` first.",
             fg=typer.colors.RED, err=True,
         )
@@ -703,7 +704,7 @@ def run_install(
 
     if stdio:
         entry: dict[str, Any] = {
-            "command": "schwab_cli",
+            "command": "schwab",
             "args": ["mcp", "--stdio"],
         }
     else:
