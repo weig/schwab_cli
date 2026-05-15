@@ -19,50 +19,40 @@ from schwab_cli.history_spec import (
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.history import render_history, shape_envelope
 from schwab_cli.session import load as load_session
+from datetime import datetime
+
 from schwab_cli.storage import ohlcv_history, vol_history
-from schwab_cli.storage.groups import GROUP_OHLCV
 from schwab_cli.ticker import TickerError, resolve as resolve_ticker
-
-
-def _is_subscribed_for_ohlcv(symbol: str) -> bool:
-    """True when ``symbol`` has an active row in
-    ``subscriptions WHERE group_name = 'ohlcv'``."""
-    try:
-        with vol_history.connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM subscriptions "
-                "WHERE symbol = ? AND group_name = ? "
-                "AND unsubscribed_at IS NULL LIMIT 1",
-                (symbol, GROUP_OHLCV),
-            ).fetchone()
-        return row is not None
-    except Exception:
-        # If the DB isn't reachable, fall back to the API path —
-        # better to hit the network than fail the command.
-        return False
 
 
 def _try_cache_response(
     symbol: str, *, start, end,
 ) -> dict | None:
     """Return a Schwab-shaped response dict when the cache fully
-    covers ``[start, end]``, otherwise ``None`` (caller falls back
-    to the API). Used by ``run`` for daily-interval requests on
-    OHLCV-subscribed symbols.
+    covers ``[start, end]``, otherwise ``None``.
+
+    Used opportunistically on every daily-interval request — the
+    caller falls through to the API on ``None`` and then upserts the
+    response back into the cache via :func:`_cache_api_response`.
     """
     # The cache buckets by NY trading day. parse_range returns UTC,
     # so convert before lookup or we'd ask for the wrong dates near
     # midnight UTC.
     start_date = start.astimezone(_NY).date()
     end_date   = end.astimezone(_NY).date()
-    with vol_history.connect() as conn:
-        if ohlcv_history.gap(
-            conn, symbol=symbol, start=start_date, end=end_date,
-        ) is not None:
-            return None  # cache incomplete — let the API path handle it
-        rows = ohlcv_history.read_range(
-            conn, symbol=symbol, start=start_date, end=end_date,
-        )
+    try:
+        with vol_history.connect() as conn:
+            if ohlcv_history.gap(
+                conn, symbol=symbol, start=start_date, end=end_date,
+            ) is not None:
+                return None  # cache incomplete — let the API path handle it
+            rows = ohlcv_history.read_range(
+                conn, symbol=symbol, start=start_date, end=end_date,
+            )
+    except Exception:
+        # If the DB isn't reachable, fall back to the API — better to
+        # hit the network than fail the command.
+        return None
     return {
         "candles": [
             {"datetime": r["captured_at_ms"],
@@ -73,6 +63,43 @@ def _try_cache_response(
         ],
         "symbol": symbol,
     }
+
+
+def _cache_api_response(symbol: str, response: dict) -> None:
+    """Best-effort upsert every daily candle from an API response into
+    ``ohlcv_daily``. Called after a fallback API fetch so subsequent
+    queries within the same range can be served from the cache.
+
+    Failures here are swallowed — caching is a side effect, the user's
+    rendered output is the contract.
+    """
+    try:
+        candles = []
+        for c in (response.get("candles") or []):
+            dt_ms = c.get("datetime")
+            if dt_ms is None:
+                continue
+            day = (
+                datetime.fromtimestamp(int(dt_ms) / 1000, tz=timezone.utc)
+                        .astimezone(_NY).date().isoformat()
+            )
+            candles.append({
+                "day": day,
+                "open":  float(c["open"]),
+                "high":  float(c["high"]),
+                "low":   float(c["low"]),
+                "close": float(c["close"]),
+                "volume": int(c.get("volume") or 0),
+                "captured_at_ms": int(dt_ms),
+            })
+        if not candles:
+            return
+        with vol_history.connect() as conn:
+            ohlcv_history.upsert_candles(
+                conn, symbol=symbol, candles=candles,
+            )
+    except Exception:
+        pass  # opportunistic — never break the user's command
 
 
 def _client() -> SchwabClient:
@@ -136,13 +163,15 @@ def run(
         code = 2 if getattr(e, "kind", "invalid") == "invalid" else 1
         raise typer.Exit(code=code)
 
-    # Cache-first read: for daily intervals on symbols subscribed to
-    # the ohlcv group, try the local ohlcv_daily store first. Skips
-    # the API entirely when the cache covers the full range; falls
-    # through on partial / missing cache or non-daily intervals.
+    # Cache-first read for daily intervals — regardless of whether
+    # the symbol is in the ohlcv subscription group. The cache is
+    # opportunistically populated by every API fallback below, so
+    # frequent `history` queries naturally build up a local store.
+    # Non-daily intervals (1min/5min/1wk/1mo) skip the cache entirely
+    # — ``ohlcv_daily`` only stores daily candles.
     raw: dict | None = None
-    if (interval.frequency_type == "daily"
-            and _is_subscribed_for_ohlcv(schwab_symbol)):
+    is_daily = interval.frequency_type == "daily"
+    if is_daily:
         raw = _try_cache_response(schwab_symbol, start=start, end=end)
 
     if raw is None:
@@ -160,6 +189,11 @@ def run(
             msg = str(e) if str(e) else type(e).__name__
             typer.secho(msg, fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
+        # Opportunistic backfill: every daily-interval API response
+        # seeds the cache. Subsequent queries within this range
+        # (including for un-subscribed symbols) skip the network.
+        if is_daily:
+            _cache_api_response(schwab_symbol, raw)
 
     envelope = shape_envelope(raw, interval=interval.label)
     if not envelope["candles"]:
