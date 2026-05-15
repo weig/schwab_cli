@@ -33,6 +33,7 @@ from schwab_cli.dataset.store import (
     last_close_at_for_symbol,
 )
 from schwab_cli.dataset.volatility import sample_volatility
+from schwab_cli.storage.groups import GROUP_VOLATILITY
 from schwab_cli.storage.vol_history import record_extended_snapshot
 
 
@@ -46,7 +47,7 @@ def run_indices_update(
     conn: sqlite3.Connection,
     *,
     http_client: httpx.Client | None,
-    group_name: str = "volatility",
+    group_name: str = GROUP_VOLATILITY,
     now_ms: int,
 ) -> dict[str, dict[str, Any]]:
     """Sync index member rows for every active index subscription."""
@@ -244,7 +245,7 @@ def run_volatility_update(
     conn: sqlite3.Connection,
     *,
     client: Any,
-    group_name: str = "volatility",
+    group_name: str = GROUP_VOLATILITY,
     now_ms: int,
     accounts: list[str],
     progress: Callable[[dict], None] | None = None,
