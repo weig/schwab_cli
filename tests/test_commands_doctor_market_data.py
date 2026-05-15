@@ -174,9 +174,11 @@ def test_market_data_stat_renders_longest_per_group(
     assert "Market Data Stat" in out
     assert "OHLCV (1 day)" in out
     assert "77 since 2026-01-26" in out
-    assert "(A)" in out
+    assert "(A)" not in out
     assert "volatility" in out
     assert "43 since 2025-09-22" in out
-    assert "(observed, AMZN)" in out
+    assert "(observed)" in out
+    assert "AMZN" not in out
     assert "148 since 2025-09-22" in out
-    assert "(synthetic, INTC)" in out
+    assert "(synthetic)" in out
+    assert "INTC" not in out
