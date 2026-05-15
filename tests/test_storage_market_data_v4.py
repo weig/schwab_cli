@@ -80,3 +80,38 @@ def test_v4_preserves_volatility_rows(
             (GROUP_VOLATILITY,),
         ).fetchall())
     assert vols == ["AAPL", "MSFT", "TSLA"]
+
+
+def test_connect_renames_legacy_vol_history_db(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "vol_history.db"
+    new    = tmp_path / "market_data.db"
+    _seed_v3_db(legacy)
+    (tmp_path / "vol_history.db-wal").write_bytes(b"")
+    (tmp_path / "vol_history.db-shm").write_bytes(b"")
+    monkeypatch.setattr(vol_history, "storage_dir", lambda: tmp_path)
+    monkeypatch.setattr(vol_history, "db_path", lambda: new)
+
+    with vol_history.connect() as _:
+        pass
+
+    assert new.exists()
+    assert not legacy.exists()
+    assert not (tmp_path / "vol_history.db-wal").exists()
+    assert not (tmp_path / "vol_history.db-shm").exists()
+
+
+def test_connect_refuses_when_both_files_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "vol_history.db"
+    new    = tmp_path / "market_data.db"
+    _seed_v3_db(legacy)
+    _seed_v3_db(new)
+    monkeypatch.setattr(vol_history, "storage_dir", lambda: tmp_path)
+    monkeypatch.setattr(vol_history, "db_path", lambda: new)
+
+    with pytest.raises(RuntimeError, match="both files exist"):
+        with vol_history.connect() as _:
+            pass

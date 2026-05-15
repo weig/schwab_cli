@@ -90,8 +90,38 @@ _NY = ZoneInfo("America/New_York")
 
 
 def db_path() -> Path:
-    """Absolute path to the vol_history SQLite file."""
-    return storage_dir() / "vol_history.db"
+    """Absolute path to the market_data SQLite file.
+
+    Renamed from ``vol_history.db`` in v4 — the same physical store
+    now backs OHLCV, volatility, and any future per-symbol time series.
+    """
+    return storage_dir() / "market_data.db"
+
+
+_LEGACY_DB_NAME = "vol_history.db"
+
+
+def _rename_legacy_db_in_place(new_path: Path) -> None:
+    """Idempotently move legacy ``vol_history.db`` (+ WAL/SHM sidecars)
+    to ``market_data.db``.
+
+    Refuses (``RuntimeError``) if both files exist — silent clobber
+    would destroy data.
+    """
+    legacy = new_path.parent / _LEGACY_DB_NAME
+    if not legacy.exists():
+        return
+    if new_path.exists():
+        raise RuntimeError(
+            f"both files exist — refusing to clobber. "
+            f"legacy: {legacy} | new: {new_path}. "
+            f"resolve manually before retrying."
+        )
+    legacy.rename(new_path)
+    for suffix in ("-wal", "-shm"):
+        side = legacy.with_name(legacy.name + suffix)
+        if side.exists():
+            side.rename(new_path.with_name(new_path.name + suffix))
 
 
 @contextmanager
@@ -103,6 +133,7 @@ def connect() -> Iterator[sqlite3.Connection]:
         path.parent.chmod(0o700)
     except OSError:
         pass
+    _rename_legacy_db_in_place(path)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
