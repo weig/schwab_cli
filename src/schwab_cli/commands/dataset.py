@@ -10,6 +10,7 @@ import json
 import typer
 
 from schwab_cli._doc import doc_option
+from schwab_cli.dataset.scheduler import sleep_until_ny
 from schwab_cli.dataset.update import (
     run_indices_update, run_volatility_update,
 )
@@ -256,6 +257,12 @@ def status(
 def update(
     indices: bool = typer.Option(False, "--indices"),
     group: str = typer.Option(None, "--group"),
+    skip_wait: bool = typer.Option(
+        False, "--skip-wait",
+        help="Skip the NY-17:00-ET wait. For manual reruns. The cron "
+             "normally fires at a fixed UTC+8 local time (earlier than "
+             "NY 17:00 ET in either DST mode) and sleeps until target.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     from schwab_cli.storage import vol_history
@@ -270,6 +277,12 @@ def update(
         typer.secho("update requires --indices or --group <name>",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
+
+    # Anchor the daily market-data run to NY 17:00 ET regardless of
+    # what local time launchd fires us at. Indices runs unaffected
+    # (weekly, no chain-snapshot timing concerns).
+    if group and not skip_wait:
+        sleep_until_ny(17, 0)
 
     now_ms = int(time.time() * 1000)
 
