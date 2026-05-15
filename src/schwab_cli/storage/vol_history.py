@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -80,6 +80,25 @@ CREATE TABLE IF NOT EXISTS ticker_state (
     last_evaluated_at       INTEGER NOT NULL,
     PRIMARY KEY (symbol, group_name)
 );
+
+-- Daily OHLCV cache. Populated by the market-data cron + by the
+-- `history` command on miss. ``day`` is an ISO date anchored to the
+-- America/New_York trading day; PK (symbol, day) makes re-pulls
+-- idempotent.
+CREATE TABLE IF NOT EXISTS ohlcv_daily (
+    symbol         TEXT    NOT NULL,
+    day            TEXT    NOT NULL,
+    open           REAL    NOT NULL,
+    high           REAL    NOT NULL,
+    low            REAL    NOT NULL,
+    close          REAL    NOT NULL,
+    volume         INTEGER NOT NULL,
+    captured_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (symbol, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_day
+    ON ohlcv_daily (symbol, day);
 """
 
 # Allowed values for the `source` column.
@@ -90,8 +109,38 @@ _NY = ZoneInfo("America/New_York")
 
 
 def db_path() -> Path:
-    """Absolute path to the vol_history SQLite file."""
-    return storage_dir() / "vol_history.db"
+    """Absolute path to the market_data SQLite file.
+
+    Renamed from ``vol_history.db`` in v4 — the same physical store
+    now backs OHLCV, volatility, and any future per-symbol time series.
+    """
+    return storage_dir() / "market_data.db"
+
+
+_LEGACY_DB_NAME = "vol_history.db"
+
+
+def _rename_legacy_db_in_place(new_path: Path) -> None:
+    """Idempotently move legacy ``vol_history.db`` (+ WAL/SHM sidecars)
+    to ``market_data.db``.
+
+    Refuses (``RuntimeError``) if both files exist — silent clobber
+    would destroy data.
+    """
+    legacy = new_path.parent / _LEGACY_DB_NAME
+    if not legacy.exists():
+        return
+    if new_path.exists():
+        raise RuntimeError(
+            f"both files exist — refusing to clobber. "
+            f"legacy: {legacy} | new: {new_path}. "
+            f"resolve manually before retrying."
+        )
+    legacy.rename(new_path)
+    for suffix in ("-wal", "-shm"):
+        side = legacy.with_name(legacy.name + suffix)
+        if side.exists():
+            side.rename(new_path.with_name(new_path.name + suffix))
 
 
 @contextmanager
@@ -103,6 +152,7 @@ def connect() -> Iterator[sqlite3.Connection]:
         path.parent.chmod(0o700)
     except OSError:
         pass
+    _rename_legacy_db_in_place(path)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
@@ -181,6 +231,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vol_archive_date "
         "ON vol_snapshots (symbol, archive_date)"
     )
+
+    # v3 → v4: mirror every currently-active volatility subscription
+    # into a parallel ohlcv subscription so the new market-data cron
+    # can iterate the ohlcv group without an explicit user opt-in.
+    # ON CONFLICT DO NOTHING keeps this idempotent.
+    if current is None or current < 4:
+        conn.execute(
+            """
+            INSERT INTO subscriptions
+                (symbol, group_name, source, source_key,
+                 subscribed_at, unsubscribed_at)
+            SELECT symbol, 'ohlcv', source, source_key,
+                   subscribed_at, unsubscribed_at
+            FROM subscriptions
+            WHERE group_name = 'volatility'
+              AND unsubscribed_at IS NULL
+            ON CONFLICT (symbol, group_name, source, source_key)
+            DO NOTHING
+            """
+        )
 
     if current is None:
         conn.execute(

@@ -237,7 +237,8 @@ def test_v1_to_v2_migration_adds_source_column(monkeypatch, tmp_path):
         version = c.execute("SELECT version FROM schema_version").fetchone()[0]
 
     assert row["source"] == "observed"
-    assert version == 3
+    # v3→v4 (mirror volatility→ohlcv) auto-runs on every open.
+    assert version == 4
 
 
 def test_read_isolates_by_symbol(monkeypatch, tmp_path):

@@ -55,7 +55,7 @@ import plistlib
 
 from schwab_cli.dataset.launchd import (
     build_dataset_plist, DatasetPlistSpec,
-    INDICES_LABEL, VOLATILITY_LABEL,
+    INDICES_LABEL, MARKET_DATA_LABEL, VOLATILITY_LABEL,
 )
 
 
@@ -79,6 +79,9 @@ def test_indices_plist_label_and_program_args():
 
 
 def test_volatility_plist_args():
+    """Kind 'volatility' is now an alias for 'market-data' (the v4
+    unified daily job). Label resolves to MARKET_DATA_LABEL but the
+    invoked CLI still uses --group volatility for back-compat."""
     spec = DatasetPlistSpec(
         binary_path="/x/schwab_cli",
         cron="0 22 * * *",
@@ -86,7 +89,7 @@ def test_volatility_plist_args():
     )
     blob = build_dataset_plist(spec)
     parsed = plistlib.loads(blob)
-    assert parsed["Label"] == VOLATILITY_LABEL
+    assert parsed["Label"] == MARKET_DATA_LABEL
     assert parsed["ProgramArguments"] == [
         "/x/schwab_cli", "dataset", "update", "--group", "volatility",
     ]
@@ -116,7 +119,7 @@ def test_plist_uses_launcher_basename_for_friendly_display(monkeypatch, tmp_path
         kind="volatility",
     )
     launcher = _write_launcher(spec)
-    assert launcher.name == "Schwab Volatility Dataset"
+    assert launcher.name == "Schwab Market Data"
     assert launcher.exists()
     # Launcher is executable + execs the real binary with our args.
     body = launcher.read_text()

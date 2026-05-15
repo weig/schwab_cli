@@ -9,7 +9,45 @@ import json
 
 import typer
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from schwab_cli._doc import doc_option
+from schwab_cli.dataset.scheduler import sleep_until_ny
+
+
+_NY_TZ = ZoneInfo("America/New_York")
+_TARGET_NY_HOUR = 17  # market-data cron anchor
+
+
+def _make_notifier():
+    """Indirection so tests can stub the notifier."""
+    from schwab_cli.notify import Notifier
+    return Notifier.from_file()
+
+
+def _now_ny():
+    """Indirection for clock stubbing in tests."""
+    return datetime.now(tz=_NY_TZ)
+
+
+def _check_fire_time_and_alert(notifier) -> bool:
+    """Emit a drift alert when we fired at NY ≥ 17:00 ET. Returns
+    True when the fire-time is OK (safe window), False on drift.
+
+    Skips the sleep_until_ny call on drift (which would no-op anyway)
+    and lets the cron run immediately so the operator at least gets
+    *some* data point — partial data > no data.
+    """
+    now_ny = _now_ny()
+    if now_ny.hour >= _TARGET_NY_HOUR:
+        notifier.emit(
+            "dataset.market_data.fire_time_drift",
+            ny_time=now_ny.strftime("%H:%M %Z"),
+            target_ny_time=f"{_TARGET_NY_HOUR:02d}:00 ET",
+        )
+        return False
+    return True
 from schwab_cli.dataset.update import (
     run_indices_update, run_volatility_update,
 )
@@ -30,16 +68,39 @@ def subscribe(
     targets: list[str] = typer.Argument(None),
     indices: bool = typer.Option(False, "--indices"),
     account: str = typer.Option(None, "--account"),
-    group: str = typer.Option("volatility", "--group"),
+    group: str = typer.Option(
+        "volatility", "--group",
+        help="Data product(s). Comma-separated for multi-product subscribe, "
+             "e.g. `--group=ohlcv,volatility` adds one row per product.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     from schwab_cli.storage import vol_history
+    from schwab_cli.storage.groups import ALL_GROUPS
     from schwab_cli.dataset.store import (
         subscribe_equity, subscribe_index,
     )
     from schwab_cli.dataset.config import (
         load_config_or_default, save_config,
     )
+
+    # Parse the comma-separated --group flag into a list of products.
+    # Empty / whitespace-only entries are dropped. Order is preserved
+    # so the subscribe order matches the user's intent (mostly
+    # cosmetic — the cron treats memberships as a set).
+    group_list = [g.strip() for g in group.split(",") if g.strip()]
+    if not group_list:
+        typer.secho("--group requires at least one product name",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    unknown = [g for g in group_list if g not in ALL_GROUPS]
+    if unknown:
+        typer.secho(
+            f"unknown group(s): {', '.join(unknown)} "
+            f"(expected one of: {', '.join(ALL_GROUPS)})",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=2)
 
     target_str = ",".join(targets) if targets else ""
     if account is not None:
@@ -50,9 +111,14 @@ def subscribe(
         # Persist the account intent so the daily cron picks it up
         # even if today's eager sync fails (no auth, network blip, …).
         cfg = load_config_or_default()
-        cfg.setdefault("accounts", {}).setdefault(group, [])
-        if account not in cfg["accounts"][group]:
-            cfg["accounts"][group].append(account)
+        # v2 schema: accounts live under a single "market_data" bucket
+        # regardless of which product (ohlcv / volatility) drove the
+        # subscribe. The group_name discriminator inside the DB still
+        # tracks per-product subscriptions; this is just where the
+        # account-hash list lives.
+        cfg.setdefault("accounts", {}).setdefault("market_data", [])
+        if account not in cfg["accounts"]["market_data"]:
+            cfg["accounts"]["market_data"].append(account)
             save_config(cfg)
         # Eager-sync positions so `dataset status` shows them right away.
         # Falls back gracefully when auth isn't set up yet.
@@ -85,13 +151,16 @@ def subscribe(
             raise typer.Exit(code=2)
         try:
             with vol_history.connect() as conn:
-                subscribe_index(conn, index_name=target_str.strip().upper(),
-                                group_name=group)
+                for g in group_list:
+                    subscribe_index(
+                        conn, index_name=target_str.strip().upper(),
+                        group_name=g,
+                    )
         except ValueError as e:
             typer.secho(str(e), fg=typer.colors.RED)
             raise typer.Exit(code=2)
         typer.secho(
-            f"subscribed index {target_str!r} → group={group}; "
+            f"subscribed index {target_str!r} → groups={','.join(group_list)}; "
             f"run `dataset update --indices` to populate members.",
             fg=typer.colors.GREEN,
         )
@@ -100,8 +169,12 @@ def subscribe(
     symbols = [s.strip().upper() for s in target_str.split(",") if s.strip()]
     with vol_history.connect() as conn:
         for sym in symbols:
-            subscribe_equity(conn, symbol=sym, group_name=group)
-    typer.secho(f"subscribed: {', '.join(symbols)}", fg=typer.colors.GREEN)
+            for g in group_list:
+                subscribe_equity(conn, symbol=sym, group_name=g)
+    typer.secho(
+        f"subscribed: {', '.join(symbols)} → groups={','.join(group_list)}",
+        fg=typer.colors.GREEN,
+    )
 
 
 def _eager_sync_account(
@@ -159,7 +232,7 @@ def unsubscribe(
 
     if account is not None:
         cfg = load_config_or_default()
-        accounts = cfg.get("accounts", {}).get(group, [])
+        accounts = cfg.get("accounts", {}).get("market_data", [])
         if account in accounts:
             accounts.remove(account)
             save_config(cfg)
@@ -206,11 +279,24 @@ def status(
     )
     groups = [group] if group else ["volatility"]
     out_rows: list[dict] = []
+    ohlcv_counts: dict[str, int] = {}
     with vol_history.connect() as conn:
         for g in groups:
             out_rows.extend(read_status_rows(
                 conn, group_name=g, tier=tier, source=source, symbols=syms,
             ))
+        # Per-symbol OHLCV cache size — shown alongside the existing
+        # snapshot stats so the operator can see at a glance whether
+        # the daily cron is actually populating ohlcv_daily.
+        for r in conn.execute(
+            "SELECT symbol, count(*) AS n FROM ohlcv_daily GROUP BY symbol"
+        ).fetchall():
+            ohlcv_counts[r["symbol"]] = r["n"]
+
+    # Decorate each row with its cached OHLCV bar count so the JSON
+    # consumer sees it too.
+    for r in out_rows:
+        r["ohlcv_rows"] = ohlcv_counts.get(r["symbol"], 0)
 
     if as_json:
         typer.echo(json.dumps(out_rows, indent=2))
@@ -221,7 +307,7 @@ def status(
         return
 
     cols = ("SYMBOL", "GROUP", "TIER", "SOURCES",
-            "FIRST", "LAST", "DAYS")
+            "FIRST", "LAST", "DAYS", "OHLCV")
     typer.echo(f"{'  '.join(cols)}")
     for r in out_rows:
         typer.echo(
@@ -229,7 +315,8 @@ def status(
             f"{','.join(r['sources']):<35}  "
             f"{r['first_date'] or '—':<10}  "
             f"{r['last_date'] or '—':<10}  "
-            f"{r['n_days']}"
+            f"{r['n_days']:<6}  "
+            f"{r['ohlcv_rows']}"
         )
 
 
@@ -237,6 +324,12 @@ def status(
 def update(
     indices: bool = typer.Option(False, "--indices"),
     group: str = typer.Option(None, "--group"),
+    skip_wait: bool = typer.Option(
+        False, "--skip-wait",
+        help="Skip the NY-17:00-ET wait. For manual reruns. The cron "
+             "normally fires at a fixed UTC+8 local time (earlier than "
+             "NY 17:00 ET in either DST mode) and sleeps until target.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     from schwab_cli.storage import vol_history
@@ -251,6 +344,19 @@ def update(
         typer.secho("update requires --indices or --group <name>",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
+
+    # Anchor the daily market-data run to NY 17:00 ET regardless of
+    # what local time launchd fires us at. Indices runs unaffected
+    # (weekly, no chain-snapshot timing concerns).
+    if group:
+        # Drift detection — if we fired at NY ≥ 17:00 (e.g. system
+        # TZ changed after install), sleep_until_ny will no-op and
+        # the run lands at an unexpected chain-snapshot moment.
+        # Surface this as a Telegram alert so the operator notices
+        # without having to run `doctor` manually.
+        fire_ok = _check_fire_time_and_alert(_make_notifier())
+        if not skip_wait and fire_ok:
+            sleep_until_ny(17, 0)
 
     now_ms = int(time.time() * 1000)
 
@@ -280,7 +386,7 @@ def update(
         raise typer.Exit(code=1)
     client = SchwabClient(cfg_full, sess)
     accounts = (load_config_or_default()
-                .get("accounts", {}).get(group, []))
+                .get("accounts", {}).get("market_data", []))
     with vol_history.connect() as conn:
         summary = run_volatility_update(
             conn, client=client, group_name=group,
@@ -351,7 +457,10 @@ def _resolve_cron_kind(indices: bool, group: str | None) -> str:
             typer.secho(f"unknown group {group!r} (only 'volatility' supported)",
                         fg=typer.colors.RED, err=True)
             raise typer.Exit(code=2)
-        return "volatility"
+        # --group volatility installs the unified market-data daily
+        # job — the launchd plist's internal kind is "market-data" in
+        # v4, even though the user-facing flag is unchanged.
+        return "market-data"
     typer.secho("must pass --indices or --group <name>",
                 fg=typer.colors.RED, err=True)
     raise typer.Exit(code=2)
@@ -368,12 +477,28 @@ def cron_install(
         load_config_or_default, save_config, config_path,
     )
 
+    from schwab_cli.dataset.launchd import (
+        INDICES_CRON_LOCAL, MARKET_DATA_CRON_LOCAL,
+        uninstall_legacy_volatility_job,
+    )
+
     kind = _resolve_cron_kind(indices, group)
     cfg = load_config_or_default()
     if not config_path().exists():
         save_config(cfg)
-    cron_expr = (cfg["cron"]["indices"] if kind == "indices"
-                 else cfg["cron"]["groups"][group or "volatility"])
+    # v2: cron expressions live in code (installer-owned), not config.
+    cron_expr = (INDICES_CRON_LOCAL if kind == "indices"
+                 else MARKET_DATA_CRON_LOCAL)
+
+    # Clean up the legacy `com.schwab-cli.dataset.volatility` plist
+    # before installing under the new market-data label so users
+    # upgrading from a pre-rename build don't end up with both
+    # registered with launchd.
+    if kind != "indices":
+        legacy = uninstall_legacy_volatility_job()
+        if legacy is not None:
+            typer.secho(f"removed legacy plist → {legacy}",
+                        fg=typer.colors.YELLOW)
 
     binary = shutil.which("schwab_cli") or "schwab_cli"
     log_file = str(config_path().parent / "dataset.log")
