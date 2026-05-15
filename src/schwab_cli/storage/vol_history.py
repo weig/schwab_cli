@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -181,6 +181,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vol_archive_date "
         "ON vol_snapshots (symbol, archive_date)"
     )
+
+    # v3 → v4: mirror every currently-active volatility subscription
+    # into a parallel ohlcv subscription so the new market-data cron
+    # can iterate the ohlcv group without an explicit user opt-in.
+    # ON CONFLICT DO NOTHING keeps this idempotent.
+    if current is None or current < 4:
+        conn.execute(
+            """
+            INSERT INTO subscriptions
+                (symbol, group_name, source, source_key,
+                 subscribed_at, unsubscribed_at)
+            SELECT symbol, 'ohlcv', source, source_key,
+                   subscribed_at, unsubscribed_at
+            FROM subscriptions
+            WHERE group_name = 'volatility'
+              AND unsubscribed_at IS NULL
+            ON CONFLICT (symbol, group_name, source, source_key)
+            DO NOTHING
+            """
+        )
 
     if current is None:
         conn.execute(
