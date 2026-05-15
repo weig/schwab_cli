@@ -19,9 +19,39 @@ import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import typer
+
+
+_NY_TZ = ZoneInfo("America/New_York")
+_TARGET_NY_HOUR = 17  # market-data cron anchor — see sleep_until_ny
+
+
+def _check_market_data_fire_time(plist_path: Path) -> tuple[bool, str]:
+    """Verify the plist's next fire lands before NY 17:00 so that
+    ``sleep_until_ny`` actually waits. Returns ``(ok, message)``.
+
+    Drift after a system-TZ change is the main thing this catches.
+    """
+    nxt_utc = _next_calendar_interval_run(plist_path)
+    if nxt_utc is None:
+        return True, "(no upcoming fire — plist absent or unparseable)"
+    nxt_ny = nxt_utc.astimezone(_NY_TZ)
+    if nxt_ny.hour >= _TARGET_NY_HOUR:
+        return False, (
+            f"next fire is {nxt_ny.strftime('%H:%M %Z on %Y-%m-%d')} "
+            f"— AFTER {_TARGET_NY_HOUR:02d}:00 ET; sleep_until_ny "
+            f"will NO-OP and the cron will run immediately at the "
+            f"wrong chain-snapshot moment. Likely cause: system "
+            f"timezone changed since `dataset cron install` was run. "
+            f"Fix: schwab_cli dataset cron install --group volatility"
+        )
+    return True, (
+        f"next fire at {nxt_ny.strftime('%H:%M %Z on %Y-%m-%d')} "
+        f"(before 17:00 ET ✓)"
+    )
 
 
 # ---- printing helpers --------------------------------------------------
@@ -149,7 +179,7 @@ def _matches_calendar_entry(dt: datetime, entry: dict) -> bool:
     return True
 
 
-def _last_volatility_run_at(conn) -> datetime | None:
+def _last_market_data_run_at(conn) -> datetime | None:
     """Latest captured_at_ms across vol_snapshots — proxy for "last
     successful volatility cron run". A live ``vol`` invocation also
     counts, which is fine: both are proof the writer side works."""
@@ -398,10 +428,13 @@ _DATASET_INDICES_PLIST = (
     Path.home() / "Library" / "LaunchAgents"
     / "com.schwab-cli.dataset.indices.plist"
 )
-_DATASET_VOL_PLIST = (
+_DATASET_VOL_PLIST = (   # back-compat alias for callers / tests that
+                          # still reference the old name; new code should
+                          # use _DATASET_MARKET_DATA_PLIST.
     Path.home() / "Library" / "LaunchAgents"
-    / "com.schwab-cli.dataset.volatility.plist"
+    / "com.schwab-cli.dataset.market-data.plist"
 )
+_DATASET_MARKET_DATA_PLIST = _DATASET_VOL_PLIST
 
 
 def _check_dataset() -> None:
@@ -478,9 +511,20 @@ def _check_dataset() -> None:
     try:
         with vol_history.connect() as conn2:
             last_indices = _last_indices_run_at(conn2)
-            last_vol = _last_volatility_run_at(conn2)
+            last_vol = _last_market_data_run_at(conn2)
     except Exception:
         pass
+
+    # v2: `cron.market_data` declares which products the daily job
+    # handles (e.g. ["ohlcv", "volatility"]). Surfaced in the bracket
+    # so the operator can see at a glance what's enabled.
+    from schwab_cli.dataset import config as ds_cfg
+    try:
+        _cfg = ds_cfg.load_config_or_default()
+    except Exception:
+        _cfg = {}
+    _products = (_cfg.get("cron", {}) or {}).get("market_data") or []
+    _products_str = ", ".join(_products) if _products else "(none)"
 
     typer.echo("    Cron jobs")
     _print_dataset_cron(
@@ -493,14 +537,26 @@ def _check_dataset() -> None:
         last_run=last_indices,
     )
     _print_dataset_cron(
-        "volatility (daily)",
-        plist=_DATASET_VOL_PLIST,
-        label="com.schwab-cli.dataset.volatility",
+        f"market_data (daily) [{_products_str}]",
+        plist=_DATASET_MARKET_DATA_PLIST,
+        label="com.schwab-cli.dataset.market-data",
         needed=bool(sub_rows),
         not_needed_msg="(no subscriptions yet)",
         install_cmd="schwab_cli dataset cron install --group volatility",
         last_run=last_vol,
     )
+
+    # Drift check — when the system TZ changes after install, the
+    # plist's UTC+old-tz fire hour ends up firing at a different NY
+    # clock moment. sleep_until_ny is robust to "fire early, wait
+    # longer", but it can't recover from "fire AFTER target"; that
+    # branch silently no-ops. Catch it loudly here.
+    if _DATASET_MARKET_DATA_PLIST.exists():
+        md_ok, md_msg = _check_market_data_fire_time(_DATASET_MARKET_DATA_PLIST)
+        if md_ok:
+            _ok("Market-data fire time", md_msg)
+        else:
+            _bad("WARNING — market-data fire time mismatch", md_msg)
 
 
 def _print_dataset_cron(
