@@ -159,9 +159,11 @@ def test_cron_install_indices_writes_plist(runner, monkeypatch, tmp_path):
 
 
 def test_cron_uninstall_volatility(runner, monkeypatch, tmp_path):
+    """`--group volatility` now resolves to the unified market-data
+    plist (v4 rename). Uninstall acts on the new label."""
     monkeypatch.setenv("HOME", str(tmp_path))
     plist = tmp_path / "Library" / "LaunchAgents" / \
-            "com.schwab-cli.dataset.volatility.plist"
+            "com.schwab-cli.dataset.market-data.plist"
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_bytes(b"<plist></plist>")
 
@@ -178,7 +180,7 @@ def test_cron_uninstall_volatility(runner, monkeypatch, tmp_path):
         "dataset", "cron", "uninstall", "--group", "volatility",
     ])
     assert result.exit_code == 0
-    assert captured == ["volatility"]
+    assert captured == ["market-data"]
     assert not plist.exists()
 
 

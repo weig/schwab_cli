@@ -356,7 +356,10 @@ def _resolve_cron_kind(indices: bool, group: str | None) -> str:
             typer.secho(f"unknown group {group!r} (only 'volatility' supported)",
                         fg=typer.colors.RED, err=True)
             raise typer.Exit(code=2)
-        return "volatility"
+        # --group volatility installs the unified market-data daily
+        # job — the launchd plist's internal kind is "market-data" in
+        # v4, even though the user-facing flag is unchanged.
+        return "market-data"
     typer.secho("must pass --indices or --group <name>",
                 fg=typer.colors.RED, err=True)
     raise typer.Exit(code=2)
@@ -375,6 +378,7 @@ def cron_install(
 
     from schwab_cli.dataset.launchd import (
         INDICES_CRON_LOCAL, MARKET_DATA_CRON_LOCAL,
+        uninstall_legacy_volatility_job,
     )
 
     kind = _resolve_cron_kind(indices, group)
@@ -384,6 +388,16 @@ def cron_install(
     # v2: cron expressions live in code (installer-owned), not config.
     cron_expr = (INDICES_CRON_LOCAL if kind == "indices"
                  else MARKET_DATA_CRON_LOCAL)
+
+    # Clean up the legacy `com.schwab-cli.dataset.volatility` plist
+    # before installing under the new market-data label so users
+    # upgrading from a pre-rename build don't end up with both
+    # registered with launchd.
+    if kind != "indices":
+        legacy = uninstall_legacy_volatility_job()
+        if legacy is not None:
+            typer.secho(f"removed legacy plist → {legacy}",
+                        fg=typer.colors.YELLOW)
 
     binary = shutil.which("schwab_cli") or "schwab_cli"
     log_file = str(config_path().parent / "dataset.log")

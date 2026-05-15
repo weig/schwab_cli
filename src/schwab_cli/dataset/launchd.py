@@ -76,8 +76,12 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
     return [out]
 
 
-INDICES_LABEL    = "com.schwab-cli.dataset.indices"
-VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
+INDICES_LABEL           = "com.schwab-cli.dataset.indices"
+MARKET_DATA_LABEL       = "com.schwab-cli.dataset.market-data"
+# Kept for ``uninstall_legacy_volatility_job`` and back-compat refs
+# during the migration window; new code should use MARKET_DATA_LABEL.
+LEGACY_VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
+VOLATILITY_LABEL        = LEGACY_VOLATILITY_LABEL  # back-compat alias
 
 # Hardcoded cron expressions — installer-owned, not user-configurable.
 # Task 13 (Phase 3) will tighten MARKET_DATA_CRON_LOCAL to "0 4 * * *"
@@ -92,8 +96,8 @@ MARKET_DATA_CRON_LOCAL = "0 22 * * *"
 # from ``ProgramArguments[0]``. Using the bare ``schwab_cli``
 # binary makes all three plists look identical there.
 _LAUNCHER_NAME = {
-    "indices":    "Schwab Indices Dataset",
-    "volatility": "Schwab Volatility Dataset",
+    "indices":     "Schwab Indices Dataset",
+    "market-data": "Schwab Market Data",
 }
 
 
@@ -133,6 +137,9 @@ def _write_launcher(spec: DatasetPlistSpec) -> Path:
             f'exec {_shquote(spec.binary_path)} dataset update --indices "$@"'
         )
     else:
+        # market-data daily job — invokes the existing --group volatility
+        # CLI path; the daily run iterates whichever products (ohlcv +
+        # volatility) the dataset.json declares.
         cmd = (
             f'exec {_shquote(spec.binary_path)} '
             f'dataset update --group volatility "$@"'
@@ -158,19 +165,24 @@ def _shquote(s: str) -> str:
 class DatasetPlistSpec:
     binary_path: str
     cron:        str
-    kind:        str  # 'indices' or 'volatility'
+    kind:        str  # 'indices' or 'market-data'
     log_file:    str | None = None
 
     def __post_init__(self) -> None:
-        if self.kind not in ("indices", "volatility"):
+        # 'volatility' accepted as deprecated alias for 'market-data'
+        # during the rename window so callers compiled against the
+        # old constant don't crash. Coerce to the canonical value.
+        if self.kind == "volatility":
+            object.__setattr__(self, "kind", "market-data")
+        if self.kind not in ("indices", "market-data"):
             raise ValueError(
                 f"unsupported plist kind: {self.kind!r} "
-                f"(expected 'indices' or 'volatility')"
+                f"(expected 'indices' or 'market-data')"
             )
 
     @property
     def label(self) -> str:
-        return INDICES_LABEL if self.kind == "indices" else VOLATILITY_LABEL
+        return INDICES_LABEL if self.kind == "indices" else MARKET_DATA_LABEL
 
     @property
     def program_args(self) -> list[str]:
@@ -250,7 +262,9 @@ def install_plist(spec: DatasetPlistSpec) -> Path:
 
 def uninstall_plist(kind: str) -> Path:
     """``launchctl unload`` then remove the plist + launcher."""
-    label = INDICES_LABEL if kind == "indices" else VOLATILITY_LABEL
+    if kind == "volatility":  # deprecated alias for back-compat callers
+        kind = "market-data"
+    label = INDICES_LABEL if kind == "indices" else MARKET_DATA_LABEL
     path = _default_dir() / f"{label}.plist"
     if path.exists():
         subprocess.run(
@@ -262,3 +276,28 @@ def uninstall_plist(kind: str) -> Path:
     if launcher.exists():
         launcher.unlink()
     return path
+
+
+def uninstall_legacy_volatility_job() -> Path | None:
+    """If the legacy ``com.schwab-cli.dataset.volatility`` job is still
+    installed (pre-rename build), bootout + remove its plist. No-op
+    when the plist isn't present. Returns the plist path that was
+    removed, or ``None`` when the no-op branch hit.
+    """
+    import os
+    plist = _default_dir() / f"{LEGACY_VOLATILITY_LABEL}.plist"
+    if not plist.exists():
+        return None
+    subprocess.run(
+        ["launchctl", "bootout",
+         f"gui/{os.getuid()}/{LEGACY_VOLATILITY_LABEL}"],
+        check=False, capture_output=True,
+    )
+    # ``launchctl unload`` is the pre-bootout-era alternative; try it
+    # too so the cleanup works on older macOS releases.
+    subprocess.run(
+        ["launchctl", "unload", str(plist)],
+        check=False, capture_output=True,
+    )
+    plist.unlink(missing_ok=True)
+    return plist
