@@ -213,7 +213,9 @@ def _last_indices_run_at(conn) -> datetime | None:
 
 def _check_install() -> None:
     _section("Install")
-    binary = shutil.which("schwab_cli")
+    # Console-script renamed schwab_cli → schwab in PR #6.
+    # Surface either binary if found; warn only when neither is present.
+    binary = shutil.which("schwab") or shutil.which("schwab_cli")
     if binary:
         _ok("Global install", binary)
     else:

@@ -526,7 +526,14 @@ def cron_install(
             typer.secho(f"removed legacy plist → {legacy}",
                         fg=typer.colors.YELLOW)
 
-    binary = shutil.which("schwab_cli") or "schwab_cli"
+    # Console-script renamed from schwab_cli → schwab in PR #6.
+    # Look up the new name; fall back to `schwab_cli` on PATH for the
+    # rare case someone still has the legacy binary installed.
+    binary = (
+        shutil.which("schwab")
+        or shutil.which("schwab_cli")
+        or "schwab"
+    )
     log_file = str(config_path().parent / "dataset.log")
     spec = DatasetPlistSpec(
         binary_path=binary, cron=cron_expr,
