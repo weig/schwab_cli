@@ -539,13 +539,14 @@ def _check_dataset() -> None:
         last_run=last_indices,
     )
     _print_dataset_cron(
-        f"market_data (daily) [{_products_str}]",
+        "market_data (daily)",
         plist=_DATASET_MARKET_DATA_PLIST,
         label="com.schwab-cli.dataset.market-data",
         needed=bool(sub_rows),
         not_needed_msg="(no subscriptions yet)",
         install_cmd="schwab_cli dataset cron install --group volatility",
         last_run=last_vol,
+        products=_products_str,
     )
 
     # Drift check — when the system TZ changes after install, the
@@ -570,12 +571,20 @@ def _print_dataset_cron(
     not_needed_msg: str,
     install_cmd: str,
     last_run: datetime | None = None,
+    products: str | None = None,
 ) -> None:
-    """Render one cron-job row at the Dataset-subsection indent level."""
+    """Render one cron-job row at the Dataset-subsection indent level.
+
+    When ``products`` is provided (market-data row), it renders as a
+    separate ``group`` sub-line below the title so the plist filename
+    column stays vertically aligned with the indices row above.
+    """
     if plist.exists():
         if _launchctl_loaded(label):
             typer.secho("      ✓ ", fg=typer.colors.GREEN, nl=False)
             typer.echo(f"{label_text:<28} {plist.name}")
+            if products:
+                typer.echo(f"          group     {products}")
             now = datetime.now(tz=timezone.utc)
             next_run = _next_calendar_interval_run(plist, now=now)
             typer.echo(

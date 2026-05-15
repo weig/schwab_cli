@@ -57,18 +57,25 @@ def _stub_db(monkeypatch):
 def test_dataset_section_shows_market_data_with_enabled_products(
     capsys, monkeypatch, tmp_path,
 ):
+    """When the cron is loaded, the product list renders on a `group`
+    sub-line so the plist filename column stays aligned with the
+    indices row. Title no longer carries the bracketed product list."""
     _stub_db(monkeypatch)
     _patch_common(monkeypatch, fire_utc=None)
-    # Ensure the plist path check below doesn't trip on real disk.
-    monkeypatch.setattr(
-        doc, "_DATASET_MARKET_DATA_PLIST", tmp_path / "nonexistent.plist",
-    )
+    plist_path = tmp_path / "com.schwab-cli.dataset.market-data.plist"
+    plist_path.write_bytes(b"<plist></plist>")
+    monkeypatch.setattr(doc, "_DATASET_MARKET_DATA_PLIST", plist_path)
+    monkeypatch.setattr(doc, "_launchctl_loaded", lambda _label: True)
 
     doc._check_dataset()
     out = capsys.readouterr().out
 
-    assert "market_data" in out
-    assert "[ohlcv, volatility]" in out
+    assert "market_data (daily)" in out
+    # Product list is on its own line as `group  …` — title stays
+    # plist-aligned with the indices row.
+    assert "ohlcv, volatility" in out
+    # Old bracketed form must NOT appear inline with the label.
+    assert "(daily) [" not in out
     assert "volatility (daily)" not in out
 
 
