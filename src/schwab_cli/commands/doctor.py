@@ -461,13 +461,48 @@ def _check_dataset() -> None:
                 GROUP BY tier
                 """,
             ).fetchall()
-            last_capture = conn.execute(
+            last_vol_ms = conn.execute(
                 "SELECT MAX(captured_at_ms) FROM vol_snapshots"
             ).fetchone()[0]
+            last_ohlcv_ms = conn.execute(
+                "SELECT MAX(captured_at_ms) FROM ohlcv_daily"
+            ).fetchone()[0]
+            last_capture = max(
+                (x for x in (last_vol_ms, last_ohlcv_ms) if x is not None),
+                default=None,
+            )
             indices_intent = conn.execute(
                 "SELECT COUNT(*) FROM index_subscriptions "
                 "WHERE unsubscribed_at IS NULL"
             ).fetchone()[0]
+            ohlcv_longest = conn.execute(
+                """
+                SELECT symbol, COUNT(*) AS n, MIN(day) AS d
+                FROM ohlcv_daily
+                GROUP BY symbol
+                ORDER BY n DESC, symbol ASC
+                LIMIT 1
+                """,
+            ).fetchone()
+            vol_longest_rows = conn.execute(
+                """
+                SELECT source, symbol, n, first_ms FROM (
+                    SELECT
+                        source,
+                        symbol,
+                        COUNT(*) AS n,
+                        MIN(captured_at_ms) AS first_ms,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY source
+                            ORDER BY COUNT(*) DESC, symbol ASC
+                        ) AS rn
+                    FROM vol_snapshots
+                    GROUP BY source, symbol
+                )
+                WHERE rn = 1
+                ORDER BY source
+                """,
+            ).fetchall()
     except Exception as e:
         _bad("Dataset DB unreachable", str(e))
         return
@@ -495,17 +530,20 @@ def _check_dataset() -> None:
         color = (typer.colors.GREEN if delta_h < 36
                  else typer.colors.YELLOW)
         typer.secho(
-            f"      {marker} volatility samples present  "
+            f"      {marker} market data samples present  "
             f"latest {ts.isoformat(timespec='minutes')} "
             f"({delta_h:.1f}h ago)",
             fg=color,
         )
     else:
         typer.secho(
-            "      ✗ no volatility samples written yet",
+            "      ✗ no market data samples written yet",
             fg=typer.colors.RED,
         )
-        _hint("schwab_cli dataset update --group volatility")
+        _hint("schwab dataset update")
+
+    typer.echo("    Market Data Stat")
+    _print_market_data_stat(ohlcv_longest, vol_longest_rows)
 
     # Compute last-run anchors once — passed into the per-cron renderer.
     last_indices = None
@@ -560,6 +598,37 @@ def _check_dataset() -> None:
             _ok("Market-data fire time", md_msg)
         else:
             _bad("WARNING — market-data fire time mismatch", md_msg)
+
+
+def _print_market_data_stat(ohlcv_row, vol_rows) -> None:
+    """Render per-group longest-series stats.
+
+    For each group/source we show: count, earliest date, and the symbol
+    that owns the longest series — a quick read on cache depth without
+    having to query every ticker.
+    """
+    any_row = False
+    if ohlcv_row and ohlcv_row["n"]:
+        any_row = True
+        typer.echo(
+            f"      {'OHLCV (1 day)':<18} "
+            f"{ohlcv_row['n']:>5} since {ohlcv_row['d']} "
+            f"({ohlcv_row['symbol']})"
+        )
+    if vol_rows:
+        for i, r in enumerate(vol_rows):
+            any_row = True
+            label = "volatility" if i == 0 else ""
+            first_day = datetime.fromtimestamp(
+                r["first_ms"] / 1000, tz=timezone.utc
+            ).date().isoformat()
+            typer.echo(
+                f"      {label:<18} "
+                f"{r['n']:>5} since {first_day} "
+                f"({r['source']}, {r['symbol']})"
+            )
+    if not any_row:
+        _info("(no samples yet)", "")
 
 
 def _print_dataset_cron(

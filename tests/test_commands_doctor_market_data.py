@@ -41,12 +41,19 @@ def _stub_db(monkeypatch):
     fake conn whose execute().fetchall()/fetchone() return safe defaults."""
     import contextlib
     class _FakeConn:
-        def execute(self, *_a, **_k):
-            return _FakeCursor()
+        def execute(self, sql, *_a, **_k):
+            return _FakeCursor(sql)
     class _FakeCursor:
+        def __init__(self, sql=""):
+            self._sql = sql
         def fetchall(self):
             return []
         def fetchone(self):
+            # GROUP BY / ORDER BY queries against an empty DB return no
+            # rows. Aggregate queries (MAX/COUNT) return a single
+            # NULL/0 row; mimic that so callers can do `[0]`.
+            if "GROUP BY symbol" in self._sql or "ROW_NUMBER" in self._sql:
+                return None
             return [0]
     @contextlib.contextmanager
     def _connect():
@@ -114,3 +121,62 @@ def test_doctor_silent_when_fire_time_safely_before_17_00(
     doc._check_dataset()
     out = capsys.readouterr().out
     assert "WARNING" not in out
+
+
+def test_market_data_stat_renders_longest_per_group(
+    capsys, monkeypatch, tmp_path,
+):
+    """The Market Data Stat block shows the longest series per
+    (group, source) so operators can see cache depth at a glance."""
+    import contextlib
+    from datetime import datetime as _dt, timezone as _tz
+
+    first_ms = int(
+        _dt(2025, 9, 22, tzinfo=_tz.utc).timestamp() * 1000
+    )
+
+    class _Row(dict):
+        def __getitem__(self, k):
+            if isinstance(k, int):
+                return list(self.values())[k]
+            return super().__getitem__(k)
+
+    class _Cur:
+        def __init__(self, sql):
+            self.sql = sql
+        def fetchall(self):
+            if "ROW_NUMBER" in self.sql:
+                return [
+                    _Row(source="observed", symbol="AMZN",
+                         n=43, first_ms=first_ms),
+                    _Row(source="synthetic", symbol="INTC",
+                         n=148, first_ms=first_ms),
+                ]
+            return []
+        def fetchone(self):
+            if "FROM ohlcv_daily" in self.sql and "GROUP BY symbol" in self.sql:
+                return _Row(symbol="A", n=77, d="2026-01-26")
+            return [0]
+
+    class _Conn:
+        def execute(self, sql, *_a, **_k):
+            return _Cur(sql)
+
+    @contextlib.contextmanager
+    def _connect():
+        yield _Conn()
+
+    monkeypatch.setattr("schwab_cli.storage.vol_history.connect", _connect)
+    _patch_common(monkeypatch, fire_utc=None)
+
+    doc._check_dataset()
+    out = capsys.readouterr().out
+    assert "Market Data Stat" in out
+    assert "OHLCV (1 day)" in out
+    assert "77 since 2026-01-26" in out
+    assert "(A)" in out
+    assert "volatility" in out
+    assert "43 since 2025-09-22" in out
+    assert "(observed, AMZN)" in out
+    assert "148 since 2025-09-22" in out
+    assert "(synthetic, INTC)" in out
