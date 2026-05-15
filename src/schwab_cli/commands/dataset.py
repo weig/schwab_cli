@@ -9,8 +9,45 @@ import json
 
 import typer
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from schwab_cli._doc import doc_option
 from schwab_cli.dataset.scheduler import sleep_until_ny
+
+
+_NY_TZ = ZoneInfo("America/New_York")
+_TARGET_NY_HOUR = 17  # market-data cron anchor
+
+
+def _make_notifier():
+    """Indirection so tests can stub the notifier."""
+    from schwab_cli.notify import Notifier
+    return Notifier.from_file()
+
+
+def _now_ny():
+    """Indirection for clock stubbing in tests."""
+    return datetime.now(tz=_NY_TZ)
+
+
+def _check_fire_time_and_alert(notifier) -> bool:
+    """Emit a drift alert when we fired at NY ≥ 17:00 ET. Returns
+    True when the fire-time is OK (safe window), False on drift.
+
+    Skips the sleep_until_ny call on drift (which would no-op anyway)
+    and lets the cron run immediately so the operator at least gets
+    *some* data point — partial data > no data.
+    """
+    now_ny = _now_ny()
+    if now_ny.hour >= _TARGET_NY_HOUR:
+        notifier.emit(
+            "dataset.market_data.fire_time_drift",
+            ny_time=now_ny.strftime("%H:%M %Z"),
+            target_ny_time=f"{_TARGET_NY_HOUR:02d}:00 ET",
+        )
+        return False
+    return True
 from schwab_cli.dataset.update import (
     run_indices_update, run_volatility_update,
 )
@@ -281,8 +318,15 @@ def update(
     # Anchor the daily market-data run to NY 17:00 ET regardless of
     # what local time launchd fires us at. Indices runs unaffected
     # (weekly, no chain-snapshot timing concerns).
-    if group and not skip_wait:
-        sleep_until_ny(17, 0)
+    if group:
+        # Drift detection — if we fired at NY ≥ 17:00 (e.g. system
+        # TZ changed after install), sleep_until_ny will no-op and
+        # the run lands at an unexpected chain-snapshot moment.
+        # Surface this as a Telegram alert so the operator notices
+        # without having to run `doctor` manually.
+        fire_ok = _check_fire_time_and_alert(_make_notifier())
+        if not skip_wait and fire_ok:
+            sleep_until_ny(17, 0)
 
     now_ms = int(time.time() * 1000)
 

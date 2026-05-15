@@ -2,13 +2,16 @@
 path waits."""
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch, MagicMock
+from zoneinfo import ZoneInfo
 
 from typer.testing import CliRunner
 
 from schwab_cli.cli import app
 
 
+_NY = ZoneInfo("America/New_York")
 runner = CliRunner()
 
 
@@ -48,8 +51,11 @@ def test_skip_wait_bypasses_sleep_until_ny():
 
 
 def test_default_path_calls_sleep_until_ny():
+    """Default invocation in the safe NY window (< 17:00 ET) waits."""
     stubs = _stubs_for_invoke()
-    with patch("schwab_cli.commands.dataset.sleep_until_ny") as m_sleep:
+    with patch("schwab_cli.commands.dataset.sleep_until_ny") as m_sleep, \
+         patch("schwab_cli.commands.dataset._now_ny",
+               return_value=datetime(2026, 5, 15, 4, 0, tzinfo=_NY)):
         for s in stubs:
             s.start()
         try:
