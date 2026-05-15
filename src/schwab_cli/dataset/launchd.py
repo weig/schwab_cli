@@ -13,6 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 _FIELD_RANGES = [
@@ -307,3 +308,107 @@ def uninstall_legacy_volatility_job() -> Path | None:
     )
     plist.unlink(missing_ok=True)
     return plist
+
+
+# ---- Phase 4: auto-fix plist on fire-time drift ------------------------
+#
+# When the system's timezone changes after install, the launchd plist's
+# fixed `Hour=H_local` ends up firing at a different NY-clock moment.
+# `sleep_until_ny` is robust to "fire early, wait longer"; it can't
+# recover from "fire AFTER target" (it just no-ops). The cron detects
+# that and emits a Telegram alert (`fire_time_drift`). Phase 4 also
+# auto-fixes the plist:
+#
+#   * `_compute_safe_local_hour(system_tz)` — pick a local Hour that
+#     fires at NY <= 16:00 under either DST mode (we anchor on EST,
+#     UTC-5; EDT is automatically safe since it's an hour closer to
+#     UTC, so the fire moves earlier).
+#   * `reinstall_market_data_job(local_hour)` — rewrite the plist
+#     in-place and re-bootstrap via launchctl. Idempotent when the
+#     existing plist already has the right Hour.
+from datetime import datetime, timezone
+
+
+def _compute_safe_local_hour(*, system_tz: ZoneInfo) -> int:
+    """Pick a local Hour that, given the system's TZ, fires at NY-clock
+    ≤ 16:00 in either DST mode.
+
+    Strategy: anchor on **December 15** (NY is in EST, most northern
+    systems are also in standard time). 16:00 NY EST = 21:00 UTC →
+    convert to system TZ → take Hour. The launchd plist's fixed Hour
+    is then DST-invariant on the NY side: when NY flips EST→EDT, the
+    same Hour fires an hour EARLIER in NY clock (still ≤ 17 ET, so
+    sleep_until_ny just waits longer).
+
+    Systems with their own DST flip (e.g. NY itself, EU) are still
+    safe within North-America-style synchronized DST; opposite-
+    hemisphere DST (e.g. Sydney) can land in a small drift window
+    twice a year — those users may need a one-off reinstall.
+    """
+    # Year is irrelevant for the offset extraction; pick a recent one.
+    anchor_utc = datetime(2026, 12, 15, 21, 0, tzinfo=timezone.utc)
+    target_local = anchor_utc.astimezone(system_tz)
+    return target_local.hour
+
+
+def _market_data_plist_path() -> Path:
+    return _default_dir() / f"{MARKET_DATA_LABEL}.plist"
+
+
+def reinstall_market_data_job(*, local_hour: int) -> None:
+    """Rewrite the market-data plist with ``Hour=local_hour`` and
+    re-load it via launchctl bootout + bootstrap. Idempotent — if the
+    plist already has the same Hour, no-op.
+
+    Used by the cron's drift-detection branch to self-heal after a
+    system TZ change. The legacy `install_plist` is the path the
+    operator uses for a fresh install; this one is the "rewrite the
+    fixed Hour and reload" specialization.
+    """
+    import os
+    import plistlib as _plistlib
+
+    plist_path = _market_data_plist_path()
+    if plist_path.exists():
+        try:
+            existing = _plistlib.loads(plist_path.read_bytes())
+            intervals = existing.get("StartCalendarInterval")
+            if isinstance(intervals, dict):
+                intervals = [intervals]
+            if (intervals
+                    and isinstance(intervals, list)
+                    and intervals[0].get("Hour") == local_hour):
+                return  # already correct — nothing to do
+        except Exception:
+            # Corrupt plist? Fall through and overwrite.
+            pass
+
+    # Preserve everything else about the plist; only flip the Hour.
+    plist_dict: dict
+    if plist_path.exists():
+        try:
+            plist_dict = _plistlib.loads(plist_path.read_bytes())
+        except Exception:
+            plist_dict = {}
+    else:
+        plist_dict = {}
+    plist_dict.setdefault("Label", MARKET_DATA_LABEL)
+    plist_dict["StartCalendarInterval"] = [
+        {"Hour": local_hour, "Minute": 0},
+    ]
+    # Keep RunAtLoad on — it's the Phase 3 catch-up safety net.
+    plist_dict.setdefault("RunAtLoad", True)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_bytes(_plistlib.dumps(plist_dict))
+
+    # bootout + bootstrap are the modern equivalents of unload/load.
+    subprocess.run(
+        ["launchctl", "bootout",
+         f"gui/{os.getuid()}/{MARKET_DATA_LABEL}"],
+        check=False, capture_output=True,
+    )
+    subprocess.run(
+        ["launchctl", "bootstrap",
+         f"gui/{os.getuid()}", str(plist_path)],
+        check=False, capture_output=True,
+    )
