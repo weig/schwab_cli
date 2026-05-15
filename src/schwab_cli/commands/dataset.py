@@ -68,16 +68,39 @@ def subscribe(
     targets: list[str] = typer.Argument(None),
     indices: bool = typer.Option(False, "--indices"),
     account: str = typer.Option(None, "--account"),
-    group: str = typer.Option("volatility", "--group"),
+    group: str = typer.Option(
+        "volatility", "--group",
+        help="Data product(s). Comma-separated for multi-product subscribe, "
+             "e.g. `--group=ohlcv,volatility` adds one row per product.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     from schwab_cli.storage import vol_history
+    from schwab_cli.storage.groups import ALL_GROUPS
     from schwab_cli.dataset.store import (
         subscribe_equity, subscribe_index,
     )
     from schwab_cli.dataset.config import (
         load_config_or_default, save_config,
     )
+
+    # Parse the comma-separated --group flag into a list of products.
+    # Empty / whitespace-only entries are dropped. Order is preserved
+    # so the subscribe order matches the user's intent (mostly
+    # cosmetic — the cron treats memberships as a set).
+    group_list = [g.strip() for g in group.split(",") if g.strip()]
+    if not group_list:
+        typer.secho("--group requires at least one product name",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    unknown = [g for g in group_list if g not in ALL_GROUPS]
+    if unknown:
+        typer.secho(
+            f"unknown group(s): {', '.join(unknown)} "
+            f"(expected one of: {', '.join(ALL_GROUPS)})",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=2)
 
     target_str = ",".join(targets) if targets else ""
     if account is not None:
@@ -128,13 +151,16 @@ def subscribe(
             raise typer.Exit(code=2)
         try:
             with vol_history.connect() as conn:
-                subscribe_index(conn, index_name=target_str.strip().upper(),
-                                group_name=group)
+                for g in group_list:
+                    subscribe_index(
+                        conn, index_name=target_str.strip().upper(),
+                        group_name=g,
+                    )
         except ValueError as e:
             typer.secho(str(e), fg=typer.colors.RED)
             raise typer.Exit(code=2)
         typer.secho(
-            f"subscribed index {target_str!r} → group={group}; "
+            f"subscribed index {target_str!r} → groups={','.join(group_list)}; "
             f"run `dataset update --indices` to populate members.",
             fg=typer.colors.GREEN,
         )
@@ -143,8 +169,12 @@ def subscribe(
     symbols = [s.strip().upper() for s in target_str.split(",") if s.strip()]
     with vol_history.connect() as conn:
         for sym in symbols:
-            subscribe_equity(conn, symbol=sym, group_name=group)
-    typer.secho(f"subscribed: {', '.join(symbols)}", fg=typer.colors.GREEN)
+            for g in group_list:
+                subscribe_equity(conn, symbol=sym, group_name=g)
+    typer.secho(
+        f"subscribed: {', '.join(symbols)} → groups={','.join(group_list)}",
+        fg=typer.colors.GREEN,
+    )
 
 
 def _eager_sync_account(
