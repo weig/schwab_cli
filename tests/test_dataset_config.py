@@ -19,9 +19,11 @@ from schwab_cli.dataset.config import (
 
 
 def test_default_config_shape():
-    assert DEFAULT_CONFIG["version"] == 1
-    assert DEFAULT_CONFIG["cron"]["indices"] == "0 6 * * 0"
-    assert DEFAULT_CONFIG["cron"]["groups"]["volatility"] == "0 22 * * *"
+    """v2 shape — installer owns cron expressions, market_data is a
+    product array. See test_dataset_config_v2.py for migration tests."""
+    assert DEFAULT_CONFIG["version"] == 2
+    assert DEFAULT_CONFIG["cron"]["indices"] is True
+    assert DEFAULT_CONFIG["cron"]["market_data"] == ["ohlcv", "volatility"]
     thr = DEFAULT_CONFIG["thresholds"]
     assert thr["position"]["watch_demote_after_calendar_days"] == 30
     assert thr["position"]["frozen_demote_after_calendar_days"] == 90
