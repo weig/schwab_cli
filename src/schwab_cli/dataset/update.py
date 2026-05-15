@@ -33,6 +33,7 @@ from schwab_cli.dataset.store import (
     last_close_at_for_symbol,
 )
 from schwab_cli.dataset.volatility import sample_volatility
+from schwab_cli.storage import ohlcv_history
 from schwab_cli.storage.groups import GROUP_VOLATILITY
 from schwab_cli.storage.vol_history import record_extended_snapshot
 
@@ -241,6 +242,58 @@ _HISTORY_LOOKBACK_DAYS = 110  # ~90 trading days + buffer
 _COMMIT_BATCH = 50
 
 
+def _ensure_ohlcv_cached(
+    conn: sqlite3.Connection,
+    *,
+    client: Any,
+    symbol: str,
+    start,
+    end,
+) -> None:
+    """Pull only the un-cached suffix of ``[start, end]`` for ``symbol``
+    and write candles to ``ohlcv_daily``. No-op when the cache already
+    covers ``end``.
+
+    ``start``/``end`` are ``datetime.date`` (NY trading day). Schwab's
+    ``get_history`` is called with UTC datetimes spanning the missing
+    days; the returned timestamps are bucketed back to NY dates before
+    upsert.
+    """
+    g = ohlcv_history.gap(conn, symbol=symbol, start=start, end=end)
+    if g is None:
+        return
+    fetch_start, fetch_end = g
+    hist = get_history(
+        client, symbol,
+        frequency_type="daily", frequency=1,
+        start=datetime(fetch_start.year, fetch_start.month, fetch_start.day,
+                       tzinfo=timezone.utc),
+        end=datetime(fetch_end.year, fetch_end.month, fetch_end.day,
+                     tzinfo=timezone.utc) + timedelta(days=1),
+    )
+    candles = []
+    for c in (hist.get("candles") or []):
+        dt_ms = c.get("datetime")
+        if dt_ms is None:
+            continue
+        day = (datetime.fromtimestamp(int(dt_ms) / 1000, tz=timezone.utc)
+                       .astimezone(_NY).date().isoformat())
+        try:
+            candles.append({
+                "day": day,
+                "open":  float(c["open"]),
+                "high":  float(c["high"]),
+                "low":   float(c["low"]),
+                "close": float(c["close"]),
+                "volume": int(c.get("volume") or 0),
+                "captured_at_ms": int(dt_ms),
+            })
+        except (KeyError, TypeError, ValueError):
+            # Skip malformed rows rather than failing the whole symbol.
+            continue
+    ohlcv_history.upsert_candles(conn, symbol=symbol, candles=candles)
+
+
 def run_volatility_update(
     conn: sqlite3.Connection,
     *,
@@ -361,19 +414,19 @@ def run_volatility_update(
                     "underlying": {"last": spot_now},
                     "expiries":   expiries,
                 }
-            hist_end = now_dt
-            hist_start = hist_end - timedelta(days=_HISTORY_LOOKBACK_DAYS)
-            hist = get_history(
-                client, sym,
-                frequency_type="daily",
-                frequency=1,
-                start=hist_start,
-                end=hist_end,
+            hist_end_dt   = now_dt
+            hist_start_dt = hist_end_dt - timedelta(days=_HISTORY_LOOKBACK_DAYS)
+            hist_start_ny = hist_start_dt.astimezone(_NY).date()
+            hist_end_ny   = hist_end_dt.astimezone(_NY).date()
+            _ensure_ohlcv_cached(
+                conn, client=client, symbol=sym,
+                start=hist_start_ny, end=hist_end_ny,
             )
-            closes = [
-                c["close"] for c in (hist.get("candles") or [])
-                if c.get("close") is not None
-            ]
+            rows = ohlcv_history.read_range(
+                conn, symbol=sym,
+                start=hist_start_ny, end=hist_end_ny,
+            )
+            closes = [r["close"] for r in rows if r["close"] is not None]
             bundle = sample_volatility(chain=chain, underlying_closes=closes)
         except Exception as e:
             errors.append({"symbol": sym, "error": str(e)})
