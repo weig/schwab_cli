@@ -603,17 +603,16 @@ def _check_dataset() -> None:
 def _print_market_data_stat(ohlcv_row, vol_rows) -> None:
     """Render per-group longest-series stats.
 
-    For each group/source we show: count, earliest date, and the symbol
-    that owns the longest series — a quick read on cache depth without
-    having to query every ticker.
+    For each group/source we show: count and earliest date of the
+    longest series — a quick read on cache depth without having to
+    query every ticker.
     """
     any_row = False
     if ohlcv_row and ohlcv_row["n"]:
         any_row = True
         typer.echo(
             f"      {'OHLCV (1 day)':<18} "
-            f"{ohlcv_row['n']:>5} since {ohlcv_row['d']} "
-            f"({ohlcv_row['symbol']})"
+            f"{ohlcv_row['n']:>5} since {ohlcv_row['d']}"
         )
     if vol_rows:
         for i, r in enumerate(vol_rows):
@@ -625,7 +624,7 @@ def _print_market_data_stat(ohlcv_row, vol_rows) -> None:
             typer.echo(
                 f"      {label:<18} "
                 f"{r['n']:>5} since {first_day} "
-                f"({r['source']}, {r['symbol']})"
+                f"({r['source']})"
             )
     if not any_row:
         _info("(no samples yet)", "")
