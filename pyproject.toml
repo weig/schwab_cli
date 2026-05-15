@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-schwab_cli = "schwab_cli.cli:app"
+schwab = "schwab_cli.cli:app"
 
 [project.optional-dependencies]
 dev = [
