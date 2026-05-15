@@ -80,6 +80,25 @@ CREATE TABLE IF NOT EXISTS ticker_state (
     last_evaluated_at       INTEGER NOT NULL,
     PRIMARY KEY (symbol, group_name)
 );
+
+-- Daily OHLCV cache. Populated by the market-data cron + by the
+-- `history` command on miss. ``day`` is an ISO date anchored to the
+-- America/New_York trading day; PK (symbol, day) makes re-pulls
+-- idempotent.
+CREATE TABLE IF NOT EXISTS ohlcv_daily (
+    symbol         TEXT    NOT NULL,
+    day            TEXT    NOT NULL,
+    open           REAL    NOT NULL,
+    high           REAL    NOT NULL,
+    low            REAL    NOT NULL,
+    close          REAL    NOT NULL,
+    volume         INTEGER NOT NULL,
+    captured_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (symbol, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_day
+    ON ohlcv_daily (symbol, day);
 """
 
 # Allowed values for the `source` column.
