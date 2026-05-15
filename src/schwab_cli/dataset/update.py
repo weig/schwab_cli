@@ -34,7 +34,7 @@ from schwab_cli.dataset.store import (
 )
 from schwab_cli.dataset.volatility import sample_volatility
 from schwab_cli.storage import ohlcv_history
-from schwab_cli.storage.groups import GROUP_VOLATILITY
+from schwab_cli.storage.groups import GROUP_OHLCV, GROUP_VOLATILITY
 from schwab_cli.storage.vol_history import record_extended_snapshot
 
 
@@ -331,13 +331,22 @@ def run_volatility_update(
     # mid-run crash doesn't lose the position reconciliation work.
     conn.commit()
 
-    # Step 2 — build working set. Pass ``now_ms`` so indices members
-    # removed within the last 30 days stay sampled through the exit
+    # Step 2 — build working set as a UNION over every product group
+    # the user has subscribed to. ``group_name`` is the per-row
+    # discriminator — a symbol opts into volatility, ohlcv, or both
+    # independently. Per-symbol dispatch below uses the membership set
+    # to decide which fetches to run.
+    #
+    # ``now_ms`` is forwarded so indices members removed within the
+    # last 30 days stay sampled through the exit
     # (see store.INDICES_GRACE_DAYS_AFTER_REMOVAL).
-    active_rows = list_active_subscriptions(
-        conn, group_name=group_name, now_ms=now_ms,
-    )
-    symbols = sorted({r["symbol"] for r in active_rows})
+    sym_to_groups: dict[str, set[str]] = {}
+    for g in (GROUP_VOLATILITY, GROUP_OHLCV):
+        for r in list_active_subscriptions(
+            conn, group_name=g, now_ms=now_ms,
+        ):
+            sym_to_groups.setdefault(r["symbol"], set()).add(g)
+    symbols = sorted(sym_to_groups.keys())
 
     # Step 3 — partition.
     now_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
@@ -365,8 +374,45 @@ def run_volatility_update(
         if progress is not None:
             progress(evt)
 
+    # The lookback window is the same for every symbol — compute once.
+    hist_end_ny   = now_dt.astimezone(_NY).date()
+    hist_start_ny = (
+        now_dt - timedelta(days=_HISTORY_LOOKBACK_DAYS)
+    ).astimezone(_NY).date()
+
     for i, sym in enumerate(symbols, start=1):
-        state_row = read_ticker_state(conn, symbol=sym, group_name=group_name)
+        groups = sym_to_groups[sym]
+
+        # -------- OHLCV branch ------------------------------------
+        # Independent of vol tier — even FROZEN / WATCH-non-Monday vol
+        # symbols keep getting their daily candles cached so the
+        # series stays continuous and the history command stays fast.
+        # A fetch error here is captured but does NOT prevent the vol
+        # branch from running (each product fails independently).
+        if GROUP_OHLCV in groups:
+            try:
+                _ensure_ohlcv_cached(
+                    conn, client=client, symbol=sym,
+                    start=hist_start_ny, end=hist_end_ny,
+                )
+            except Exception as e:
+                errors.append({
+                    "symbol": sym,
+                    "error": f"ohlcv: {e}",
+                })
+                _emit(event="errored", index=i, total=total, symbol=sym,
+                      error=f"ohlcv: {e}", archive_date=archive_date)
+
+        # -------- Volatility branch -------------------------------
+        # Tier-gated; only runs when the symbol opts into the
+        # volatility group. ohlcv-only symbols skip everything below
+        # (tier check, chain pull, snapshot, tier eval).
+        if GROUP_VOLATILITY not in groups:
+            continue
+
+        state_row = read_ticker_state(
+            conn, symbol=sym, group_name=GROUP_VOLATILITY,
+        )
         if state_row is None:
             tier = "GRACE"
             tier_since = now_ms
@@ -396,7 +442,7 @@ def run_volatility_update(
         _emit(event="start", index=i, total=total, symbol=sym,
               tier=tier, archive_date=archive_date)
 
-        # Step 4 — sample.
+        # Step 4 — sample volatility from live chain.
         try:
             raw = get_chain(client, sym, contract_type="ALL", strike_count=60)
             # Schwab returns ``callExpDateMap``/``putExpDateMap``;
@@ -414,14 +460,14 @@ def run_volatility_update(
                     "underlying": {"last": spot_now},
                     "expiries":   expiries,
                 }
-            hist_end_dt   = now_dt
-            hist_start_dt = hist_end_dt - timedelta(days=_HISTORY_LOOKBACK_DAYS)
-            hist_start_ny = hist_start_dt.astimezone(_NY).date()
-            hist_end_ny   = hist_end_dt.astimezone(_NY).date()
-            _ensure_ohlcv_cached(
-                conn, client=client, symbol=sym,
-                start=hist_start_ny, end=hist_end_ny,
-            )
+            # HV closes come from the cache. For symbols ALSO in the
+            # ohlcv group, the cache was populated above; for
+            # vol-only symbols, fall back to fetching them now.
+            if GROUP_OHLCV not in groups:
+                _ensure_ohlcv_cached(
+                    conn, client=client, symbol=sym,
+                    start=hist_start_ny, end=hist_end_ny,
+                )
             rows = ohlcv_history.read_range(
                 conn, symbol=sym,
                 start=hist_start_ny, end=hist_end_ny,
@@ -474,12 +520,12 @@ def run_volatility_update(
         )
         sampled.append(sym)
 
-        # Step 5 — tier re-evaluation.
+        # Step 5 — tier re-evaluation (volatility group only).
         sources = sources_for_symbol(
-            conn, symbol=sym, group_name=group_name, now_ms=now_ms,
+            conn, symbol=sym, group_name=GROUP_VOLATILITY, now_ms=now_ms,
         )
         last_close_ms = last_close_at_for_symbol(
-            conn, symbol=sym, group_name=group_name
+            conn, symbol=sym, group_name=GROUP_VOLATILITY,
         )
         last_close_dt = (
             datetime.fromtimestamp(last_close_ms / 1000, tz=timezone.utc)
@@ -503,7 +549,7 @@ def run_volatility_update(
             transitions.append({"symbol": sym, "from": old.tier, "to": new.tier})
         write_ticker_state(
             conn,
-            symbol=sym, group_name=group_name,
+            symbol=sym, group_name=GROUP_VOLATILITY,
             tier=new.tier,
             tier_since=int(new.tier_since.timestamp() * 1000),
             consecutive_days_below=new.consecutive_days_below,
