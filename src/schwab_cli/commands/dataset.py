@@ -50,9 +50,14 @@ def subscribe(
         # Persist the account intent so the daily cron picks it up
         # even if today's eager sync fails (no auth, network blip, …).
         cfg = load_config_or_default()
-        cfg.setdefault("accounts", {}).setdefault(group, [])
-        if account not in cfg["accounts"][group]:
-            cfg["accounts"][group].append(account)
+        # v2 schema: accounts live under a single "market_data" bucket
+        # regardless of which product (ohlcv / volatility) drove the
+        # subscribe. The group_name discriminator inside the DB still
+        # tracks per-product subscriptions; this is just where the
+        # account-hash list lives.
+        cfg.setdefault("accounts", {}).setdefault("market_data", [])
+        if account not in cfg["accounts"]["market_data"]:
+            cfg["accounts"]["market_data"].append(account)
             save_config(cfg)
         # Eager-sync positions so `dataset status` shows them right away.
         # Falls back gracefully when auth isn't set up yet.
@@ -159,7 +164,7 @@ def unsubscribe(
 
     if account is not None:
         cfg = load_config_or_default()
-        accounts = cfg.get("accounts", {}).get(group, [])
+        accounts = cfg.get("accounts", {}).get("market_data", [])
         if account in accounts:
             accounts.remove(account)
             save_config(cfg)
@@ -280,7 +285,7 @@ def update(
         raise typer.Exit(code=1)
     client = SchwabClient(cfg_full, sess)
     accounts = (load_config_or_default()
-                .get("accounts", {}).get(group, []))
+                .get("accounts", {}).get("market_data", []))
     with vol_history.connect() as conn:
         summary = run_volatility_update(
             conn, client=client, group_name=group,
@@ -368,12 +373,17 @@ def cron_install(
         load_config_or_default, save_config, config_path,
     )
 
+    from schwab_cli.dataset.launchd import (
+        INDICES_CRON_LOCAL, MARKET_DATA_CRON_LOCAL,
+    )
+
     kind = _resolve_cron_kind(indices, group)
     cfg = load_config_or_default()
     if not config_path().exists():
         save_config(cfg)
-    cron_expr = (cfg["cron"]["indices"] if kind == "indices"
-                 else cfg["cron"]["groups"][group or "volatility"])
+    # v2: cron expressions live in code (installer-owned), not config.
+    cron_expr = (INDICES_CRON_LOCAL if kind == "indices"
+                 else MARKET_DATA_CRON_LOCAL)
 
     binary = shutil.which("schwab_cli") or "schwab_cli"
     log_file = str(config_path().parent / "dataset.log")

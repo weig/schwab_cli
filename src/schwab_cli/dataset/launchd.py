@@ -79,6 +79,14 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
 INDICES_LABEL    = "com.schwab-cli.dataset.indices"
 VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
 
+# Hardcoded cron expressions — installer-owned, not user-configurable.
+# Task 13 (Phase 3) will tighten MARKET_DATA_CRON_LOCAL to "0 4 * * *"
+# (UTC+8 04:00, earlier than NY 17:00 ET) once sleep_until_ny is wired
+# in. For Phase 0 these match the v1 cfg defaults so behavior is
+# unchanged.
+INDICES_CRON_LOCAL     = "0 6 * * 0"
+MARKET_DATA_CRON_LOCAL = "0 22 * * *"
+
 # Launcher filenames are what macOS shows in
 # System Settings → Login Items, since the displayed name is read
 # from ``ProgramArguments[0]``. Using the bare ``schwab_cli``
