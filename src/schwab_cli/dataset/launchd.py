@@ -84,12 +84,12 @@ LEGACY_VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
 VOLATILITY_LABEL        = LEGACY_VOLATILITY_LABEL  # back-compat alias
 
 # Hardcoded cron expressions — installer-owned, not user-configurable.
-# Task 13 (Phase 3) will tighten MARKET_DATA_CRON_LOCAL to "0 4 * * *"
-# (UTC+8 04:00, earlier than NY 17:00 ET) once sleep_until_ny is wired
-# in. For Phase 0 these match the v1 cfg defaults so behavior is
-# unchanged.
-INDICES_CRON_LOCAL     = "0 6 * * 0"
-MARKET_DATA_CRON_LOCAL = "0 22 * * *"
+# The market-data job's actual run time is anchored to NY 17:00 ET by
+# ``sleep_until_ny`` inside the Python entry point — launchd only
+# needs to fire EARLIER than the NY target in either DST mode.
+# UTC+8 04:00 ≤ both NY 17:00 EDT (= 05:00 UTC+8) and 17:00 EST (= 06:00 UTC+8).
+INDICES_CRON_LOCAL     = "0 6 * * 0"   # Sunday 06:00 local — weekly indices sync
+MARKET_DATA_CRON_LOCAL = "0 4 * * *"   # daily 04:00 local — sleeps until NY 17:00 ET
 
 # Launcher filenames are what macOS shows in
 # System Settings → Login Items, since the displayed name is read
@@ -215,7 +215,13 @@ def build_dataset_plist(
         "Label":                 spec.label,
         "ProgramArguments":      program_args,
         "StartCalendarInterval": crontab_to_calendar_interval(spec.cron),
-        "RunAtLoad":             False,
+        # market-data fires once a day at a TZ-fixed local time. If
+        # the laptop was off when that time passed, RunAtLoad lets the
+        # job pick up on next boot — sleep_until_ny's catch-up branch
+        # then either runs immediately (already past 17:00 ET) or waits
+        # until target. Indices is weekly; RunAtLoad there would cause
+        # a spurious sync every reload, so it stays off.
+        "RunAtLoad":             spec.kind == "market-data",
         "KeepAlive":             False,
     }
     if spec.log_file:
