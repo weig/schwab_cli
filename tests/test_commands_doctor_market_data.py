@@ -61,12 +61,12 @@ def _stub_db(monkeypatch):
     monkeypatch.setattr("schwab_cli.storage.vol_history.connect", _connect)
 
 
-def test_dataset_section_shows_scheduler_row_with_children(
+def test_data_sync_service_section_renders_scheduler_and_scope(
     capsys, monkeypatch, tmp_path,
 ):
-    """The unified scheduler renders one row listing the children
-    it pspawns (market-data, accounts, indices). No more per-job
-    rows — the per-job plists are gone."""
+    """The Data Sync Service section is now top-level (separate from
+    Dataset). Renders the scheduler plist row + per-task Sync Scope
+    rows with last/next run."""
     _stub_db(monkeypatch)
     _patch_common(monkeypatch, fire_utc=None)
     plist_path = tmp_path / "com.schwab-cli.scheduler.plist"
@@ -74,24 +74,46 @@ def test_dataset_section_shows_scheduler_row_with_children(
     monkeypatch.setattr(doc, "_SCHEDULER_PLIST", plist_path)
     monkeypatch.setattr(doc, "_launchctl_loaded", lambda _label: True)
 
+    doc._check_data_sync_service()
+    out = capsys.readouterr().out
+
+    assert "Data Sync Service" in out
+    assert "Scheduler" in out
+    assert "Sync Scope" in out
+    # Per-task rows present.
+    for task in ("OHLCV", "Volatility", "Indices", "Account"):
+        assert task in out
+        # Each task has its own last/next pair.
+    assert out.count("last run") >= 4
+    assert out.count("next run") >= 4
+    # Old per-task cron rows (from the previous design) are gone.
+    assert "scheduler (daily)" not in out
+    assert "indices (weekly)" not in out
+
+
+def test_dataset_section_drops_last_run_subsection(
+    capsys, monkeypatch, tmp_path,
+):
+    """The Dataset section no longer carries a 'Last run' line —
+    last-run lives per-task under Sync Scope now."""
+    _stub_db(monkeypatch)
+    _patch_common(monkeypatch, fire_utc=None)
+
     doc._check_dataset()
     out = capsys.readouterr().out
 
-    assert "scheduler (daily)" in out
-    # Children list reflects the updater registry.
-    assert "market-data" in out
-    assert "accounts" in out
-    assert "indices" in out
-    # Old per-job rows must NOT appear.
-    assert "market_data (daily)" not in out
-    assert "indices (weekly)" not in out
+    assert "Last run" not in out
+    # Subscriptions / Tiers / Market Data Stat remain.
+    assert "Subscriptions" in out
+    assert "Tiers" in out
+    assert "Market Data Stat" in out
 
 
 def test_doctor_warns_when_fire_time_falls_after_ny_17_00(
     capsys, monkeypatch, tmp_path,
 ):
     """Plist fires too late → sleep_until_ny would no-op → contract
-    broken. Doctor must call this out."""
+    broken. Doctor must call this out (inline under Scheduler row)."""
     plist_path = tmp_path / "com.schwab-cli.scheduler.plist"
     plist_path.write_bytes(b"<plist></plist>")  # presence is what matters
 
@@ -99,11 +121,13 @@ def test_doctor_warns_when_fire_time_falls_after_ny_17_00(
     _stub_db(monkeypatch)
     _patch_common(monkeypatch, fire_utc=fire_ny.astimezone(timezone.utc))
     monkeypatch.setattr(doc, "_SCHEDULER_PLIST", plist_path)
+    monkeypatch.setattr(doc, "_launchctl_loaded", lambda _label: True)
 
-    doc._check_dataset()
+    doc._check_data_sync_service()
     out = capsys.readouterr().out
 
-    assert "WARNING" in out
+    # Drift message body mentions the 17:00 ET anchor and the
+    # autofix command.
     assert "17:00 ET" in out
     assert "dataset cron install" in out
 
@@ -118,10 +142,12 @@ def test_doctor_silent_when_fire_time_safely_before_17_00(
     _stub_db(monkeypatch)
     _patch_common(monkeypatch, fire_utc=fire_ny.astimezone(timezone.utc))
     monkeypatch.setattr(doc, "_SCHEDULER_PLIST", plist_path)
+    monkeypatch.setattr(doc, "_launchctl_loaded", lambda _label: True)
 
-    doc._check_dataset()
+    doc._check_data_sync_service()
     out = capsys.readouterr().out
-    assert "WARNING" not in out
+    # On-time fire — message should contain "before 17:00 ET".
+    assert "before 17:00 ET" in out
 
 
 def test_market_data_stat_renders_longest_per_group(
