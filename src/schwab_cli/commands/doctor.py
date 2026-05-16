@@ -530,49 +530,19 @@ def _check_dataset() -> None:
     for tier in ("ACTIVE", "GRACE", "WATCH", "FROZEN"):
         typer.echo(f"      {tier:<24} {tier_counts.get(tier, 0)}")
 
-    typer.echo("    Last run")
-    if last_capture:
-        ts = datetime.fromtimestamp(last_capture / 1000, tz=timezone.utc)
-        delta_h = (time.time() - last_capture / 1000) / 3600
-        marker = "✓" if delta_h < 36 else "⚠"
-        color = (typer.colors.GREEN if delta_h < 36
-                 else typer.colors.YELLOW)
-        typer.secho(
-            f"      {marker} market data samples present  "
-            f"latest {ts.isoformat(timespec='minutes')} "
-            f"({delta_h:.1f}h ago)",
-            fg=color,
-        )
-    else:
-        typer.secho(
-            "      ✗ no market data samples written yet",
-            fg=typer.colors.RED,
-        )
-        _hint("schwab dataset update")
-
     typer.echo("    Market Data Stat")
     _print_market_data_stat(ohlcv_longest, vol_longest_rows)
 
-    # Pick the freshest per-job timestamp as the scheduler's
-    # last-run anchor. The unified job pspawns market-data + indices
-    # + accounts; whichever wrote to the DB most recently is the
-    # most relevant signal of "the scheduler ran".
-    last_run_ts = None
-    try:
-        with vol_history.connect() as conn2:
-            last_indices = _last_indices_run_at(conn2)
-            last_vol = _last_market_data_run_at(conn2)
-        last_run_ts = max(
-            (t for t in (last_indices, last_vol) if t is not None),
-            default=None,
-        )
-    except Exception:
-        pass
 
-    typer.echo("    Cron jobs")
-    _print_scheduler_cron(
-        plist=_SCHEDULER_PLIST, last_run=last_run_ts,
-    )
+def _check_data_sync_service() -> None:
+    """Top-level section showing the unified scheduler plist + each
+    child task's last/next run. Replaces the prior per-task cron
+    rows; the tasks aren't independent cron jobs anymore, they're
+    children pspawned by the one scheduler."""
+    _section("Data Sync Service")
+
+    typer.echo("    Scheduler")
+    _print_scheduler_block(_SCHEDULER_PLIST)
 
     # Stale per-job plists from a pre-scheduler install. If any are
     # still on disk, the operator has DOUBLE jobs — scheduler pspawns
@@ -586,60 +556,122 @@ def _check_dataset() -> None:
             "re-run `schwab dataset cron install` to scrub it",
         )
 
+    typer.echo("    Sync Scope")
+    _print_sync_scope()
+
     # Last-run marker from the unified scheduler. ``last_run.json``
-    # captures per-job exit codes so a Telegram-down failure is still
-    # visible offline. Surface whatever the most recent run wrote.
+    # captures per-job exit codes so a Telegram-down failure is
+    # still visible offline. Surface whatever the most recent run
+    # wrote.
     _print_last_run_marker()
 
-    # Drift check — when the system TZ changes after install, the
-    # plist's UTC+old-tz fire hour ends up firing at a different NY
-    # clock moment. sleep_until_ny is robust to "fire early, wait
-    # longer", but it can't recover from "fire AFTER target"; that
-    # branch silently no-ops. Catch it loudly here.
-    if _SCHEDULER_PLIST.exists():
-        md_ok, md_msg = _check_market_data_fire_time(_SCHEDULER_PLIST)
-        if md_ok:
-            _ok("Scheduler fire time", md_msg)
-        else:
-            _bad("WARNING — scheduler fire time mismatch", md_msg)
 
-
-def _print_scheduler_cron(
-    *, plist: Path, last_run: datetime | None,
-) -> None:
-    """Render the single unified scheduler row. Reports each child
-    updater's name so the operator sees what the one plist actually
-    spawns."""
-    from schwab_cli.dataset.updaters import UPDATERS
-
-    children = ", ".join(u.name for u in UPDATERS)
+def _print_scheduler_block(plist: Path) -> None:
+    """Render the scheduler row: plist status + next-fire time +
+    drift check inline. No per-task data here — the tasks are
+    listed separately under Sync Scope."""
     if not plist.exists():
         typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
-        typer.echo(f"{'scheduler (daily)':<28} not installed")
+        typer.echo("not installed")
         _hint("schwab dataset cron install")
         return
     if not _launchctl_loaded("com.schwab-cli.scheduler"):
         typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
-        typer.echo(
-            f"{'scheduler (daily)':<28} plist present but not loaded"
-        )
+        typer.echo("plist present but not loaded")
         typer.secho(f"        → launchctl load -w {plist}",
                     fg=typer.colors.YELLOW)
         return
 
     typer.secho("      ✓ ", fg=typer.colors.GREEN, nl=False)
-    typer.echo(f"{'scheduler (daily)':<28} {plist.name}")
-    typer.echo(f"          children {children}")
+    typer.echo(f"{plist.name}")
     now = datetime.now(tz=timezone.utc)
     next_run = _next_calendar_interval_run(plist, now=now)
     typer.echo(
-        f"          last run "
-        f"{_format_relative_time(last_run, now=now)}"
-    )
-    typer.echo(
-        f"          next run "
+        f"          next fire   "
         f"{_format_relative_time(next_run, now=now)}"
     )
+    # Inline fire-time drift check — when the system TZ changes
+    # after install, the plist's UTC+old-tz fire hour ends up firing
+    # at a different NY-clock moment. sleep_until_ny can recover
+    # from "fire early" but not "fire AFTER target" (silent no-op).
+    md_ok, md_msg = _check_market_data_fire_time(plist)
+    if md_ok:
+        typer.secho(f"                      ✓ {md_msg}",
+                    fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"                      ✗ {md_msg}",
+                    fg=typer.colors.RED)
+
+
+# Each scheduler child anchors to a NY hour internally via
+# sleep_until_ny. ``next run`` for the child is the next time that
+# hour passes — not when launchd fires the scheduler.
+_TASK_ANCHOR_HOUR = {
+    "OHLCV":      17,
+    "Volatility": 17,
+    "Indices":    18,
+    "Account":    17,
+}
+
+
+def _print_sync_scope() -> None:
+    """One row per data-sync task: last write to the relevant table
+    + next NY-anchored run time."""
+    from schwab_cli.storage import vol_history
+
+    last_by_task: dict[str, datetime | None] = {
+        "OHLCV": None, "Volatility": None,
+        "Indices": None, "Account": None,
+    }
+    try:
+        with vol_history.connect() as conn:
+            ohlcv_ms = conn.execute(
+                "SELECT MAX(captured_at_ms) FROM ohlcv_daily"
+            ).fetchone()[0]
+            vol_ms = conn.execute(
+                "SELECT MAX(captured_at_ms) FROM vol_snapshots"
+            ).fetchone()[0]
+            acct_ms = conn.execute(
+                "SELECT MAX(captured_at_ms) FROM account_nav_daily"
+            ).fetchone()[0]
+            last_by_task["OHLCV"] = _ms_to_dt(ohlcv_ms)
+            last_by_task["Volatility"] = _ms_to_dt(vol_ms)
+            last_by_task["Account"] = _ms_to_dt(acct_ms)
+            last_by_task["Indices"] = _last_indices_run_at(conn)
+    except Exception as e:
+        _bad("Sync Scope: DB unreachable", str(e))
+        return
+
+    now = datetime.now(tz=timezone.utc)
+    for task, hour in _TASK_ANCHOR_HOUR.items():
+        last = last_by_task[task]
+        next_run = _next_ny_hour(hour, now=now)
+        typer.echo(
+            f"      {task:<13} last run {_format_relative_time(last, now=now)}"
+        )
+        typer.echo(
+            f"                    next run {_format_relative_time(next_run, now=now)}"
+        )
+
+
+def _ms_to_dt(ms: int | None) -> datetime | None:
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+
+
+def _next_ny_hour(hour: int, *, now: datetime) -> datetime:
+    """Next occurrence of NY hour ``H:00`` strictly after ``now``.
+    Used for per-task next-run estimates — each scheduler child
+    sleep_until_ny to its anchor hour, so the actual work time is
+    independent of when launchd fires the scheduler."""
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    now_ny = now.astimezone(ny)
+    target = now_ny.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now_ny:
+        target += timedelta(days=1)
+    return target.astimezone(timezone.utc)
 
 
 def _print_last_run_marker() -> None:
@@ -764,4 +796,5 @@ def run() -> None:
     _check_auth()
     _check_telegram()
     _check_dataset()
+    _check_data_sync_service()
     typer.echo("")
