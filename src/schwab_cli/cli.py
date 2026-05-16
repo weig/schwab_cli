@@ -13,6 +13,7 @@ from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import mcp as mcp_cmd
 from schwab_cli.commands import notify as notify_cmd
+from schwab_cli.commands import performance as performance_cmd
 from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import order as order_cmd
 from schwab_cli.commands import profile as profile_cmd
@@ -269,6 +270,31 @@ def history(
         interval_str=interval_str,
         as_json=as_json,
         as_md=as_md,
+    )
+
+
+@app.command(
+    "performance",
+    help=(
+        "Time-weighted return (TWR) for account(s) over a date range "
+        "with SPX / COMP / RUT comparison. Default range is YTD."
+    ),
+)
+def performance(
+    range_str: str = typer.Option(
+        "ytd", "--range",
+        help="Date range: '<start>..<end>' or one of: ytd, mtd, wtd. "
+             "Endpoints: YYYYMMDD, -Nu (u in d/w/mo/y), or 'now'.",
+    ),
+    account: str = typer.Option(
+        None, "--account",
+        help="Filter to one account (full number or last-4 suffix).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    doc: bool = doc_option(),
+) -> None:
+    performance_cmd.run(
+        range_str=range_str, account=account, as_json=as_json,
     )
 
 
