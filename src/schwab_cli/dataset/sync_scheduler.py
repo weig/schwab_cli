@@ -48,6 +48,11 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 
+from schwab_cli.dataset.updaters import UPDATERS
+
+# Re-exports — name tokens consumed by tests and Telegram alert
+# formatting. Single source of truth lives in ``updaters.py``; this
+# layer just publishes them for convenience.
 JOB_MARKET_DATA = "market-data"
 JOB_ACCOUNTS    = "accounts"
 JOB_INDICES     = "indices"
@@ -232,20 +237,13 @@ def _ensure_token_valid(notifier) -> None:
 def _job_commands(
     binary: str, *, skip_wait: bool,
 ) -> list[tuple[str, list[str]]]:
-    common = ["--skip-wait"] if skip_wait else []
+    """Build ``[(name, argv), ...]`` from the pluggable
+    :data:`schwab_cli.dataset.updaters.UPDATERS` registry. Adding a
+    new daily task means appending one entry to that list — no edits
+    to this file."""
     return [
-        (JOB_MARKET_DATA, [
-            binary, "dataset", "update", "--group", "volatility", *common,
-        ]),
-        (JOB_ACCOUNTS, [
-            binary, "dataset", "accounts", "snapshot", *common,
-        ]),
-        (JOB_INDICES, [
-            binary, "dataset", "update", "--indices",
-            "--max-age-days", "6",
-            "--anchor-hour", "18",
-            *common,
-        ]),
+        (u.name, u.spawn_argv(binary=binary, skip_wait=skip_wait))
+        for u in UPDATERS
     ]
 
 

@@ -78,7 +78,7 @@ from schwab_cli.dataset.update import (
     run_indices_update, run_volatility_update,
 )
 from schwab_cli.dataset.launchd import (
-    DatasetPlistSpec, install_plist, uninstall_plist,
+    DatasetPlistSpec, install_plist,
 )
 
 
@@ -516,106 +516,34 @@ cron_app = typer.Typer(help="Install / uninstall launchd scheduled jobs.")
 app.add_typer(cron_app, name="cron")
 
 
-def _resolve_cron_kind(indices: bool, group: str | None) -> str:
-    if indices and group:
-        typer.secho("pass --indices OR --group, not both",
-                    fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
-    if indices:
-        return "indices"
-    if group:
-        if group != "volatility":
-            typer.secho(f"unknown group {group!r} (only 'volatility' supported)",
-                        fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=2)
-        # --group volatility installs the unified market-data daily
-        # job — the launchd plist's internal kind is "market-data" in
-        # v4, even though the user-facing flag is unchanged.
-        return "market-data"
-    typer.secho("must pass --indices or --group <name>",
-                fg=typer.colors.RED, err=True)
-    raise typer.Exit(code=2)
-
-
-@cron_app.command("install", help="Write the plist and load it.")
-def cron_install(
-    indices: bool = typer.Option(False, "--indices"),
-    group: str = typer.Option(None, "--group"),
-    accounts: bool = typer.Option(
-        False, "--accounts",
-        help="Install the legacy accounts-only NAV cron. Prefer "
-             "--scheduler for the unified daily fan-out.",
-    ),
-    scheduler: bool = typer.Option(
-        False, "--scheduler",
-        help="Install the unified `Schwab Data Sync Service` — one "
-             "plist that pspawns market-data + accounts + indices in "
-             "parallel. Removes the three per-job plists if present.",
-    ),
-    doc: bool = doc_option(),
-) -> None:
+@cron_app.command(
+    "install",
+    help=("Install the unified Schwab Data Sync Service plist. "
+          "Idempotent: any pre-existing Schwab plists in "
+          "LaunchAgents are removed first so the scheduler is the "
+          "only registered cron after install."),
+)
+def cron_install(doc: bool = doc_option()) -> None:
     import shutil
     from schwab_cli.dataset.config import (
         load_config_or_default, save_config, config_path,
     )
-
     from schwab_cli.dataset.launchd import (
-        ACCOUNTS_CRON_LOCAL,
-        INDICES_CRON_LOCAL, MARKET_DATA_CRON_LOCAL,
-        SCHEDULER_CRON_LOCAL,
-        uninstall_legacy_volatility_job,
-        uninstall_per_job_plists,
+        SCHEDULER_CRON_LOCAL, uninstall_all_schwab_plists,
     )
 
-    flags_set = sum(1 for f in (indices, bool(group), accounts, scheduler) if f)
-    if flags_set > 1:
-        typer.secho(
-            "pass exactly one of --indices / --group / --accounts / "
-            "--scheduler",
-            fg=typer.colors.RED, err=True,
-        )
-        raise typer.Exit(code=2)
-
-    if scheduler:
-        kind = "scheduler"
-    elif accounts:
-        kind = "accounts"
-    else:
-        kind = _resolve_cron_kind(indices, group)
     cfg = load_config_or_default()
     if not config_path().exists():
         save_config(cfg)
-    # v2: cron expressions live in code (installer-owned), not config.
-    if kind == "indices":
-        cron_expr = INDICES_CRON_LOCAL
-    elif kind == "accounts":
-        cron_expr = ACCOUNTS_CRON_LOCAL
-    elif kind == "scheduler":
-        cron_expr = SCHEDULER_CRON_LOCAL
-        # Single-job migration: rip out the three pre-scheduler plists
-        # so we don't run them twice (once from their old plist, once
-        # via the scheduler's pspawn). Idempotent — no-op when they
-        # aren't installed.
-        removed = uninstall_per_job_plists()
-        for path in removed:
-            typer.secho(f"removed legacy plist → {path}",
-                        fg=typer.colors.YELLOW)
-    else:
-        cron_expr = MARKET_DATA_CRON_LOCAL
 
-    # Clean up the legacy `com.schwab-cli.dataset.volatility` plist
-    # before installing under the new market-data label so users
-    # upgrading from a pre-rename build don't end up with both
-    # registered with launchd.
-    if kind != "indices":
-        legacy = uninstall_legacy_volatility_job()
-        if legacy is not None:
-            typer.secho(f"removed legacy plist → {legacy}",
-                        fg=typer.colors.YELLOW)
+    # Clean slate — wipes the unified plist itself (so re-install
+    # picks up any spec change), every legacy per-job plist
+    # (indices / market-data / accounts), and the pre-rename
+    # `com.schwab-cli.dataset.volatility` plist if it's still there.
+    removed = uninstall_all_schwab_plists()
+    for path in removed:
+        typer.secho(f"removed → {path}", fg=typer.colors.YELLOW)
 
-    # Console-script renamed from schwab_cli → schwab in PR #6.
-    # Look up the new name; fall back to `schwab_cli` on PATH for the
-    # rare case someone still has the legacy binary installed.
     binary = (
         shutil.which("schwab")
         or shutil.which("schwab_cli")
@@ -623,32 +551,27 @@ def cron_install(
     )
     log_file = str(config_path().parent / "dataset.log")
     spec = DatasetPlistSpec(
-        binary_path=binary, cron=cron_expr,
-        kind=kind, log_file=log_file,
+        binary_path=binary, cron=SCHEDULER_CRON_LOCAL,
+        kind="scheduler", log_file=log_file,
     )
     path = install_plist(spec)
     typer.secho(f"installed → {path}", fg=typer.colors.GREEN)
 
 
-@cron_app.command("uninstall", help="Unload and remove the plist.")
-def cron_uninstall(
-    indices: bool = typer.Option(False, "--indices"),
-    group: str = typer.Option(None, "--group"),
-    accounts: bool = typer.Option(False, "--accounts"),
-    scheduler: bool = typer.Option(
-        False, "--scheduler",
-        help="Remove the unified Schwab Data Sync Service plist.",
-    ),
-    doc: bool = doc_option(),
-) -> None:
-    if scheduler:
-        kind = "scheduler"
-    elif accounts:
-        kind = "accounts"
-    else:
-        kind = _resolve_cron_kind(indices, group)
-    path = uninstall_plist(kind)
-    typer.secho(f"removed → {path}", fg=typer.colors.GREEN)
+@cron_app.command(
+    "uninstall",
+    help=("Unload and remove every Schwab-CLI launchd plist "
+          "(scheduler + any legacy per-job plists still hanging "
+          "around). Idempotent — silent no-op when nothing's there."),
+)
+def cron_uninstall(doc: bool = doc_option()) -> None:
+    from schwab_cli.dataset.launchd import uninstall_all_schwab_plists
+    removed = uninstall_all_schwab_plists()
+    if not removed:
+        typer.secho("nothing to remove", fg=typer.colors.GREEN)
+        return
+    for path in removed:
+        typer.secho(f"removed → {path}", fg=typer.colors.GREEN)
 
 
 @app.command(
