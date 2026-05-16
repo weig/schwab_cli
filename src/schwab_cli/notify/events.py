@@ -43,6 +43,18 @@ EVENTS: dict[str, tuple[Level, str]] = {
         "info",
         "schwab_cli MCP daemon stopped.",
     ),
+    "scheduler.job_failed": (
+        "error",
+        "Schwab data sync — one or more daily jobs failed.",
+    ),
+    "scheduler.token_refreshed": (
+        "info",
+        "Schwab data sync — access token refreshed before dispatch.",
+    ),
+    "scheduler.token_refresh_failed": (
+        "error",
+        "Schwab data sync — access token refresh failed before dispatch.",
+    ),
     "test.hello": (
         "info",
         "Test notification from schwab_cli.",

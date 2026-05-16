@@ -356,6 +356,17 @@ def update(
              "normally fires at a fixed UTC+8 local time (earlier than "
              "NY 17:00 ET in either DST mode) and sleeps until target.",
     ),
+    anchor_hour: int = typer.Option(
+        17, "--anchor-hour",
+        help="NY hour to sleep_until before running. Indices typically "
+             "delays to 18 ET so it doesn't burst-request alongside the "
+             "market-data job at 17 ET.",
+    ),
+    max_age_days: int = typer.Option(
+        0, "--max-age-days",
+        help="For --indices only: skip the run when the last successful "
+             "indices sync was within this many days. 0 = always run.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     from schwab_cli.storage import vol_history
@@ -372,8 +383,9 @@ def update(
         raise typer.Exit(code=2)
 
     # Anchor the daily market-data run to NY 17:00 ET regardless of
-    # what local time launchd fires us at. Indices runs unaffected
-    # (weekly, no chain-snapshot timing concerns).
+    # what local time launchd fires us at. Indices typically anchors
+    # to 18:00 ET when invoked by the unified scheduler so it doesn't
+    # burst-request alongside the market-data job.
     if group:
         # Drift detection — if we fired at NY ≥ 17:00 (e.g. system
         # TZ changed after install), sleep_until_ny will no-op and
@@ -382,11 +394,38 @@ def update(
         # without having to run `doctor` manually.
         fire_ok = _check_fire_time_and_alert(_make_notifier())
         if not skip_wait and fire_ok:
-            sleep_until_ny(17, 0)
+            sleep_until_ny(anchor_hour, 0)
 
     now_ms = int(time.time() * 1000)
 
     if indices:
+        # --max-age-days guard for the unified scheduler. Indices
+        # constituents churn slowly; weekly is plenty. Skipping in-
+        # window runs lets the scheduler dispatch indices every day
+        # while only actually hitting the upstream provider when the
+        # cache has aged out.
+        if max_age_days > 0:
+            with vol_history.connect() as conn:
+                row = conn.execute(
+                    "SELECT MAX(MAX(subscribed_at), "
+                    "COALESCE(MAX(unsubscribed_at), 0)) "
+                    "FROM subscriptions WHERE source = 'indices'"
+                ).fetchone()
+            last_ms = row[0] if row and row[0] else None
+            if last_ms is not None:
+                age_days = (time.time() * 1000 - last_ms) / 86_400_000
+                if age_days < max_age_days:
+                    typer.secho(
+                        f"indices: skipped — last sync "
+                        f"{age_days:.1f}d ago "
+                        f"(< {max_age_days}d threshold)",
+                        fg=typer.colors.GREEN,
+                    )
+                    return
+        # Optional anchor for the unified scheduler (e.g. wait until
+        # 18 ET to space the request from market-data).
+        if not skip_wait and anchor_hour != 17:
+            sleep_until_ny(anchor_hour, 0)
         with httpx.Client(timeout=30.0) as http_client:
             with vol_history.connect() as conn:
                 summary = run_indices_update(
@@ -498,7 +537,14 @@ def cron_install(
     group: str = typer.Option(None, "--group"),
     accounts: bool = typer.Option(
         False, "--accounts",
-        help="Install the accounts NAV daily snapshot cron.",
+        help="Install the legacy accounts-only NAV cron. Prefer "
+             "--scheduler for the unified daily fan-out.",
+    ),
+    scheduler: bool = typer.Option(
+        False, "--scheduler",
+        help="Install the unified `Schwab Data Sync Service` — one "
+             "plist that pspawns market-data + accounts + indices in "
+             "parallel. Removes the three per-job plists if present.",
     ),
     doc: bool = doc_option(),
 ) -> None:
@@ -510,16 +556,23 @@ def cron_install(
     from schwab_cli.dataset.launchd import (
         ACCOUNTS_CRON_LOCAL,
         INDICES_CRON_LOCAL, MARKET_DATA_CRON_LOCAL,
+        SCHEDULER_CRON_LOCAL,
         uninstall_legacy_volatility_job,
+        uninstall_per_job_plists,
     )
 
-    if accounts:
-        if indices or group:
-            typer.secho(
-                "pass --accounts alone (no --indices or --group)",
-                fg=typer.colors.RED, err=True,
-            )
-            raise typer.Exit(code=2)
+    flags_set = sum(1 for f in (indices, bool(group), accounts, scheduler) if f)
+    if flags_set > 1:
+        typer.secho(
+            "pass exactly one of --indices / --group / --accounts / "
+            "--scheduler",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if scheduler:
+        kind = "scheduler"
+    elif accounts:
         kind = "accounts"
     else:
         kind = _resolve_cron_kind(indices, group)
@@ -531,6 +584,16 @@ def cron_install(
         cron_expr = INDICES_CRON_LOCAL
     elif kind == "accounts":
         cron_expr = ACCOUNTS_CRON_LOCAL
+    elif kind == "scheduler":
+        cron_expr = SCHEDULER_CRON_LOCAL
+        # Single-job migration: rip out the three pre-scheduler plists
+        # so we don't run them twice (once from their old plist, once
+        # via the scheduler's pspawn). Idempotent — no-op when they
+        # aren't installed.
+        removed = uninstall_per_job_plists()
+        for path in removed:
+            typer.secho(f"removed legacy plist → {path}",
+                        fg=typer.colors.YELLOW)
     else:
         cron_expr = MARKET_DATA_CRON_LOCAL
 
@@ -566,14 +629,40 @@ def cron_uninstall(
     indices: bool = typer.Option(False, "--indices"),
     group: str = typer.Option(None, "--group"),
     accounts: bool = typer.Option(False, "--accounts"),
+    scheduler: bool = typer.Option(
+        False, "--scheduler",
+        help="Remove the unified Schwab Data Sync Service plist.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
-    if accounts:
+    if scheduler:
+        kind = "scheduler"
+    elif accounts:
         kind = "accounts"
     else:
         kind = _resolve_cron_kind(indices, group)
     path = uninstall_plist(kind)
     typer.secho(f"removed → {path}", fg=typer.colors.GREEN)
+
+
+@app.command(
+    "sync",
+    help=("Run the daily unified data sync: refresh token, then "
+          "pspawn market-data + accounts + indices in parallel. "
+          "Invoked by the `Schwab Data Sync Service` launchd plist. "
+          "Manual reruns: add --skip-wait to bypass the NY-17:00 wait."),
+)
+def sync(
+    skip_wait: bool = typer.Option(
+        False, "--skip-wait",
+        help="Pass --skip-wait through to every child so they run "
+             "immediately instead of sleeping until NY 17:00 ET.",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    from schwab_cli.dataset.sync_scheduler import run_daily_sync
+    rc = run_daily_sync(skip_wait=skip_wait)
+    raise typer.Exit(code=rc)
 
 
 # ---- accounts NAV ---------------------------------------------------

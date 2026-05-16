@@ -80,6 +80,10 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
 INDICES_LABEL           = "com.schwab-cli.dataset.indices"
 MARKET_DATA_LABEL       = "com.schwab-cli.dataset.market-data"
 ACCOUNTS_LABEL          = "com.schwab-cli.dataset.accounts"
+# Unified scheduler — replaces the three labels above. Fires once per
+# day and pspawns market-data + accounts + indices as parallel
+# children, each anchoring to its own NY hour internally.
+SCHEDULER_LABEL         = "com.schwab-cli.scheduler"
 # Kept for ``uninstall_legacy_volatility_job`` and back-compat refs
 # during the migration window; new code should use MARKET_DATA_LABEL.
 LEGACY_VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
@@ -97,6 +101,12 @@ MARKET_DATA_CRON_LOCAL = "0 4 * * *"   # daily 04:00 local — sleeps until NY 1
 # modes. 04:30 local fires after the market-data job so today's positions
 # already include the day's settled trades.
 ACCOUNTS_CRON_LOCAL    = "30 4 * * *"
+# Unified scheduler — single cron expression for the daily fan-out.
+# Fires earlier than NY 17:00 ET (the market-close anchor) under both
+# DST modes; sub-jobs sleep_until_ny internally to the right minute.
+# Indices is delayed inside its child to NY 18:00 ET for request
+# spacing, so launchd just needs to fire before 17:00.
+SCHEDULER_CRON_LOCAL   = "0 4 * * *"
 
 # Launcher filenames are what macOS shows in
 # System Settings → Login Items, since the displayed name is read
@@ -106,6 +116,7 @@ _LAUNCHER_NAME = {
     "indices":     "Schwab Indices Dataset",
     "market-data": "Schwab Market Data",
     "accounts":    "Schwab Accounts NAV",
+    "scheduler":   "Schwab Data Sync Service",
 }
 
 
@@ -140,7 +151,11 @@ def _write_launcher(spec: DatasetPlistSpec) -> Path:
     """
     path = _launcher_path(spec.kind)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if spec.kind == "indices":
+    if spec.kind == "scheduler":
+        cmd = (
+            f'exec {_shquote(spec.binary_path)} dataset sync "$@"'
+        )
+    elif spec.kind == "indices":
         cmd = (
             f'exec {_shquote(spec.binary_path)} dataset update --indices "$@"'
         )
@@ -191,10 +206,12 @@ class DatasetPlistSpec:
         # old constant don't crash. Coerce to the canonical value.
         if self.kind == "volatility":
             object.__setattr__(self, "kind", "market-data")
-        if self.kind not in ("indices", "market-data", "accounts"):
+        if self.kind not in (
+            "indices", "market-data", "accounts", "scheduler",
+        ):
             raise ValueError(
-                f"unsupported plist kind: {self.kind!r} "
-                f"(expected 'indices', 'market-data', or 'accounts')"
+                f"unsupported plist kind: {self.kind!r} (expected "
+                f"'indices', 'market-data', 'accounts', or 'scheduler')"
             )
 
     @property
@@ -203,6 +220,8 @@ class DatasetPlistSpec:
             return INDICES_LABEL
         if self.kind == "accounts":
             return ACCOUNTS_LABEL
+        if self.kind == "scheduler":
+            return SCHEDULER_LABEL
         return MARKET_DATA_LABEL
 
     @property
@@ -216,6 +235,8 @@ class DatasetPlistSpec:
             return [self.binary_path, "dataset", "update", "--indices"]
         if self.kind == "accounts":
             return [self.binary_path, "dataset", "accounts", "snapshot"]
+        if self.kind == "scheduler":
+            return [self.binary_path, "dataset", "sync"]
         return [self.binary_path, "dataset", "update", "--group", "volatility"]
 
     @property
@@ -244,7 +265,9 @@ def build_dataset_plist(
         # then either runs immediately (already past 17:00 ET) or waits
         # until target. Indices is weekly; RunAtLoad there would cause
         # a spurious sync every reload, so it stays off.
-        "RunAtLoad":             spec.kind in ("market-data", "accounts"),
+        "RunAtLoad":             spec.kind in (
+            "market-data", "accounts", "scheduler",
+        ),
         "KeepAlive":             False,
     }
     if spec.log_file:
@@ -297,6 +320,8 @@ def uninstall_plist(kind: str) -> Path:
         label = INDICES_LABEL
     elif kind == "accounts":
         label = ACCOUNTS_LABEL
+    elif kind == "scheduler":
+        label = SCHEDULER_LABEL
     else:
         label = MARKET_DATA_LABEL
     path = _default_dir() / f"{label}.plist"
@@ -310,6 +335,25 @@ def uninstall_plist(kind: str) -> Path:
     if launcher.exists():
         launcher.unlink()
     return path
+
+
+def uninstall_per_job_plists() -> list[Path]:
+    """Bootout + remove the three pre-scheduler plists (indices,
+    market-data, accounts). Used by ``cron install --scheduler`` so
+    the unified job replaces the per-job plists in one step.
+    Returns the paths that were actually removed."""
+    removed: list[Path] = []
+    for kind in ("indices", "market-data", "accounts"):
+        label = (
+            INDICES_LABEL if kind == "indices"
+            else ACCOUNTS_LABEL if kind == "accounts"
+            else MARKET_DATA_LABEL
+        )
+        path = _default_dir() / f"{label}.plist"
+        if path.exists():
+            uninstall_plist(kind)
+            removed.append(path)
+    return removed
 
 
 def uninstall_legacy_volatility_job() -> Path | None:
