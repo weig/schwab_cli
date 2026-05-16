@@ -92,8 +92,9 @@ VOLATILITY_LABEL        = LEGACY_VOLATILITY_LABEL  # back-compat alias
 # Hardcoded cron expressions — installer-owned, not user-configurable.
 # The market-data job's actual run time is anchored to NY 17:00 ET by
 # ``sleep_until_ny`` inside the Python entry point — launchd only
-# needs to fire EARLIER than the NY target in either DST mode.
-# UTC+8 04:00 ≤ both NY 17:00 EDT (= 05:00 UTC+8) and 17:00 EST (= 06:00 UTC+8).
+# needs to fire EARLIER than the NY target in either DST mode so the
+# sleep can wait forward. 04:00 local (UTC+8) is safely earlier than
+# NY 17:00 ET under both EDT and EST.
 INDICES_CRON_LOCAL     = "0 6 * * 0"   # Sunday 06:00 local — weekly indices sync
 MARKET_DATA_CRON_LOCAL = "0 4 * * *"   # daily 04:00 local — sleeps until NY 17:00 ET
 # The accounts snapshot also anchors to NY 17:00 ET via sleep_until_ny;
@@ -313,7 +314,14 @@ def install_plist(spec: DatasetPlistSpec) -> Path:
 
 
 def uninstall_plist(kind: str) -> Path:
-    """``launchctl unload`` then remove the plist + launcher."""
+    """``launchctl unload`` then remove the plist + launcher.
+
+    Raises :class:`RuntimeError` if ``launchctl`` returned an error
+    *other* than "service not loaded" — the on-disk plist is left
+    intact in that case so the caller can retry instead of ending up
+    with a registered launchd job and no plist to manage it. An
+    already-unloaded service is fine and we proceed to deletion.
+    """
     if kind == "volatility":  # deprecated alias for back-compat callers
         kind = "market-data"
     if kind == "indices":
@@ -326,10 +334,23 @@ def uninstall_plist(kind: str) -> Path:
         label = MARKET_DATA_LABEL
     path = _default_dir() / f"{label}.plist"
     if path.exists():
-        subprocess.run(
+        result = subprocess.run(
             ["launchctl", "unload", str(path)],
-            check=False,  # already-unloaded is fine
+            check=False, capture_output=True, text=True,
         )
+        err = (result.stderr or "").strip().lower()
+        # macOS launchctl is inconsistent: some versions return 0 for
+        # "not loaded", others return non-zero. Both spellings appear.
+        not_loaded = (
+            "could not find specified service" in err
+            or "no such process" in err
+            or result.returncode == 0
+        )
+        if not not_loaded:
+            raise RuntimeError(
+                f"launchctl unload failed for {path}: "
+                f"{err or 'exit ' + str(result.returncode)}"
+            )
         path.unlink()
     launcher = _launcher_path(kind)
     if launcher.exists():

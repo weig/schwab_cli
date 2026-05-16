@@ -405,19 +405,25 @@ def update(
         # while only actually hitting the upstream provider when the
         # cache has aged out.
         if max_age_days > 0:
+            # Pull the two scalar aggregates separately and take the
+            # max in Python — the previous form `MAX(MAX(a), MAX(b))`
+            # nested the scalar `max(a, b)` function inside an
+            # aggregate, which SQLite evaluates ambiguously.
             with vol_history.connect() as conn:
                 row = conn.execute(
-                    "SELECT MAX(MAX(subscribed_at), "
-                    "COALESCE(MAX(unsubscribed_at), 0)) "
+                    "SELECT MAX(subscribed_at) AS sub, "
+                    "       COALESCE(MAX(unsubscribed_at), 0) AS unsub "
                     "FROM subscriptions WHERE source = 'indices'"
                 ).fetchone()
-            last_ms = row[0] if row and row[0] else None
+            sub_ms = row["sub"] if row and row["sub"] is not None else 0
+            unsub_ms = row["unsub"] if row and row["unsub"] is not None else 0
+            last_ms = max(sub_ms, unsub_ms) or None
             if last_ms is not None:
                 age_days = (time.time() * 1000 - last_ms) / 86_400_000
                 if age_days < max_age_days:
                     typer.secho(
-                        f"indices: skipped — last sync "
-                        f"{age_days:.1f}d ago "
+                        f"indices: skipped — local subscriptions table "
+                        f"last touched {age_days:.1f}d ago "
                         f"(< {max_age_days}d threshold)",
                         fg=typer.colors.GREEN,
                     )
