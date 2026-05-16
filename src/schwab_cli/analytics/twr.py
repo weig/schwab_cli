@@ -70,13 +70,24 @@ def chain_link(navs: list[DailyNav]) -> float:
 # exercises, assignments, splits, spin-offs) that must NOT count as
 # flow under TWR semantics.
 _EXTERNAL_CANDIDATE_TYPES: frozenset[str] = frozenset({
-    "JOURNAL",
-    "RECEIVE_AND_DELIVER",
+    # User-initiated cash deposits/withdrawals at Schwab — these are
+    # what the "Net Contributions" line on the Performance page sums.
+    # Verified empirically by reconciling against the published total.
+    "CASH_RECEIPT",
+    "CASH_DISBURSEMENT",
     "WIRE_IN",
     "WIRE_OUT",
     "ACH_RECEIPT",
     "ACH_DISBURSEMENT",
     "ELECTRONIC_FUND",
+    # ACATS-style transfers where Schwab books a pure-cash leg.
+    # Internal-with-security variants are filtered out by the
+    # has_security_leg test in `_is_external_flow`.
+    "RECEIVE_AND_DELIVER",
+    # NOTE: JOURNAL is intentionally *excluded*. At Schwab those are
+    # internal bookkeeping movements (sweep MMF in/out, margin SMA
+    # adjustments, sub-account journals) — never external flows. The
+    # user's Performance page also excludes them.
 })
 
 
