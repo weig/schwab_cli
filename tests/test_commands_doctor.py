@@ -51,11 +51,31 @@ def test_format_hours_past_and_future():
                                  now=_NOW) == "in 24.0h"
 
 
-def test_format_beyond_24h_renders_full_local_datetime():
-    target = _NOW + timedelta(days=6, hours=18)
+def test_format_days_under_a_week_keeps_one_decimal():
+    """1d–6d range: one-decimal day form, both directions."""
+    assert _format_relative_time(
+        _NOW - timedelta(days=1, hours=6), now=_NOW,
+    ) == "1.2d ago"
+    assert _format_relative_time(
+        _NOW + timedelta(days=3, hours=14), now=_NOW,
+    ) == "in 3.6d"
+
+
+def test_format_days_past_a_week_drops_decimal():
+    """7d+ range: integer day form. Decimal would be noise."""
+    assert _format_relative_time(
+        _NOW - timedelta(days=7, hours=3), now=_NOW,
+    ) == "7d ago"
+    assert _format_relative_time(
+        _NOW + timedelta(days=14, hours=20), now=_NOW,
+    ) == "in 14d"
+
+
+def test_format_beyond_30d_renders_full_local_datetime():
+    """≥ 30d either side: relative form stops being useful, switch
+    to an absolute datetime."""
+    target = _NOW + timedelta(days=45)
     out = _format_relative_time(target, now=_NOW)
-    # Shape only — exact date depends on host TZ. ISO date prefix +
-    # HH:MM time, no relative phrase.
     import re
     assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", out)
     assert "ago" not in out

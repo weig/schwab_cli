@@ -88,13 +88,17 @@ def _format_relative_time(
 ) -> str:
     """Render ``target`` relative to ``now`` (default ``datetime.now``).
 
-    Spec:
+    Spec — relative form everywhere except deep history:
       * < 1 minute either side → ``"<1m"``
       * 1m – 59m past         → ``"NNm ago"``
-      * 1h – 23h past         → ``"N.Nh ago"``
       * 1m – 59m future       → ``"in NNm"``
+      * 1h – 23h past         → ``"N.Nh ago"``
       * 1h – 23h future       → ``"in N.Nh"``
-      * ≥ 24h either side     → full local datetime ``YYYY-MM-DD HH:MM ZZZ``
+      * 1d – 29d past         → ``"N.Nd ago"`` (one decimal under a
+                                  week, integer beyond)
+      * 1d – 29d future       → ``"in N.Nd"``
+      * ≥ 30d either side     → full local datetime
+                                  ``YYYY-MM-DD HH:MM ZZZ``
     """
     if target is None:
         return "—"
@@ -113,6 +117,12 @@ def _format_relative_time(
     if abs_sec < 86400:
         hrs = abs_sec / 3600
         return f"in {hrs:.1f}h" if in_future else f"{hrs:.1f}h ago"
+    if abs_sec < 30 * 86400:
+        days = abs_sec / 86400
+        # Under a week: keep a decimal so "1.5d ago" still tells you
+        # something. Past a week, integer is enough.
+        fmt = f"{days:.1f}d" if days < 7 else f"{int(days)}d"
+        return f"in {fmt}" if in_future else f"{fmt} ago"
     local = target.astimezone()
     return local.strftime("%Y-%m-%d %H:%M %Z").rstrip()
 
