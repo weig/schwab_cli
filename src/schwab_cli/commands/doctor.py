@@ -426,17 +426,25 @@ def _check_telegram() -> None:
 # ---- 5. Dataset -------------------------------------------------------
 
 
-_DATASET_INDICES_PLIST = (
-    Path.home() / "Library" / "LaunchAgents"
-    / "com.schwab-cli.dataset.indices.plist"
+_LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+_SCHEDULER_PLIST = _LAUNCH_AGENTS_DIR / "com.schwab-cli.scheduler.plist"
+
+# Pre-scheduler per-job plists. If any of these exist after the
+# scheduler is installed, the operator has a stale install — the
+# scheduler will pspawn the work AND launchd will fire the legacy
+# plist independently. Surface that loudly.
+_LEGACY_DATASET_PLISTS = (
+    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.indices.plist",
+    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.market-data.plist",
+    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.accounts.plist",
+    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.volatility.plist",
 )
-_DATASET_VOL_PLIST = (   # back-compat alias for callers / tests that
-                          # still reference the old name; new code should
-                          # use _DATASET_MARKET_DATA_PLIST.
-    Path.home() / "Library" / "LaunchAgents"
-    / "com.schwab-cli.dataset.market-data.plist"
-)
-_DATASET_MARKET_DATA_PLIST = _DATASET_VOL_PLIST
+# Back-compat aliases kept so test modules importing the old names
+# don't break — pointed at the scheduler plist so any incidental use
+# still gets a sensible value.
+_DATASET_INDICES_PLIST     = _SCHEDULER_PLIST
+_DATASET_VOL_PLIST         = _SCHEDULER_PLIST
+_DATASET_MARKET_DATA_PLIST = _SCHEDULER_PLIST
 
 
 def _check_dataset() -> None:
@@ -545,59 +553,130 @@ def _check_dataset() -> None:
     typer.echo("    Market Data Stat")
     _print_market_data_stat(ohlcv_longest, vol_longest_rows)
 
-    # Compute last-run anchors once — passed into the per-cron renderer.
-    last_indices = None
-    last_vol = None
+    # Pick the freshest per-job timestamp as the scheduler's
+    # last-run anchor. The unified job pspawns market-data + indices
+    # + accounts; whichever wrote to the DB most recently is the
+    # most relevant signal of "the scheduler ran".
+    last_run_ts = None
     try:
         with vol_history.connect() as conn2:
             last_indices = _last_indices_run_at(conn2)
             last_vol = _last_market_data_run_at(conn2)
+        last_run_ts = max(
+            (t for t in (last_indices, last_vol) if t is not None),
+            default=None,
+        )
     except Exception:
         pass
 
-    # v2: `cron.market_data` declares which products the daily job
-    # handles (e.g. ["ohlcv", "volatility"]). Surfaced in the bracket
-    # so the operator can see at a glance what's enabled.
-    from schwab_cli.dataset import config as ds_cfg
-    try:
-        _cfg = ds_cfg.load_config_or_default()
-    except Exception:
-        _cfg = {}
-    _products = (_cfg.get("cron", {}) or {}).get("market_data") or []
-    _products_str = ", ".join(_products) if _products else "(none)"
-
     typer.echo("    Cron jobs")
-    _print_dataset_cron(
-        "indices (weekly)",
-        plist=_DATASET_INDICES_PLIST,
-        label="com.schwab-cli.dataset.indices",
-        needed=indices_intent > 0,
-        not_needed_msg="(no index subscriptions)",
-        install_cmd="schwab_cli dataset cron install --indices",
-        last_run=last_indices,
+    _print_scheduler_cron(
+        plist=_SCHEDULER_PLIST, last_run=last_run_ts,
     )
-    _print_dataset_cron(
-        "market_data (daily)",
-        plist=_DATASET_MARKET_DATA_PLIST,
-        label="com.schwab-cli.dataset.market-data",
-        needed=bool(sub_rows),
-        not_needed_msg="(no subscriptions yet)",
-        install_cmd="schwab_cli dataset cron install --group volatility",
-        last_run=last_vol,
-        products=_products_str,
-    )
+
+    # Stale per-job plists from a pre-scheduler install. If any are
+    # still on disk, the operator has DOUBLE jobs — scheduler pspawns
+    # the work AND launchd fires the legacy plist independently.
+    # ``cron install`` sweeps these automatically, but a user who
+    # never re-ran it after upgrading would hit this.
+    stale = [p for p in _LEGACY_DATASET_PLISTS if p.exists()]
+    for path in stale:
+        _bad(
+            f"stale legacy plist: {path.name}",
+            "re-run `schwab dataset cron install` to scrub it",
+        )
+
+    # Last-run marker from the unified scheduler. ``last_run.json``
+    # captures per-job exit codes so a Telegram-down failure is still
+    # visible offline. Surface whatever the most recent run wrote.
+    _print_last_run_marker()
 
     # Drift check — when the system TZ changes after install, the
     # plist's UTC+old-tz fire hour ends up firing at a different NY
     # clock moment. sleep_until_ny is robust to "fire early, wait
     # longer", but it can't recover from "fire AFTER target"; that
     # branch silently no-ops. Catch it loudly here.
-    if _DATASET_MARKET_DATA_PLIST.exists():
-        md_ok, md_msg = _check_market_data_fire_time(_DATASET_MARKET_DATA_PLIST)
+    if _SCHEDULER_PLIST.exists():
+        md_ok, md_msg = _check_market_data_fire_time(_SCHEDULER_PLIST)
         if md_ok:
-            _ok("Market-data fire time", md_msg)
+            _ok("Scheduler fire time", md_msg)
         else:
-            _bad("WARNING — market-data fire time mismatch", md_msg)
+            _bad("WARNING — scheduler fire time mismatch", md_msg)
+
+
+def _print_scheduler_cron(
+    *, plist: Path, last_run: datetime | None,
+) -> None:
+    """Render the single unified scheduler row. Reports each child
+    updater's name so the operator sees what the one plist actually
+    spawns."""
+    from schwab_cli.dataset.updaters import UPDATERS
+
+    children = ", ".join(u.name for u in UPDATERS)
+    if not plist.exists():
+        typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
+        typer.echo(f"{'scheduler (daily)':<28} not installed")
+        _hint("schwab dataset cron install")
+        return
+    if not _launchctl_loaded("com.schwab-cli.scheduler"):
+        typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
+        typer.echo(
+            f"{'scheduler (daily)':<28} plist present but not loaded"
+        )
+        typer.secho(f"        → launchctl load -w {plist}",
+                    fg=typer.colors.YELLOW)
+        return
+
+    typer.secho("      ✓ ", fg=typer.colors.GREEN, nl=False)
+    typer.echo(f"{'scheduler (daily)':<28} {plist.name}")
+    typer.echo(f"          children {children}")
+    now = datetime.now(tz=timezone.utc)
+    next_run = _next_calendar_interval_run(plist, now=now)
+    typer.echo(
+        f"          last run "
+        f"{_format_relative_time(last_run, now=now)}"
+    )
+    typer.echo(
+        f"          next run "
+        f"{_format_relative_time(next_run, now=now)}"
+    )
+
+
+def _print_last_run_marker() -> None:
+    """Read the offline failure marker the scheduler writes after
+    each run and surface its per-job status. Quiet on success, loud
+    on failure — this is the backstop when Telegram alerts didn't
+    land."""
+    import json as _json
+
+    from schwab_cli.dataset.sync_scheduler import _last_run_path
+    try:
+        path = _last_run_path()
+    except Exception:
+        return
+    if not path.exists():
+        return
+    try:
+        payload = _json.loads(path.read_text())
+    except (OSError, _json.JSONDecodeError):
+        return
+    if payload.get("overall_succeeded"):
+        return  # quiet path — failure marker is the interesting one
+    failed = [
+        j for j in (payload.get("jobs") or [])
+        if j.get("returncode") not in (0, None) or j.get("timed_out")
+    ]
+    if not failed:
+        return
+    finished = payload.get("finished_at", "")
+    _bad(
+        f"last scheduler run had failures ({finished})",
+        "see ~/.config/schwab_cli/last_run.json for per-job tails",
+    )
+    for j in failed:
+        outcome = "timeout" if j.get("timed_out") else f"exit {j['returncode']}"
+        typer.secho(f"        ✗ {j['name']} — {outcome}",
+                    fg=typer.colors.RED)
 
 
 def _print_market_data_stat(ohlcv_row, vol_rows) -> None:

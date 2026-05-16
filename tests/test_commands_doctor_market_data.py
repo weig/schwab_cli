@@ -61,29 +61,30 @@ def _stub_db(monkeypatch):
     monkeypatch.setattr("schwab_cli.storage.vol_history.connect", _connect)
 
 
-def test_dataset_section_shows_market_data_with_enabled_products(
+def test_dataset_section_shows_scheduler_row_with_children(
     capsys, monkeypatch, tmp_path,
 ):
-    """When the cron is loaded, the product list renders on a `group`
-    sub-line so the plist filename column stays aligned with the
-    indices row. Title no longer carries the bracketed product list."""
+    """The unified scheduler renders one row listing the children
+    it pspawns (market-data, accounts, indices). No more per-job
+    rows — the per-job plists are gone."""
     _stub_db(monkeypatch)
     _patch_common(monkeypatch, fire_utc=None)
-    plist_path = tmp_path / "com.schwab-cli.dataset.market-data.plist"
+    plist_path = tmp_path / "com.schwab-cli.scheduler.plist"
     plist_path.write_bytes(b"<plist></plist>")
-    monkeypatch.setattr(doc, "_DATASET_MARKET_DATA_PLIST", plist_path)
+    monkeypatch.setattr(doc, "_SCHEDULER_PLIST", plist_path)
     monkeypatch.setattr(doc, "_launchctl_loaded", lambda _label: True)
 
     doc._check_dataset()
     out = capsys.readouterr().out
 
-    assert "market_data (daily)" in out
-    # Product list is on its own line as `group  …` — title stays
-    # plist-aligned with the indices row.
-    assert "ohlcv, volatility" in out
-    # Old bracketed form must NOT appear inline with the label.
-    assert "(daily) [" not in out
-    assert "volatility (daily)" not in out
+    assert "scheduler (daily)" in out
+    # Children list reflects the updater registry.
+    assert "market-data" in out
+    assert "accounts" in out
+    assert "indices" in out
+    # Old per-job rows must NOT appear.
+    assert "market_data (daily)" not in out
+    assert "indices (weekly)" not in out
 
 
 def test_doctor_warns_when_fire_time_falls_after_ny_17_00(
@@ -91,13 +92,13 @@ def test_doctor_warns_when_fire_time_falls_after_ny_17_00(
 ):
     """Plist fires too late → sleep_until_ny would no-op → contract
     broken. Doctor must call this out."""
-    plist_path = tmp_path / "com.schwab-cli.dataset.market-data.plist"
+    plist_path = tmp_path / "com.schwab-cli.scheduler.plist"
     plist_path.write_bytes(b"<plist></plist>")  # presence is what matters
 
     fire_ny = datetime(2026, 5, 15, 19, 0, tzinfo=_NY)
     _stub_db(monkeypatch)
     _patch_common(monkeypatch, fire_utc=fire_ny.astimezone(timezone.utc))
-    monkeypatch.setattr(doc, "_DATASET_MARKET_DATA_PLIST", plist_path)
+    monkeypatch.setattr(doc, "_SCHEDULER_PLIST", plist_path)
 
     doc._check_dataset()
     out = capsys.readouterr().out
@@ -110,13 +111,13 @@ def test_doctor_warns_when_fire_time_falls_after_ny_17_00(
 def test_doctor_silent_when_fire_time_safely_before_17_00(
     capsys, monkeypatch, tmp_path,
 ):
-    plist_path = tmp_path / "com.schwab-cli.dataset.market-data.plist"
+    plist_path = tmp_path / "com.schwab-cli.scheduler.plist"
     plist_path.write_bytes(b"<plist></plist>")
 
     fire_ny = datetime(2026, 5, 15, 4, 0, tzinfo=_NY)
     _stub_db(monkeypatch)
     _patch_common(monkeypatch, fire_utc=fire_ny.astimezone(timezone.utc))
-    monkeypatch.setattr(doc, "_DATASET_MARKET_DATA_PLIST", plist_path)
+    monkeypatch.setattr(doc, "_SCHEDULER_PLIST", plist_path)
 
     doc._check_dataset()
     out = capsys.readouterr().out
