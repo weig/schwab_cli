@@ -3,6 +3,7 @@ import typer
 from schwab_cli._doc import doc_option
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
+from schwab_cli.commands import breadth as breadth_cmd
 from schwab_cli.commands import dataset as dataset_cmd
 from schwab_cli.commands import dividends as dividends_cmd
 from schwab_cli.commands import doctor as doctor_cmd
@@ -267,6 +268,33 @@ def history(
         interval_str=interval_str,
         as_json=as_json,
         as_md=as_md,
+    )
+
+
+@app.command(
+    "breadth",
+    help=(
+        "Market breadth: % of index constituents above SMA at "
+        "Bloomberg-style timeframes (5D … 2Y). Lazy-fills OHLCV cache."
+    ),
+)
+def breadth(
+    indices: str = typer.Option(
+        "SPX,NQ,DJI", "--indices",
+        help="Comma-separated index codes (SPX, NQ, DJI). "
+             "NQ = Nasdaq 100, closest cleanly available proxy for COMP.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    refresh_members: bool = typer.Option(
+        False, "--refresh-members",
+        help="(reserved) re-fetch constituent lists; currently always live.",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    breadth_cmd.run(
+        indices=[s.strip().upper() for s in indices.split(",") if s.strip()],
+        as_json=as_json,
+        refresh_members=refresh_members,
     )
 
 
