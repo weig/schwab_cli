@@ -5,6 +5,7 @@ from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
 from schwab_cli.commands import breadth as breadth_cmd
 from schwab_cli.commands import dataset as dataset_cmd
+from schwab_cli.commands import watch as watch_cmd
 from schwab_cli.commands import dividends as dividends_cmd
 from schwab_cli.commands import doctor as doctor_cmd
 from schwab_cli.commands import fundamentals as fundamentals_cmd
@@ -406,6 +407,45 @@ mcp_app = typer.Typer(
 )
 app.add_typer(dataset_cmd.app, name="dataset")
 app.add_typer(mcp_app, name="mcp")
+
+
+watch_app = typer.Typer(
+    help=(
+        "Manual ticker watchlist. Subscribes to OHLCV + volatility "
+        "automatically on `add`; demotes to GRACE on `remove`."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(watch_app, name="watch")
+
+
+@watch_app.command("add", help="Add a ticker to the watchlist.")
+def watch_add(
+    symbol: str = typer.Argument(..., help="Ticker (e.g. NVDA)."),
+    doc: bool = doc_option(),
+) -> None:
+    watch_cmd.run_add(symbol)
+
+
+@watch_app.command("remove", help="Remove a ticker from the watchlist.")
+def watch_remove(
+    symbol: str = typer.Argument(..., help="Ticker (e.g. NVDA)."),
+    doc: bool = doc_option(),
+) -> None:
+    watch_cmd.run_remove(symbol)
+
+
+@watch_app.command("list", help="Snapshot table: bid/ask/sizes/vol/OHLC.")
+def watch_list(
+    as_json: bool = typer.Option(False, "--json", help="Output JSON."),
+    doc: bool = doc_option(),
+) -> None:
+    watch_cmd.run_list(as_json=as_json)
+
+
+@watch_app.command("show", help="Live streaming table. Ctrl-C to exit.")
+def watch_show(doc: bool = doc_option()) -> None:
+    watch_cmd.run_show()
 
 
 @mcp_app.callback(invoke_without_command=True)
