@@ -102,6 +102,30 @@ def test_sweep_leaves_non_schwab_plists_alone(fake_home):
     assert theirs.exists()
 
 
+def test_sweep_does_not_touch_mcp_plist(fake_home):
+    """Regression: the MCP server installs itself under the same
+    `com.schwab-cli.` prefix but is NOT a dataset cron job. The
+    sweep must leave it alone — an earlier too-broad prefix list
+    silently uninstalled the user's MCP plist."""
+    dataset_plist = _write_plist(
+        fake_home, "com.schwab-cli.scheduler.plist",
+    )
+    legacy_dataset_plist = _write_plist(
+        fake_home, "com.schwab-cli.dataset.market-data.plist",
+    )
+    mcp_plist = _write_plist(fake_home, "com.schwab-cli.mcp.plist")
+
+    removed = ld.uninstall_all_schwab_plists()
+
+    # MCP plist must survive.
+    assert mcp_plist.exists()
+    assert mcp_plist not in removed
+    # Dataset plists must be removed.
+    assert not dataset_plist.exists()
+    assert not legacy_dataset_plist.exists()
+    assert set(removed) == {dataset_plist, legacy_dataset_plist}
+
+
 def test_sweep_returns_empty_when_launchagents_missing(monkeypatch, tmp_path):
     """A fresh system with no LaunchAgents directory must return []
     without raising."""
