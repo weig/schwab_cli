@@ -99,12 +99,22 @@ VOLATILITY_LABEL        = LEGACY_VOLATILITY_LABEL  # back-compat alias
 SCHEDULER_CRON_LOCAL   = "0 4 * * *"
 
 
-# Any plist whose basename starts with one of these belongs to us.
-# Used by :func:`uninstall_all_schwab_plists` to scrub state without
-# enumerating every historical kind we've ever installed. Declared
-# here so the :data:`_KIND_INFO` post-construction check below can
-# reference it.
-_PLIST_PREFIXES = ("com.schwab-cli.", "com.schwab_cli.")
+# Plist basenames the sweep is allowed to remove. Narrower than
+# ``com.schwab-cli.`` on purpose — the MCP server installs itself as
+# ``com.schwab-cli.mcp.plist`` and is NOT a dataset cron job, so a
+# too-broad sweep would silently uninstall it.
+#
+# Everything we install for the dataset/scheduler subsystem lives
+# under ``com.schwab-cli.dataset.<kind>.plist`` (legacy per-job) or
+# ``com.schwab-cli.scheduler.plist`` (unified). Both hyphen and
+# underscore variants are listed so legacy pre-rename installs are
+# still picked up.
+_PLIST_PREFIXES = (
+    "com.schwab-cli.dataset.",
+    "com.schwab_cli.dataset.",
+    "com.schwab-cli.scheduler",
+    "com.schwab_cli.scheduler",
+)
 
 
 @dataclass(frozen=True)
