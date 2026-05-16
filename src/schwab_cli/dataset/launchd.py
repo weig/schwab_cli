@@ -79,6 +79,7 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
 
 INDICES_LABEL           = "com.schwab-cli.dataset.indices"
 MARKET_DATA_LABEL       = "com.schwab-cli.dataset.market-data"
+ACCOUNTS_LABEL          = "com.schwab-cli.dataset.accounts"
 # Kept for ``uninstall_legacy_volatility_job`` and back-compat refs
 # during the migration window; new code should use MARKET_DATA_LABEL.
 LEGACY_VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
@@ -91,6 +92,11 @@ VOLATILITY_LABEL        = LEGACY_VOLATILITY_LABEL  # back-compat alias
 # UTC+8 04:00 ≤ both NY 17:00 EDT (= 05:00 UTC+8) and 17:00 EST (= 06:00 UTC+8).
 INDICES_CRON_LOCAL     = "0 6 * * 0"   # Sunday 06:00 local — weekly indices sync
 MARKET_DATA_CRON_LOCAL = "0 4 * * *"   # daily 04:00 local — sleeps until NY 17:00 ET
+# The accounts snapshot also anchors to NY 17:00 ET via sleep_until_ny;
+# launchd just needs to fire EARLIER than that target across both DST
+# modes. 04:30 local fires after the market-data job so today's positions
+# already include the day's settled trades.
+ACCOUNTS_CRON_LOCAL    = "30 4 * * *"
 
 # Launcher filenames are what macOS shows in
 # System Settings → Login Items, since the displayed name is read
@@ -99,6 +105,7 @@ MARKET_DATA_CRON_LOCAL = "0 4 * * *"   # daily 04:00 local — sleeps until NY 1
 _LAUNCHER_NAME = {
     "indices":     "Schwab Indices Dataset",
     "market-data": "Schwab Market Data",
+    "accounts":    "Schwab Accounts NAV",
 }
 
 
@@ -136,6 +143,15 @@ def _write_launcher(spec: DatasetPlistSpec) -> Path:
     if spec.kind == "indices":
         cmd = (
             f'exec {_shquote(spec.binary_path)} dataset update --indices "$@"'
+        )
+    elif spec.kind == "accounts":
+        # accounts cron job — snapshots today's account NAV for every
+        # subscribed account. Runs the dedicated `dataset accounts
+        # snapshot` subcommand which writes ``account_nav_daily`` rows
+        # after sleep_until_ny anchors to NY 17:00 ET.
+        cmd = (
+            f'exec {_shquote(spec.binary_path)} '
+            f'dataset accounts snapshot "$@"'
         )
     else:
         # market-data daily job — invokes the existing --group volatility
@@ -175,15 +191,19 @@ class DatasetPlistSpec:
         # old constant don't crash. Coerce to the canonical value.
         if self.kind == "volatility":
             object.__setattr__(self, "kind", "market-data")
-        if self.kind not in ("indices", "market-data"):
+        if self.kind not in ("indices", "market-data", "accounts"):
             raise ValueError(
                 f"unsupported plist kind: {self.kind!r} "
-                f"(expected 'indices' or 'market-data')"
+                f"(expected 'indices', 'market-data', or 'accounts')"
             )
 
     @property
     def label(self) -> str:
-        return INDICES_LABEL if self.kind == "indices" else MARKET_DATA_LABEL
+        if self.kind == "indices":
+            return INDICES_LABEL
+        if self.kind == "accounts":
+            return ACCOUNTS_LABEL
+        return MARKET_DATA_LABEL
 
     @property
     def program_args(self) -> list[str]:
@@ -194,6 +214,8 @@ class DatasetPlistSpec:
         """
         if self.kind == "indices":
             return [self.binary_path, "dataset", "update", "--indices"]
+        if self.kind == "accounts":
+            return [self.binary_path, "dataset", "accounts", "snapshot"]
         return [self.binary_path, "dataset", "update", "--group", "volatility"]
 
     @property
@@ -222,7 +244,7 @@ def build_dataset_plist(
         # then either runs immediately (already past 17:00 ET) or waits
         # until target. Indices is weekly; RunAtLoad there would cause
         # a spurious sync every reload, so it stays off.
-        "RunAtLoad":             spec.kind == "market-data",
+        "RunAtLoad":             spec.kind in ("market-data", "accounts"),
         "KeepAlive":             False,
     }
     if spec.log_file:
@@ -271,7 +293,12 @@ def uninstall_plist(kind: str) -> Path:
     """``launchctl unload`` then remove the plist + launcher."""
     if kind == "volatility":  # deprecated alias for back-compat callers
         kind = "market-data"
-    label = INDICES_LABEL if kind == "indices" else MARKET_DATA_LABEL
+    if kind == "indices":
+        label = INDICES_LABEL
+    elif kind == "accounts":
+        label = ACCOUNTS_LABEL
+    else:
+        label = MARKET_DATA_LABEL
     path = _default_dir() / f"{label}.plist"
     if path.exists():
         subprocess.run(

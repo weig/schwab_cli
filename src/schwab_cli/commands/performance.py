@@ -84,6 +84,8 @@ class AccountPerformance:
     income: float
     fees: float
     has_options: bool
+    bv_from_cache: bool = False
+    has_estimated_days: bool = False
 
     @property
     def net_contrib(self) -> float:
@@ -186,11 +188,46 @@ def _compute_account(
         start=start_day, end=end_day,
     )
     avg_price = _avg_price_by_symbol(sec)
-    beginning_value = _price_state(
-        _find_state(states, start_day),
-        closes=closes_by_symbol,
-        avg_price=avg_price,
-    )
+
+    # Prefer the NAV cache for Beginning Value when populated. The
+    # accounts cron's daily snapshot uses Schwab's live marketValue
+    # (true today; treated as exact going forward). Backfill writes
+    # BS-estimated rows for the past — flagged via ``is_estimated``
+    # so the renderer can surface a warning.
+    try:
+        acct_hash = sec.get("hashValue") or (
+            client.resolve_account(acct_no).hash_value if acct_no else ""
+        )
+    except Exception:
+        acct_hash = ""
+    cached_bv: float | None = None
+    has_estimated_in_range = False
+    if acct_hash:
+        try:
+            with vol_history.connect() as conn:
+                from schwab_cli.storage import account_nav
+                rows = account_nav.read_range(
+                    conn, account_hash=acct_hash,
+                    start=start_day,
+                    end=start_day + timedelta(days=7),
+                )
+                if rows:
+                    cached_bv = rows[0].total_value
+                has_estimated_in_range = account_nav.has_estimated(
+                    conn, account_hash=acct_hash,
+                    start=start_day, end=end_day,
+                )
+        except Exception:
+            pass
+
+    if cached_bv is not None:
+        beginning_value = cached_bv
+    else:
+        beginning_value = _price_state(
+            _find_state(states, start_day),
+            closes=closes_by_symbol,
+            avg_price=avg_price,
+        )
 
     net_contrib = buckets["inflow"] + buckets["outflow"]
     investment_change = end_value - beginning_value - net_contrib
@@ -209,6 +246,8 @@ def _compute_account(
         income=buckets["income"],
         fees=buckets["fees"],
         has_options=has_options,
+        bv_from_cache=cached_bv is not None,
+        has_estimated_days=has_estimated_in_range,
     )
 
 
@@ -574,25 +613,43 @@ def _render_account_block(
     console.print(table)
 
     # Period return % is only meaningful when Beginning Value is
-    # reliable. Option-heavy accounts have an equity-only BV (no OHLCV
-    # cache for OSI symbols), so the % blows up and would mislead the
-    # operator. Show $-gain prominently; suppress the % with a note.
-    if a.has_options:
+    # reliable. Three cases:
+    #   1. BV comes from the NAV cache (live snapshot or backfill) →
+    #      show %; surface a warning when any day in range was
+    #      BS-estimated.
+    #   2. Pure-equity account → live reconstruction is exact → show %.
+    #   3. Option account with no cache hit → BV is equity-only;
+    #      suppress % to avoid misleading numbers.
+    can_trust_bv = a.bv_from_cache or not a.has_options
+    if can_trust_bv:
+        denominator = a.beginning_value + a.net_contrib / 2
+        pct = (a.total_gain / denominator) if denominator > 0 else None
+        if pct is not None:
+            source_note = (
+                "NAV cache" if a.bv_from_cache
+                else "live reconstruction"
+            )
+            console.print(
+                f"  [bold]Period Return:[/bold] {_pct_color(pct)}   "
+                f"[dim](modified-Dietz; BV from {source_note})[/dim]"
+            )
+    else:
         console.print(
             f"  [bold]Total Gain:[/bold] "
             f"{_money_signed(a.total_gain, color=True)}   "
             f"[dim](% return suppressed — Beginning Value is "
-            f"equity-only for option-bearing accounts; see "
-            f"Unrealized residual above)[/dim]"
+            f"equity-only; run `schwab dataset accounts backfill "
+            f"--range ytd` to populate the NAV cache for accurate "
+            f"option valuation)[/dim]"
         )
-    else:
-        denominator = a.beginning_value + a.net_contrib / 2
-        pct = (a.total_gain / denominator) if denominator > 0 else None
-        if pct is not None:
-            console.print(
-                f"  [bold]Period Return:[/bold] {_pct_color(pct)}   "
-                f"[dim](modified-Dietz)[/dim]"
-            )
+    if a.has_estimated_days:
+        console.print(
+            "  [yellow]⚠ Estimated NAV[/yellow] [dim]— some days in "
+            "this range used BS-reconstructed option prices "
+            "(synthesised from underlying close + ATM IV). Numbers are "
+            "approximate; install the accounts cron and let it run "
+            "forward for exact daily NAV.[/dim]"
+        )
 
 
 def _render_index_block(console, indices):
