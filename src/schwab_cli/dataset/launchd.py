@@ -80,33 +80,110 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
 INDICES_LABEL           = "com.schwab-cli.dataset.indices"
 MARKET_DATA_LABEL       = "com.schwab-cli.dataset.market-data"
 ACCOUNTS_LABEL          = "com.schwab-cli.dataset.accounts"
-# Kept for ``uninstall_legacy_volatility_job`` and back-compat refs
-# during the migration window; new code should use MARKET_DATA_LABEL.
+# Unified scheduler — replaces the three labels above. Fires once per
+# day and pspawns market-data + accounts + indices as parallel
+# children, each anchoring to its own NY hour internally.
+SCHEDULER_LABEL         = "com.schwab-cli.scheduler"
+# Pre-rename volatility plist label. Still referenced by tests and
+# kept as a back-compat alias for ``VOLATILITY_LABEL``; the sweep
+# uninstall picks up its plist via the ``_PLIST_PREFIXES`` glob, so
+# no per-label cleanup code is needed.
 LEGACY_VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
 VOLATILITY_LABEL        = LEGACY_VOLATILITY_LABEL  # back-compat alias
 
-# Hardcoded cron expressions — installer-owned, not user-configurable.
-# The market-data job's actual run time is anchored to NY 17:00 ET by
-# ``sleep_until_ny`` inside the Python entry point — launchd only
-# needs to fire EARLIER than the NY target in either DST mode.
-# UTC+8 04:00 ≤ both NY 17:00 EDT (= 05:00 UTC+8) and 17:00 EST (= 06:00 UTC+8).
-INDICES_CRON_LOCAL     = "0 6 * * 0"   # Sunday 06:00 local — weekly indices sync
-MARKET_DATA_CRON_LOCAL = "0 4 * * *"   # daily 04:00 local — sleeps until NY 17:00 ET
-# The accounts snapshot also anchors to NY 17:00 ET via sleep_until_ny;
-# launchd just needs to fire EARLIER than that target across both DST
-# modes. 04:30 local fires after the market-data job so today's positions
-# already include the day's settled trades.
-ACCOUNTS_CRON_LOCAL    = "30 4 * * *"
+# Unified scheduler cron expression. Fires earlier than NY 17:00 ET
+# (the market-close anchor) under both DST modes; sub-jobs
+# sleep_until_ny internally to the right minute. Indices is delayed
+# inside its child to NY 18:00 ET for request spacing, so launchd
+# only needs to fire before 17:00.
+SCHEDULER_CRON_LOCAL   = "0 4 * * *"
 
-# Launcher filenames are what macOS shows in
-# System Settings → Login Items, since the displayed name is read
-# from ``ProgramArguments[0]``. Using the bare ``schwab_cli``
-# binary makes all three plists look identical there.
-_LAUNCHER_NAME = {
-    "indices":     "Schwab Indices Dataset",
-    "market-data": "Schwab Market Data",
-    "accounts":    "Schwab Accounts NAV",
+
+# Any plist whose basename starts with one of these belongs to us.
+# Used by :func:`uninstall_all_schwab_plists` to scrub state without
+# enumerating every historical kind we've ever installed. Declared
+# here so the :data:`_KIND_INFO` post-construction check below can
+# reference it.
+_PLIST_PREFIXES = ("com.schwab-cli.", "com.schwab_cli.")
+
+
+@dataclass(frozen=True)
+class _KindInfo:
+    """Single source of truth for per-kind metadata. Adding a new
+    plist kind = adding one entry to :data:`_KIND_INFO` below.
+
+    ``cli_args`` is a tuple (not list) so the frozen-dataclass
+    semantics extend to its contents — ``_KIND_INFO[k].cli_args.append``
+    can't mutate global state.
+    """
+    label:           str
+    cli_args:        tuple[str, ...]   # appended after the binary path
+    # The basename macOS shows in System Settings → Login Items
+    # (read from ``ProgramArguments[0]``).
+    launcher_name:   str
+    run_at_load:     bool
+
+
+# ``scheduler`` is the only kind ``cron install`` actually writes.
+# The legacy entries (``indices`` / ``market-data`` / ``accounts``)
+# exist so :func:`_resolve_kind` can still name pre-scheduler plists
+# for inspection and so tests can construct a :class:`DatasetPlistSpec`
+# with a legacy kind without raising.
+_KIND_INFO: dict[str, _KindInfo] = {
+    "scheduler": _KindInfo(
+        label=SCHEDULER_LABEL,
+        cli_args=("dataset", "sync"),
+        launcher_name="Schwab Data Sync Service",
+        run_at_load=True,  # ensures missed runs catch up on next boot
+    ),
+    "indices": _KindInfo(
+        label=INDICES_LABEL,
+        cli_args=("dataset", "update", "--indices"),
+        launcher_name="Schwab Indices Dataset",
+        run_at_load=False,
+    ),
+    "market-data": _KindInfo(
+        label=MARKET_DATA_LABEL,
+        cli_args=("dataset", "update", "--group", "volatility"),
+        launcher_name="Schwab Market Data",
+        run_at_load=True,
+    ),
+    "accounts": _KindInfo(
+        label=ACCOUNTS_LABEL,
+        cli_args=("dataset", "accounts", "snapshot"),
+        launcher_name="Schwab Accounts NAV",
+        run_at_load=True,
+    ),
 }
+
+# Cross-check: every label in :data:`_KIND_INFO` must be a plist
+# basename our sweep recognises, otherwise a future kind added with a
+# typo'd label would silently escape ``uninstall_all_schwab_plists``.
+# Evaluated at import — keeps :data:`_KIND_INFO` self-validating.
+for _info in _KIND_INFO.values():
+    assert any(_info.label.startswith(p) for p in _PLIST_PREFIXES), (
+        f"_KIND_INFO label {_info.label!r} doesn't match _PLIST_PREFIXES; "
+        "uninstall_all_schwab_plists won't pick it up"
+    )
+
+
+# Legacy alias mapping — historical kind names that should resolve to
+# their canonical entry without polluting :data:`_KIND_INFO`.
+_KIND_ALIASES: dict[str, str] = {
+    "volatility": "market-data",
+}
+
+
+def _resolve_kind(kind: str) -> _KindInfo:
+    """Look up a ``_KindInfo`` row, normalising legacy aliases."""
+    canonical = _KIND_ALIASES.get(kind, kind)
+    try:
+        return _KIND_INFO[canonical]
+    except KeyError:
+        raise ValueError(
+            f"unsupported plist kind: {kind!r} "
+            f"(expected one of: {', '.join(sorted(_KIND_INFO))})"
+        ) from None
 
 
 def _default_dir() -> Path:
@@ -127,43 +204,29 @@ def _launcher_dir() -> Path:
 
 
 def _launcher_path(kind: str) -> Path:
-    return _launcher_dir() / _LAUNCHER_NAME[kind]
+    return _launcher_dir() / _resolve_kind(kind).launcher_name
 
 
 def _write_launcher(spec: DatasetPlistSpec) -> Path:
     """Write a tiny shell launcher whose filename is the friendly name.
 
     macOS uses ``ProgramArguments[0]``'s basename as the System
-    Settings display label, so a wrapper named "Schwab Indices
-    Dataset" is the simplest way to control that string for an
-    unsigned CLI without pulling in a full .app bundle.
+    Settings display label, so a wrapper named "Schwab Data Sync
+    Service" is the simplest way to control that string for an
+    unsigned CLI without pulling in a full .app bundle. The command
+    body is built from :data:`_KIND_INFO` — single source of truth
+    shared with ``DatasetPlistSpec.program_args``.
     """
-    path = _launcher_path(spec.kind)
+    info = _resolve_kind(spec.kind)
+    path = _launcher_dir() / info.launcher_name
     path.parent.mkdir(parents=True, exist_ok=True)
-    if spec.kind == "indices":
-        cmd = (
-            f'exec {_shquote(spec.binary_path)} dataset update --indices "$@"'
-        )
-    elif spec.kind == "accounts":
-        # accounts cron job — snapshots today's account NAV for every
-        # subscribed account. Runs the dedicated `dataset accounts
-        # snapshot` subcommand which writes ``account_nav_daily`` rows
-        # after sleep_until_ny anchors to NY 17:00 ET.
-        cmd = (
-            f'exec {_shquote(spec.binary_path)} '
-            f'dataset accounts snapshot "$@"'
-        )
-    else:
-        # market-data daily job — invokes the existing --group volatility
-        # CLI path; the daily run iterates whichever products (ohlcv +
-        # volatility) the dataset.json declares.
-        cmd = (
-            f'exec {_shquote(spec.binary_path)} '
-            f'dataset update --group volatility "$@"'
-        )
+    cmd = (
+        f"exec {_shquote(spec.binary_path)} "
+        f"{' '.join(info.cli_args)} \"$@\""
+    )
     body = (
         "#!/bin/sh\n"
-        f"# {_LAUNCHER_NAME[spec.kind]} (auto-generated by schwab_cli)\n"
+        f"# {info.launcher_name} (auto-generated by schwab_cli)\n"
         f"{cmd}\n"
     )
     path.write_text(body)
@@ -186,24 +249,18 @@ class DatasetPlistSpec:
     log_file:    str | None = None
 
     def __post_init__(self) -> None:
-        # 'volatility' accepted as deprecated alias for 'market-data'
-        # during the rename window so callers compiled against the
-        # old constant don't crash. Coerce to the canonical value.
-        if self.kind == "volatility":
-            object.__setattr__(self, "kind", "market-data")
-        if self.kind not in ("indices", "market-data", "accounts"):
-            raise ValueError(
-                f"unsupported plist kind: {self.kind!r} "
-                f"(expected 'indices', 'market-data', or 'accounts')"
-            )
+        # Normalise legacy aliases (e.g. 'volatility' → 'market-data')
+        # so the rest of the code only sees canonical kinds.
+        canonical = _KIND_ALIASES.get(self.kind, self.kind)
+        if canonical != self.kind:
+            object.__setattr__(self, "kind", canonical)
+        # Validate up front — a bogus kind on construction beats a
+        # KeyError two layers deep at install time.
+        _resolve_kind(self.kind)
 
     @property
     def label(self) -> str:
-        if self.kind == "indices":
-            return INDICES_LABEL
-        if self.kind == "accounts":
-            return ACCOUNTS_LABEL
-        return MARKET_DATA_LABEL
+        return _resolve_kind(self.kind).label
 
     @property
     def program_args(self) -> list[str]:
@@ -212,11 +269,7 @@ class DatasetPlistSpec:
         The installed plist references the friendly-named launcher
         script instead — see :func:`build_dataset_plist`.
         """
-        if self.kind == "indices":
-            return [self.binary_path, "dataset", "update", "--indices"]
-        if self.kind == "accounts":
-            return [self.binary_path, "dataset", "accounts", "snapshot"]
-        return [self.binary_path, "dataset", "update", "--group", "volatility"]
+        return [self.binary_path, *_resolve_kind(self.kind).cli_args]
 
     @property
     def plist_path(self) -> Path:
@@ -238,13 +291,12 @@ def build_dataset_plist(
         "Label":                 spec.label,
         "ProgramArguments":      program_args,
         "StartCalendarInterval": crontab_to_calendar_interval(spec.cron),
-        # market-data fires once a day at a TZ-fixed local time. If
-        # the laptop was off when that time passed, RunAtLoad lets the
-        # job pick up on next boot — sleep_until_ny's catch-up branch
-        # then either runs immediately (already past 17:00 ET) or waits
-        # until target. Indices is weekly; RunAtLoad there would cause
-        # a spurious sync every reload, so it stays off.
-        "RunAtLoad":             spec.kind in ("market-data", "accounts"),
+        # RunAtLoad lets a daily job catch up after a missed fire
+        # (laptop closed at the scheduled minute) on next boot — the
+        # entry point's sleep_until_ny either runs immediately if
+        # already past target or waits until target. Per-kind in
+        # :data:`_KIND_INFO`.
+        "RunAtLoad":             _resolve_kind(spec.kind).run_at_load,
         "KeepAlive":             False,
     }
     if spec.log_file:
@@ -289,52 +341,95 @@ def install_plist(spec: DatasetPlistSpec) -> Path:
     return spec.plist_path
 
 
-def uninstall_plist(kind: str) -> Path:
-    """``launchctl unload`` then remove the plist + launcher."""
-    if kind == "volatility":  # deprecated alias for back-compat callers
-        kind = "market-data"
-    if kind == "indices":
-        label = INDICES_LABEL
-    elif kind == "accounts":
-        label = ACCOUNTS_LABEL
-    else:
-        label = MARKET_DATA_LABEL
-    path = _default_dir() / f"{label}.plist"
-    if path.exists():
-        subprocess.run(
-            ["launchctl", "unload", str(path)],
-            check=False,  # already-unloaded is fine
-        )
-        path.unlink()
-    launcher = _launcher_path(kind)
-    if launcher.exists():
-        launcher.unlink()
-    return path
+# (moved to module top — see :data:`_PLIST_PREFIXES`)
 
 
-def uninstall_legacy_volatility_job() -> Path | None:
-    """If the legacy ``com.schwab-cli.dataset.volatility`` job is still
-    installed (pre-rename build), bootout + remove its plist. No-op
-    when the plist isn't present. Returns the plist path that was
-    removed, or ``None`` when the no-op branch hit.
+def uninstall_all_schwab_plists() -> list[Path]:
+    """Unload + remove every Schwab-CLI plist in ``LaunchAgents``,
+    plus the launcher scripts we own.
+
+    Called by both ``cron install`` (clean slate before re-installing
+    the scheduler) and ``cron uninstall`` (full teardown). Sweeping by
+    filename prefix means we don't need a per-kind enumeration and
+    legacy installs from earlier builds (e.g.
+    ``com.schwab-cli.dataset.volatility``) are picked up
+    automatically.
+
+    Launcher cleanup is gated by the known ``launcher_name`` values
+    in :data:`_KIND_INFO` — anything else in the launcher directory
+    is left alone (it isn't ours to delete).
+
+    Raises :class:`RuntimeError` if ``launchctl`` reports a real
+    failure unloading any plist — the on-disk file is left in place
+    so the caller can investigate without ending up with a registered
+    launchd job and no plist to manage it.
     """
-    import os
-    plist = _default_dir() / f"{LEGACY_VOLATILITY_LABEL}.plist"
-    if not plist.exists():
-        return None
-    subprocess.run(
-        ["launchctl", "bootout",
-         f"gui/{os.getuid()}/{LEGACY_VOLATILITY_LABEL}"],
-        check=False, capture_output=True,
+    removed: list[Path] = []
+    plist_dir = _default_dir()
+    if plist_dir.exists():
+        for path in sorted(plist_dir.glob("*.plist")):
+            if not any(path.name.startswith(p) for p in _PLIST_PREFIXES):
+                continue
+            _unload_or_raise(path)
+            path.unlink(missing_ok=True)
+            removed.append(path)
+
+    # Launcher scripts: only remove files whose basenames we
+    # explicitly own. Avoids accidentally nuking unrelated files a
+    # user dropped in the Application Support directory.
+    launcher_dir = _launcher_dir()
+    known_names = {info.launcher_name for info in _KIND_INFO.values()}
+    if launcher_dir.exists():
+        for name in known_names:
+            launcher = launcher_dir / name
+            if not launcher.exists():
+                continue
+            try:
+                launcher.unlink()
+            except FileNotFoundError:
+                # Race with concurrent removal — fine.
+                pass
+            # Note: any other OSError (permission denied, busy)
+            # propagates intentionally. A real launcher failure is
+            # operationally significant and should not be silent.
+    return removed
+
+
+# Strings macOS launchctl uses to indicate "no such loaded service"
+# across the versions we've observed. Both spellings appear in the
+# wild; anything else in stderr is treated as a real failure.
+_LAUNCHCTL_NOT_LOADED_HINTS = (
+    "could not find specified service",
+    "no such file or directory",
+)
+
+
+def _unload_or_raise(plist_path: Path) -> None:
+    """``launchctl unload`` one plist. Tolerates "service not loaded"
+    (already inactive); raises on any other failure.
+
+    macOS ``launchctl`` is inconsistent across versions: some exit 0
+    for unload-when-not-loaded, others exit non-zero with one of the
+    hint strings. We require BOTH conditions (zero exit AND empty or
+    hint-matching stderr) to treat the call as success — the prior
+    "exit 0 alone is fine" rule masked SIP / sandbox failures that
+    exit 0 with a real diagnostic in stderr.
+    """
+    result = subprocess.run(
+        ["launchctl", "unload", str(plist_path)],
+        check=False, capture_output=True, text=True,
     )
-    # ``launchctl unload`` is the pre-bootout-era alternative; try it
-    # too so the cleanup works on older macOS releases.
-    subprocess.run(
-        ["launchctl", "unload", str(plist)],
-        check=False, capture_output=True,
+    err = (result.stderr or "").strip().lower()
+    if result.returncode == 0 and (
+        not err or any(h in err for h in _LAUNCHCTL_NOT_LOADED_HINTS)
+    ):
+        return
+    if any(h in err for h in _LAUNCHCTL_NOT_LOADED_HINTS):
+        return
+    raise RuntimeError(
+        f"launchctl unload failed for {plist_path}: "
+        f"{err or 'exit ' + str(result.returncode)}"
     )
-    plist.unlink(missing_ok=True)
-    return plist
 
 
 # ---- Phase 4: auto-fix plist on fire-time drift ------------------------

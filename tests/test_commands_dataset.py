@@ -137,8 +137,12 @@ def test_update_requires_indices_or_group(runner):
     assert result.exit_code != 0
 
 
-def test_cron_install_indices_writes_plist(runner, monkeypatch, tmp_path):
+def test_cron_install_writes_scheduler_plist(runner, monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "schwab_cli.dataset.launchd.uninstall_all_schwab_plists",
+        lambda: [],
+    )
     calls = []
     def fake_install(spec):
         calls.append((spec.kind, spec.cron, spec.binary_path))
@@ -149,41 +153,27 @@ def test_cron_install_indices_writes_plist(runner, monkeypatch, tmp_path):
         "schwab_cli.commands.dataset.install_plist", fake_install
     )
 
-    result = runner.invoke(app, ["dataset", "cron", "install", "--indices"])
-    assert result.exit_code == 0
-    assert calls[0][0] == "indices"
-    assert calls[0][1] == "0 6 * * 0"
+    result = runner.invoke(app, ["dataset", "cron", "install"])
+    assert result.exit_code == 0, result.output
+    assert calls[0][0] == "scheduler"
+    assert calls[0][1] == "0 4 * * *"
     plist = tmp_path / "Library" / "LaunchAgents" / \
-            "com.schwab-cli.dataset.indices.plist"
+            "com.schwab-cli.scheduler.plist"
     assert plist.exists()
 
 
-def test_cron_uninstall_volatility(runner, monkeypatch, tmp_path):
-    """`--group volatility` now resolves to the unified market-data
-    plist (v4 rename). Uninstall acts on the new label."""
+def test_cron_uninstall_sweeps_all(runner, monkeypatch, tmp_path):
+    """`cron uninstall` removes every Schwab plist, no per-kind flag."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    plist = tmp_path / "Library" / "LaunchAgents" / \
-            "com.schwab-cli.dataset.market-data.plist"
-    plist.parent.mkdir(parents=True, exist_ok=True)
-    plist.write_bytes(b"<plist></plist>")
-
     captured = []
-    def fake_uninstall(kind):
-        captured.append(kind)
-        plist.unlink()
-        return plist
+    def fake_sweep():
+        captured.append("swept")
+        return [tmp_path / "com.schwab-cli.scheduler.plist"]
     monkeypatch.setattr(
-        "schwab_cli.commands.dataset.uninstall_plist", fake_uninstall
+        "schwab_cli.dataset.launchd.uninstall_all_schwab_plists",
+        fake_sweep,
     )
 
-    result = runner.invoke(app, [
-        "dataset", "cron", "uninstall", "--group", "volatility",
-    ])
+    result = runner.invoke(app, ["dataset", "cron", "uninstall"])
     assert result.exit_code == 0
-    assert captured == ["market-data"]
-    assert not plist.exists()
-
-
-def test_cron_install_requires_kind(runner):
-    result = runner.invoke(app, ["dataset", "cron", "install"])
-    assert result.exit_code != 0
+    assert captured == ["swept"]
