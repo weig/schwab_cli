@@ -144,6 +144,66 @@ def test_reconstruct_walks_back_through_a_buy():
     assert by_day[date(2026, 2, 28)].cash == pytest.approx(10000.0)
 
 
+def _tx_with_effect(time_iso, qty, cost, effect, sym="NVDA"):
+    return {
+        "time": time_iso,
+        "type": "TRADE",
+        "netAmount": cost,
+        "transferItems": [{
+            "amount": qty, "cost": cost,
+            "positionEffect": effect, "feeType": None,
+            "instrument": {"symbol": sym, "assetType": "EQUITY"},
+        }],
+    }
+
+
+def test_realized_fifo_long_round_trip():
+    txns = [
+        _tx_with_effect("2026-02-01T15:00:00+0000", 100, -10000, "OPENING"),
+        _tx_with_effect("2026-03-01T15:00:00+0000", -100, 11000, "CLOSING"),
+    ]
+    assert twr.realized_pl_fifo(txns) == pytest.approx(1000.0)
+
+
+def test_realized_fifo_short_round_trip():
+    txns = [
+        _tx_with_effect("2026-02-01T15:00:00+0000", -100, 10000, "OPENING"),
+        _tx_with_effect("2026-03-01T15:00:00+0000", 100, -9000, "CLOSING"),
+    ]
+    assert twr.realized_pl_fifo(txns) == pytest.approx(1000.0)
+
+
+def test_realized_fifo_skips_orphan_closes():
+    txns = [
+        _tx_with_effect("2026-03-01T15:00:00+0000", -100, 11000, "CLOSING"),
+    ]
+    assert twr.realized_pl_fifo(txns) == 0.0
+
+
+def test_classify_transactions_buckets_correctly():
+    txns = [
+        {"time": "2026-02-01T15:00:00+0000", "type": "JOURNAL",
+         "netAmount": 5000.0, "transferItems": []},
+        {"time": "2026-02-05T15:00:00+0000", "type": "JOURNAL",
+         "netAmount": -2000.0, "transferItems": []},
+        {"time": "2026-02-15T15:00:00+0000", "type": "DIVIDEND_OR_INTEREST",
+         "netAmount": 97.0, "transferItems": []},
+        {"time": "2026-03-02T15:00:00+0000", "type": "TRADE",
+         "netAmount": 990.0,
+         "transferItems": [
+             {"amount": 10, "cost": -1000, "positionEffect": "OPENING",
+              "feeType": None,
+              "instrument": {"symbol": "AAPL", "assetType": "EQUITY"}},
+             {"cost": -10.0, "feeType": "COMMISSION"},
+         ]},
+    ]
+    out = twr.classify_transactions(txns)
+    assert out["inflow"] == pytest.approx(5000.0)
+    assert out["outflow"] == pytest.approx(-2000.0)
+    assert out["income"] == pytest.approx(97.0)
+    assert out["fees"] == pytest.approx(-10.0)
+
+
 def test_reconstruct_records_external_flow_on_day_of_deposit():
     today = date(2026, 3, 2)
     txns = [{"time": "2026-03-01T15:00:00+0000", "type": "JOURNAL",

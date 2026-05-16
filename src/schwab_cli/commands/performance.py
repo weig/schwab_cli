@@ -1,37 +1,50 @@
-"""``schwab performance`` — chain-linked TWR for one or more accounts
-over a date range, with SPX / COMP / RUT index comparison.
+"""``schwab performance`` — Schwab-style performance decomposition.
 
-Math: :mod:`schwab_cli.analytics.twr`.
-Data:
-- positions, cash:       :func:`api.accounts.list_accounts`
-- transactions:          :func:`api.transactions_cache.fetch_cached`
-- daily closes:          ``ohlcv_daily`` cache + Schwab pricehistory fallback
-- index closes:          ``$SPX`` / ``$COMPX`` / ``$RUT`` via pricehistory
+Layout matches Schwab's "Change Factor" report:
 
-Limitations of v1:
-- Option positions are excluded from valuation (no OHLCV cache for OSI
-  symbols). Their cash impact is still captured via trade fills.
-- Money-market funds / sweep cash equivalents are treated as cash, not
-  positions, regardless of how Schwab classifies them — the position
-  payload typically already lumps them into ``cashBalance``.
-- Holidays / missing close days forward-fill the prior trading day's
-  close so a market closure doesn't create a value-zero ghost.
+    Beginning Value
+    Net Contributions      ( Contributions + Withdrawals )
+    Investment Changes     ( Realized + Unrealized + Income − Fees )
+    Ending Value
+
+All numbers come from primary-source data:
+
+- Ending Value: today's account API payload (cash + marketValue per position).
+- Inflows / Outflows: ``netAmount`` of pure-cash external transactions
+  (no security legs) in the period.
+- Income: ``netAmount`` for ``DIVIDEND_OR_INTEREST`` transactions.
+- Fees: ``cost`` summed across all fee legs.
+- Realized P&L: FIFO lot matching across in-period TRADE transactions
+  (closes against opens that ALSO sit in the period; orphan closes are
+  skipped — their cost basis predates the window).
+- Unrealized P&L change: derived as residual so identity holds::
+
+      BV + NetContrib + Realized + Unrealized + Income + Fees = EV
+
+  This makes the table reconcile exactly even when individual sub-totals
+  are approximate. The Beginning Value used in this identity is itself
+  computed via position reconstruction (equity-only — options can't be
+  priced historically), so the Unrealized component absorbs the option
+  valuation error. The asterisked footnote surfaces this caveat when
+  any option position touched the account.
+
+Index comparison (SPX / COMP / RUT) uses simple point-to-point returns
+on the index pricehistory.
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import typer
 
 from schwab_cli import config as config_module
 from schwab_cli.analytics.twr import (
-    DailyNav,
     DailyState,
-    chain_link,
+    classify_transactions,
+    realized_pl_fifo,
     reconstruct_history,
     simple_return,
 )
@@ -49,8 +62,6 @@ _NY = ZoneInfo("America/New_York")
 
 
 INDEX_SYMBOLS: list[tuple[str, str]] = [
-    # (display, Schwab symbol). Each is a real tradable index ticker on
-    # Schwab's pricehistory endpoint — no constituent walk required.
     ("SPX",  "$SPX"),
     ("COMP", "$COMPX"),
     ("RUT",  "$RUT"),
@@ -58,16 +69,29 @@ INDEX_SYMBOLS: list[tuple[str, str]] = [
 
 
 @dataclass
-class AccountReturn:
+class AccountPerformance:
+    """One row of the Schwab-style decomposition. All values in
+    period-local dollars. ``unrealized`` is the residual that makes
+    ``BV + NetContrib + Realized + Unrealized + Income + Fees == EV``
+    hold exactly."""
     account_number: str
-    twr: float
-    start_value: float
-    end_value: float
-    net_flow: float  # signed; positive = net deposit over the period
-    # Heuristic — when this is True the account had option positions
-    # at any point. Surfaced in the output so the user knows TWR is
-    # equity-only and may diverge from the broker's number.
-    has_options: bool = False
+    beginning_value: float
+    ending_value: float
+    inflow: float
+    outflow: float
+    realized: float
+    unrealized: float
+    income: float
+    fees: float
+    has_options: bool
+
+    @property
+    def net_contrib(self) -> float:
+        return self.inflow + self.outflow  # outflow stored as negative
+
+    @property
+    def total_gain(self) -> float:
+        return self.realized + self.unrealized + self.income + self.fees
 
 
 # ---- entry point -------------------------------------------------------
@@ -87,7 +111,6 @@ def run(*, range_str: str, account: str | None, as_json: bool) -> None:
         raise typer.Exit(code=1)
 
     client = _client()
-
     typer.echo(
         f"Range: {start_day} → {end_day} ({(end_day - start_day).days}d)",
         err=True,
@@ -102,109 +125,109 @@ def run(*, range_str: str, account: str | None, as_json: bool) -> None:
         )
         raise typer.Exit(code=1)
 
-    account_results: list[AccountReturn] = []
+    results: list[AccountPerformance] = []
     for item in selected:
         sec = item.get("securitiesAccount", {}) or {}
-        acct_no = sec.get("accountNumber") or ""
-        acct_hash = sec.get("hashValue") or _resolve_hash(client, acct_no)
-        result = _compute_account(
-            client,
-            account_number=acct_no,
-            account_hash=acct_hash,
-            sec=sec,
-            start_day=start_day,
-            end_day=end_day,
-            start_dt=start_dt,
-            end_dt=end_dt,
-        )
-        account_results.append(result)
+        results.append(_compute_account(
+            client, sec=sec,
+            start_day=start_day, end_day=end_day,
+            start_dt=start_dt, end_dt=end_dt,
+        ))
 
     index_returns = _compute_index_returns(
         client, start_day=start_day, end_day=end_day,
     )
 
     if as_json:
-        _emit_json(account_results, index_returns,
+        _emit_json(results, index_returns,
                    start_day=start_day, end_day=end_day)
     else:
-        _emit_table(account_results, index_returns,
+        _emit_table(results, index_returns,
                     start_day=start_day, end_day=end_day)
 
 
-# ---- account TWR -------------------------------------------------------
+# ---- per-account decomposition ----------------------------------------
 
 
 def _compute_account(
     client: SchwabClient,
     *,
-    account_number: str,
-    account_hash: str,
     sec: dict,
     start_day: date,
     end_day: date,
     start_dt: datetime,
     end_dt: datetime,
-) -> AccountReturn:
-    today_cash = float(
-        (sec.get("currentBalances") or {}).get("cashBalance") or 0.0
-    )
-    today_positions = _extract_equity_positions(sec)
+) -> AccountPerformance:
+    acct_no = sec.get("accountNumber") or ""
+
+    end_cash, end_market_value = _ending_value_components(sec)
+    end_value = end_cash + end_market_value
+
+    today_positions = _extract_positions(sec)
+    has_options = any(_looks_like_option(s) for s in today_positions)
 
     txns = fetch_txns(
-        client, account_number, start=start_dt, end=end_dt, refresh=False,
+        client, acct_no, start=start_dt, end=end_dt, refresh=False,
     )
-    today = datetime.now(tz=_NY).date()
-    trading_days = _trading_days(start_day, end_day)
-    needed_anchor_days = trading_days + [today]
+    buckets = classify_transactions(txns)
+    realized = realized_pl_fifo(txns)
 
+    today = datetime.now(tz=_NY).date()
+    needed_days = sorted({start_day, today})
     states = reconstruct_history(
         today=today,
         today_positions=today_positions,
-        today_cash=today_cash,
+        today_cash=end_cash,
         transactions=txns,
-        days=needed_anchor_days,
+        days=needed_days,
     )
-
-    # Pull closes for every symbol that appeared at any point in the
-    # reconstructed history. Lazy-fills the cache for unknowns.
-    all_symbols = set()
-    for s in states:
-        all_symbols.update(s.positions.keys())
     closes_by_symbol = _ensure_closes(
-        client, sorted(all_symbols), start=start_day, end=end_day,
+        client, sorted(today_positions.keys()),
+        start=start_day, end=end_day,
+    )
+    beginning_value = _price_state(
+        _find_state(states, start_day), closes=closes_by_symbol,
     )
 
-    navs = _states_to_navs(states, closes=closes_by_symbol, days=trading_days)
-    if not navs:
-        return AccountReturn(
-            account_number=account_number,
-            twr=0.0, start_value=0.0, end_value=0.0, net_flow=0.0,
-        )
-    has_options = any(
-        " " in s or len(s) > 6  # OSI symbols look like "NVDA  260116C00200000"
-        for s in all_symbols
+    net_contrib = buckets["inflow"] + buckets["outflow"]
+    investment_change = end_value - beginning_value - net_contrib
+    unrealized = (
+        investment_change - realized - buckets["income"] - buckets["fees"]
     )
-    return AccountReturn(
-        account_number=account_number,
-        twr=chain_link(navs),
-        start_value=navs[0].value,
-        end_value=navs[-1].value,
-        net_flow=sum(n.external_flow for n in navs),
+
+    return AccountPerformance(
+        account_number=acct_no,
+        beginning_value=beginning_value,
+        ending_value=end_value,
+        inflow=buckets["inflow"],
+        outflow=buckets["outflow"],
+        realized=realized,
+        unrealized=unrealized,
+        income=buckets["income"],
+        fees=buckets["fees"],
         has_options=has_options,
     )
 
 
-def _extract_equity_positions(sec: dict) -> dict[str, float]:
-    """Sum ``longQuantity − shortQuantity`` per symbol in the
-    securitiesAccount payload.
+def _ending_value_components(sec: dict) -> tuple[float, float]:
+    cash = float(
+        (sec.get("currentBalances") or {}).get("cashBalance") or 0.0
+    )
+    mv = 0.0
+    for pos in (sec.get("positions") or []):
+        try:
+            mv += float(pos.get("marketValue") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    return cash, mv
 
-    Option positions are included here — their close-price won't be in
-    the cache so they contribute $0 to NAV — but tracking them keeps
-    the position deltas applied by ``reconstruct_history`` symmetric.
-    Excluding option positions today while still applying option-trade
-    deltas to cash creates a cash-side asymmetry that inflates start-of-
-    period NAV when the account has significant option premium flow.
-    """
+
+def _extract_positions(sec: dict) -> dict[str, float]:
+    """All open positions (equity + option) as ``{symbol: signed_qty}``.
+    Options are tracked here so trade reversals in
+    ``reconstruct_history`` cancel symmetrically — they price at $0
+    historically (no OHLCV) and the residual ``unrealized`` term
+    absorbs the gap."""
     out: dict[str, float] = {}
     for pos in (sec.get("positions") or []):
         inst = pos.get("instrument") or {}
@@ -223,33 +246,42 @@ def _extract_equity_positions(sec: dict) -> dict[str, float]:
     return out
 
 
-def _states_to_navs(
-    states: list[DailyState],
-    *,
-    closes: dict[str, dict[date, float]],
-    days: list[date],
-) -> list[DailyNav]:
-    """Price each daily state and emit NAV records for the trading-day
-    series. Forward-fill missing closes from the prior trading day."""
-    states_by_day = {s.day: s for s in states}
-    last_close: dict[str, float] = {}
-    out: list[DailyNav] = []
-    for d in days:
-        st = states_by_day.get(d)
-        if st is None:
+def _looks_like_option(symbol: str) -> bool:
+    # OSI symbols are fixed-width with spaces, e.g.
+    # "NVDA  260116C00200000". Anything with a space or longer than 6
+    # chars is almost certainly an option.
+    return " " in symbol or len(symbol) > 6
+
+
+def _find_state(states, day: date) -> DailyState:
+    for s in states:
+        if s.day == day:
+            return s
+    for s in states:
+        if s.day >= day:
+            return s
+    return states[0] if states else DailyState(
+        day=day, positions={}, cash=0.0, external_flow=0.0,
+    )
+
+
+def _price_state(
+    state: DailyState, *, closes: dict[str, dict[date, float]],
+) -> float:
+    value = state.cash
+    for sym, qty in state.positions.items():
+        sym_closes = closes.get(sym) or {}
+        if not sym_closes:
             continue
-        value = st.cash
-        for sym, qty in st.positions.items():
-            c = closes.get(sym, {}).get(d)
-            if c is not None:
-                last_close[sym] = c
-            elif sym in last_close:
-                c = last_close[sym]
-            else:
-                continue  # no close for this day or earlier — skip
-            value += qty * c
-        out.append(DailyNav(day=d, value=value, external_flow=st.external_flow))
-    return out
+        price = sym_closes.get(state.day)
+        if price is None:
+            earlier = [d for d in sym_closes if d <= state.day]
+            if earlier:
+                price = sym_closes[max(earlier)]
+        if price is None:
+            continue
+        value += qty * price
+    return value
 
 
 # ---- close-price fetching ---------------------------------------------
@@ -262,10 +294,6 @@ def _ensure_closes(
     start: date,
     end: date,
 ) -> dict[str, dict[date, float]]:
-    """{symbol: {day: close}} covering ``[start, end]``. Cache-first;
-    falls back to Schwab pricehistory for any symbol whose cache doesn't
-    reach back to ``start``. Symbols whose API fetch errors are skipped
-    silently — their contribution to NAV simply degrades."""
     out: dict[str, dict[date, float]] = {}
     if not symbols:
         return out
@@ -294,9 +322,7 @@ def _ensure_closes(
         TextColumn, TimeElapsedColumn,
     )
     err = Console(stderr=True)
-    err.print(
-        f"[dim]Backfilling {len(needs_fetch)} symbol(s) from Schwab…[/dim]"
-    )
+    err.print(f"[dim]Backfilling {len(needs_fetch)} symbol(s)…[/dim]")
     with Progress(
         SpinnerColumn(),
         TextColumn("[bold blue]{task.description}"),
@@ -320,10 +346,7 @@ def _ensure_closes(
                     start=_at_midnight_utc(start),
                     end=_at_midnight_utc(end + timedelta(days=1)),
                 )
-            except Exception as e:
-                progress.console.print(
-                    f"  [yellow]{sym}: skipped ({type(e).__name__})[/yellow]"
-                )
+            except Exception:
                 progress.advance(task)
                 continue
             _cache_api_response(sym, raw)
@@ -371,12 +394,8 @@ def _compute_index_returns(
     return out
 
 
-def _closest_close(
-    candles: list[dict], target: date, *, prefer: str,
-) -> float | None:
-    """Pick the closing price for ``target``, falling forward or back
-    to the nearest trading day if ``target`` itself was a holiday."""
-    pairs: list[tuple[date, float]] = []
+def _closest_close(candles, target, *, prefer):
+    pairs = []
     for c in candles:
         ms = c.get("datetime")
         if ms is None:
@@ -392,41 +411,26 @@ def _closest_close(
         return None
     pairs.sort()
     if prefer == "forward":
-        for d, close in pairs:
+        for d, c in pairs:
             if d >= target:
-                return close
+                return c
         return pairs[-1][1]
-    # backward (default): nearest <= target
-    last: float | None = None
-    for d, close in pairs:
+    last = None
+    for d, c in pairs:
         if d > target:
             break
-        last = close
+        last = c
     return last if last is not None else pairs[0][1]
 
 
 # ---- helpers -----------------------------------------------------------
 
 
-def _trading_days(start: date, end: date) -> list[date]:
-    """All weekdays in [start, end] inclusive. Holidays are handled by
-    the forward-fill in ``_states_to_navs`` — emitting a weekday with
-    no close just reuses the prior day's close, which is identical to
-    skipping it for chain-link purposes."""
-    out: list[date] = []
-    d = start
-    while d <= end:
-        if d.weekday() < 5:  # Mon-Fri
-            out.append(d)
-        d += timedelta(days=1)
-    return out
-
-
 def _at_midnight_utc(d: date) -> datetime:
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
 
-def _filter_accounts(payload, *, account: str | None) -> list[dict]:
+def _filter_accounts(payload, *, account):
     if not isinstance(payload, list):
         return []
     if account is None:
@@ -434,24 +438,12 @@ def _filter_accounts(payload, *, account: str | None) -> list[dict]:
     needle = account.strip()
     return [
         item for item in payload
-        if _matches_account(item, needle)
+        if (item.get("securitiesAccount", {}) or {})
+              .get("accountNumber", "").endswith(needle)
     ]
 
 
-def _matches_account(item: dict, needle: str) -> bool:
-    sec = item.get("securitiesAccount", {}) or {}
-    acct = sec.get("accountNumber") or ""
-    return acct == needle or acct.endswith(needle)
-
-
-def _resolve_hash(client: SchwabClient, account_number: str) -> str:
-    try:
-        return client.resolve_account(account_number).hash_value
-    except Exception:
-        return ""
-
-
-def _client() -> SchwabClient:
+def _client():
     cfg = config_module.load()
     session = load_session()
     if cfg is None or session is None:
@@ -471,97 +463,154 @@ def _client() -> SchwabClient:
 
 
 def _emit_table(
-    accounts: list[AccountReturn],
+    accounts: list[AccountPerformance],
     indices: dict[str, float],
     *, start_day: date, end_day: date,
 ) -> None:
     from rich.console import Console
+    console = Console(width=110, soft_wrap=False)
+    for a in accounts:
+        _render_account_block(console, a,
+                              start_day=start_day, end_day=end_day)
+        console.print("")
+    _render_index_block(console, indices)
+
+
+def _render_account_block(
+    console, a: AccountPerformance,
+    *, start_day: date, end_day: date,
+) -> None:
     from rich.table import Table
 
-    table = Table(
-        title=(
-            f"Performance (TWR) — {start_day} → {end_day}"
-        ),
-        title_justify="left",
-        padding=(0, 1),
+    suffix = a.account_number[-4:] if len(a.account_number) >= 4 \
+        else a.account_number
+    title = (
+        f"Performance Decomposition — acct …{suffix} | "
+        f"{start_day} → {end_day}"
     )
-    table.add_column("Entity",   no_wrap=True)
-    table.add_column("Return",   justify="right")
-    table.add_column("Gain $",   justify="right")
-    table.add_column("Start $",  justify="right", style="dim")
-    table.add_column("End $",    justify="right", style="dim")
-    table.add_column("Net Flow", justify="right", style="dim")
+    table = Table(
+        title=title, title_justify="left", padding=(0, 1),
+        show_header=False,
+    )
+    table.add_column("Change Factor", no_wrap=True)
+    table.add_column("Amount", justify="right")
 
-    any_options = False
-    for a in accounts:
-        any_options = any_options or a.has_options
-        suffix = a.account_number[-4:] if len(a.account_number) >= 4 \
-            else a.account_number
-        label = f"acct …{suffix}"
-        if a.has_options:
-            label += " *"
-        gain = a.end_value - a.start_value - a.net_flow
-        table.add_row(
-            label,
-            _pct_color(a.twr),
-            _money_color(gain),
-            _money(a.start_value),
-            _money(a.end_value),
-            _money(a.net_flow),
+    table.add_row(
+        "[bold]Beginning Value[/bold]",
+        f"[bold]{_money(a.beginning_value)}[/bold]",
+    )
+    table.add_row("", "")
+    table.add_row(
+        "[bold]Net Contributions[/bold]",
+        f"[bold]{_money_signed(a.net_contrib)}[/bold]",
+    )
+    table.add_row("  Contributions",  _money_signed(a.inflow, color=True))
+    table.add_row("  Withdrawals",    _money_signed(a.outflow, color=True))
+    table.add_row("", "")
+    table.add_row(
+        "[bold]Investment Changes[/bold]",
+        f"[bold]{_money_signed(a.total_gain, color=True)}[/bold]",
+    )
+    table.add_row(
+        "  Realized Gain/Loss",   _money_signed(a.realized,   color=True))
+    table.add_row(
+        "  Unrealized Gain/Loss", _money_signed(a.unrealized, color=True))
+    table.add_row(
+        "  Income (div + int)",   _money_signed(a.income,     color=True))
+    table.add_row(
+        "  Fees & Expenses",      _money_signed(a.fees,       color=True))
+    table.add_row("", "")
+    table.add_row(
+        "[bold]Ending Value[/bold]",
+        f"[bold]{_money(a.ending_value)}[/bold]",
+    )
+    console.print(table)
+
+    # Period return % is only meaningful when Beginning Value is
+    # reliable. Option-heavy accounts have an equity-only BV (no OHLCV
+    # cache for OSI symbols), so the % blows up and would mislead the
+    # operator. Show $-gain prominently; suppress the % with a note.
+    if a.has_options:
+        console.print(
+            f"  [bold]Total Gain:[/bold] "
+            f"{_money_signed(a.total_gain, color=True)}   "
+            f"[dim](% return suppressed — Beginning Value is "
+            f"equity-only for option-bearing accounts; see "
+            f"Unrealized residual above)[/dim]"
         )
-    if accounts:
-        table.add_row("", "", "", "", "", "")
+    else:
+        denominator = a.beginning_value + a.net_contrib / 2
+        pct = (a.total_gain / denominator) if denominator > 0 else None
+        if pct is not None:
+            console.print(
+                f"  [bold]Period Return:[/bold] {_pct_color(pct)}   "
+                f"[dim](modified-Dietz)[/dim]"
+            )
+
+
+def _render_index_block(console, indices):
+    from rich.table import Table
+    if not indices:
+        return
+    table = Table(
+        title="Benchmark Returns (same range)",
+        title_justify="left", padding=(0, 1), show_header=False,
+    )
+    table.add_column("Index", no_wrap=True)
+    table.add_column("Return", justify="right")
     for code, _sym in INDEX_SYMBOLS:
         r = indices.get(code)
-        if r is None:
-            table.add_row(code, "—", "", "", "", "")
-        else:
-            table.add_row(code, _pct_color(r), "", "", "", "")
-    console = Console(width=110, soft_wrap=False)
+        table.add_row(code, _pct_color(r) if r is not None else "—")
     console.print(table)
-    if any_options:
-        console.print(
-            "[dim]* equity-only valuation — options contribute $0 to "
-            "NAV (no OHLCV cache for option symbols). TWR for "
-            "option-heavy accounts may diverge from the broker's "
-            "official number.[/dim]"
-        )
 
 
-def _pct_color(v: float) -> str:
+def _money(v):
+    if v is None:
+        return "—"
+    return f"${v:,.2f}"
+
+
+def _money_signed(v, *, color: bool = False) -> str:
+    if v is None:
+        return "—"
+    sign = "+" if v >= 0 else "−"
+    text = f"{sign}${abs(v):,.2f}"
+    if not color:
+        return text
+    if v > 0:
+        return f"[green]{text}[/green]"
+    if v < 0:
+        return f"[red]{text}[/red]"
+    return text
+
+
+def _pct_color(v):
+    if v is None:
+        return "—"
     color = "green" if v > 0 else ("red" if v < 0 else "white")
     return f"[{color}]{v * 100:+.2f}%[/{color}]"
 
 
-def _money(v: float) -> str:
-    if v is None:
-        return "—"
-    return f"${v:,.0f}"
-
-
-def _money_color(v: float) -> str:
-    if v is None:
-        return "—"
-    color = "green" if v > 0 else ("red" if v < 0 else "white")
-    return f"[{color}]${v:+,.0f}[/{color}]"
-
-
-def _emit_json(
-    accounts: list[AccountReturn],
-    indices: dict[str, float],
-    *, start_day: date, end_day: date,
-) -> None:
+def _emit_json(accounts, indices, *, start_day, end_day):
     import json as _json
     typer.echo(_json.dumps({
-        "range": {"start": start_day.isoformat(), "end": end_day.isoformat()},
+        "range": {"start": start_day.isoformat(),
+                  "end":   end_day.isoformat()},
         "accounts": [
             {
-                "account_number": a.account_number,
-                "twr": a.twr,
-                "start_value": a.start_value,
-                "end_value": a.end_value,
-                "net_flow": a.net_flow,
+                "account_number":   a.account_number,
+                "beginning_value":  a.beginning_value,
+                "ending_value":     a.ending_value,
+                "inflow":           a.inflow,
+                "outflow":          a.outflow,
+                "net_contrib":      a.net_contrib,
+                "realized":         a.realized,
+                "unrealized":       a.unrealized,
+                "income":           a.income,
+                "fees":             a.fees,
+                "total_gain":       a.total_gain,
+                "has_options":      a.has_options,
             } for a in accounts
         ],
-        "indices": {k: v for k, v in indices.items()},
+        "indices": indices,
     }, indent=2))

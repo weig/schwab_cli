@@ -288,3 +288,122 @@ def simple_return(start_close: float, end_close: float) -> float:
     if start_close <= 0:
         return 0.0
     return end_close / start_close - 1.0
+
+
+# ---- realized P&L (FIFO) ----------------------------------------------
+
+
+def realized_pl_fifo(transactions: list[dict]) -> float:
+    """Realized P&L summed across all symbols via FIFO lot matching
+    over a list of TRADE transactions.
+
+    Method: walk transactions in time order; for each opening leg push
+    a ``(qty, per_unit_cost)`` lot onto the symbol's queue; for each
+    closing leg pop matching opposite-sign lots FIFO and accrue P&L.
+    Closes with no matching open in the input list are skipped — their
+    cost basis is unknown without extending the transaction window.
+
+    Schwab payload conventions:
+    - ``amount`` is signed: + when received, − when delivered.
+    - ``cost`` is the leg's signed cash impact. We use ``|cost|/|qty|``
+      as the per-unit price and reconstruct the P&L sign from lot
+      direction (long vs short).
+    """
+    from collections import defaultdict, deque
+
+    lots: dict[str, "deque[tuple[float, float]]"] = defaultdict(deque)
+    realized = 0.0
+
+    sorted_txns = sorted(
+        (tx for tx in transactions
+         if (tx.get("type") or "").upper() == "TRADE"),
+        key=lambda t: t.get("time") or "",
+    )
+    for tx in sorted_txns:
+        for leg in (tx.get("transferItems") or []):
+            if leg.get("feeType") is not None:
+                continue
+            inst = leg.get("instrument") or {}
+            sym = inst.get("symbol")
+            atype = (inst.get("assetType") or "").upper()
+            if not sym or atype == "CURRENCY" or sym == "CURRENCY_USD":
+                continue
+            try:
+                qty = float(leg.get("amount") or 0)
+                cost = float(leg.get("cost") or 0)
+            except (TypeError, ValueError):
+                continue
+            if qty == 0:
+                continue
+            per_unit = abs(cost) / abs(qty)
+            effect = (leg.get("positionEffect") or "").upper()
+            if effect == "OPENING":
+                lots[sym].append((qty, per_unit))
+                continue
+            if effect != "CLOSING":
+                continue
+            remaining = qty
+            while abs(remaining) > 1e-9 and lots[sym]:
+                open_qty, open_cost = lots[sym][0]
+                if open_qty * remaining > 0:
+                    break  # same side — not a matching lot
+                matched = min(abs(open_qty), abs(remaining))
+                if open_qty > 0:  # was long → close − open
+                    realized += (per_unit - open_cost) * matched
+                else:             # was short → open − close
+                    realized += (open_cost - per_unit) * matched
+                if matched + 1e-9 >= abs(open_qty):
+                    lots[sym].popleft()
+                else:
+                    new_qty = open_qty + (
+                        matched if open_qty < 0 else -matched
+                    )
+                    lots[sym][0] = (new_qty, open_cost)
+                remaining += matched if remaining < 0 else -matched
+    return realized
+
+
+def classify_transactions(transactions: list[dict]) -> dict[str, float]:
+    """Bucket transactions into the decomposition's change-factor totals.
+
+    Returns::
+
+        inflow         — Σ external cash flows where netAmount > 0
+        outflow        — Σ external cash flows where netAmount < 0
+        income         — Σ netAmount for DIVIDEND_OR_INTEREST
+        fees           — Σ fee-leg costs (signed; typically negative)
+    """
+    out = {"inflow": 0.0, "outflow": 0.0, "income": 0.0, "fees": 0.0}
+    for tx in transactions:
+        t = (tx.get("type") or "").upper()
+        try:
+            net = float(tx.get("netAmount") or 0)
+        except (TypeError, ValueError):
+            net = 0.0
+        for leg in (tx.get("transferItems") or []):
+            if leg.get("feeType") is None:
+                continue
+            try:
+                out["fees"] += float(leg.get("cost") or 0)
+            except (TypeError, ValueError):
+                pass
+        if t == "DIVIDEND_OR_INTEREST":
+            out["income"] += net
+            continue
+        if t == "TRADE":
+            continue
+        if t in _EXTERNAL_CANDIDATE_TYPES:
+            has_security = any(
+                leg.get("feeType") is None
+                and (leg.get("instrument") or {}).get("assetType") != "CURRENCY"
+                and (leg.get("instrument") or {}).get("symbol")
+                    not in (None, "CURRENCY_USD")
+                for leg in (tx.get("transferItems") or [])
+            )
+            if has_security:
+                continue
+            if net > 0:
+                out["inflow"] += net
+            else:
+                out["outflow"] += net
+    return out
