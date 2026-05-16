@@ -55,6 +55,14 @@ EVENTS: dict[str, tuple[Level, str]] = {
         "error",
         "Schwab data sync — access token refresh failed before dispatch.",
     ),
+    "scheduler.binary_not_found": (
+        "error",
+        "Schwab data sync — `schwab` binary missing from PATH.",
+    ),
+    "scheduler.updater_skipped": (
+        "warning",
+        "Schwab data sync — an updater's spawn_argv() raised; skipped.",
+    ),
     "test.hello": (
         "info",
         "Test notification from schwab_cli.",

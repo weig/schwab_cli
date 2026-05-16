@@ -1,28 +1,36 @@
 """Pluggable data updaters dispatched by the unified scheduler.
 
-Each updater describes one independent daily sync task — its name (used
-in logs, Telegram alerts, and ``last_run.json``) and how to spawn it
-as a subprocess. The scheduler iterates :data:`UPDATERS` and pspawns
-each in parallel; one failure doesn't cascade.
+Each updater describes one independent daily sync task — its name
+(used in logs, Telegram alerts, and ``last_run.json``) and how to
+spawn it as a subprocess. The scheduler iterates :data:`UPDATERS`
+and spawns each in parallel; one failure doesn't cascade.
 
-Adding a new data type means: define one ``DataUpdater`` subclass and
-append it to :data:`UPDATERS`. No scheduler edits required.
+Adding a new data type means: define one ``DataUpdater`` subclass
+and append it to :data:`UPDATERS`. No scheduler edits required.
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
-class DataUpdater:
+class DataUpdater(ABC):
     """Abstract base for one dispatchable data-sync task.
 
-    Subclasses set ``name`` and implement :meth:`spawn_argv`. Anything
-    else (anchor hour, freshness threshold, retry policy) lives as a
-    field on the subclass — the scheduler doesn't need to know about
-    job-specific configuration.
-    """
-    name: str = ""
+    Subclasses set ``name`` (class attribute) and implement
+    :meth:`spawn_argv`. Anything else (anchor hour, freshness
+    threshold, retry policy) lives as a field on the subclass — the
+    scheduler doesn't need to know about job-specific configuration.
 
+    Inheriting from :class:`abc.ABC` means a subclass that forgets to
+    override ``spawn_argv`` raises ``TypeError`` at construction
+    rather than only at first call.
+    """
+    # No default — subclasses MUST override. Empty would let a
+    # nameless updater silently slip through type-checking.
+    name: str
+
+    @abstractmethod
     def spawn_argv(
         self, *, binary: str, skip_wait: bool,
     ) -> list[str]:
@@ -33,7 +41,7 @@ class DataUpdater:
         True, the child should bypass any ``sleep_until_ny`` anchor.
         Subclasses must honour the flag if they support waiting.
         """
-        raise NotImplementedError
+        ...
 
 
 @dataclass(frozen=True)
@@ -55,7 +63,7 @@ class MarketDataUpdater(DataUpdater):
 
 
 @dataclass(frozen=True)
-class AccountsUpdater:
+class AccountsUpdater(DataUpdater):
     """Daily account NAV snapshot for every subscribed account.
 
     Anchors internally to NY 17:00 ET so the snapshot reflects the
@@ -73,7 +81,7 @@ class AccountsUpdater:
 
 
 @dataclass(frozen=True)
-class IndicesUpdater:
+class IndicesUpdater(DataUpdater):
     """Index-constituent membership sync.
 
     Anchored to NY 18:00 ET (one hour after market-data) so the
@@ -100,11 +108,20 @@ class IndicesUpdater:
         return argv
 
 
-# The order here only matters for log readability — children run in
-# parallel and their results are reported by name. Appending a new
-# entry is the entire plug-in surface.
-UPDATERS: list[DataUpdater] = [
+# Tuple (not list) so importers can't ``.append`` plugins at runtime
+# from random call sites — pluggability is by source edit, not by
+# mutable global. Adding a new updater = one line here + one new
+# subclass above. Order is meaningless: children run in parallel and
+# their results are reported by name.
+UPDATERS: tuple[DataUpdater, ...] = (
     MarketDataUpdater(),
     AccountsUpdater(),
     IndicesUpdater(),
-]
+)
+
+# Fail-fast invariant: name uniqueness is load-bearing because
+# ``last_run.json`` keys jobs by ``updater.name``. A duplicate would
+# silently clobber peer results.
+assert len({u.name for u in UPDATERS}) == len(UPDATERS), (
+    "UPDATERS registry has duplicate names"
+)

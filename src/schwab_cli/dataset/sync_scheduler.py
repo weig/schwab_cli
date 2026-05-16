@@ -37,22 +37,21 @@ import os
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from schwab_cli.dataset.updaters import UPDATERS
+
 
 _log = logging.getLogger(__name__)
 
 
-from schwab_cli.dataset.updaters import UPDATERS
-
 # Re-exports — name tokens consumed by tests and Telegram alert
-# formatting. Single source of truth lives in ``updaters.py``; this
-# layer just publishes them for convenience.
+# formatting. Sourced from the updater registry so the constants
+# can't drift from the canonical names used at dispatch time.
 JOB_MARKET_DATA = "market-data"
 JOB_ACCOUNTS    = "accounts"
 JOB_INDICES     = "indices"
@@ -118,7 +117,7 @@ def run_daily_sync(
 
     binary = binary_path or _resolve_binary(notifier)
 
-    jobs = _job_commands(binary, skip_wait=skip_wait)
+    jobs = _job_commands(binary, skip_wait=skip_wait, notifier=notifier)
     results = _dispatch_parallel(jobs, child_timeout_s=child_timeout_s)
 
     failed = [r for r in results if not r.succeeded]
@@ -235,16 +234,33 @@ def _ensure_token_valid(notifier) -> None:
 
 
 def _job_commands(
-    binary: str, *, skip_wait: bool,
+    binary: str, *, skip_wait: bool, notifier=None,
 ) -> list[tuple[str, list[str]]]:
     """Build ``[(name, argv), ...]`` from the pluggable
     :data:`schwab_cli.dataset.updaters.UPDATERS` registry. Adding a
     new daily task means appending one entry to that list — no edits
-    to this file."""
-    return [
-        (u.name, u.spawn_argv(binary=binary, skip_wait=skip_wait))
-        for u in UPDATERS
-    ]
+    to this file.
+
+    A misbehaving updater whose ``spawn_argv`` raises is *skipped*
+    rather than crashing the whole sync — the scheduler's job is to
+    isolate failures, not amplify them. Skipped updaters surface as
+    a notifier event so the operator can see which plugin broke.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for u in UPDATERS:
+        try:
+            out.append((u.name, u.spawn_argv(
+                binary=binary, skip_wait=skip_wait,
+            )))
+        except Exception as e:
+            _log.exception("updater %s spawn_argv failed", u.name)
+            if notifier is not None:
+                notifier.emit(
+                    "scheduler.updater_skipped",
+                    updater=u.name,
+                    error=f"{type(e).__name__}: {e}",
+                )
+    return out
 
 
 def _dispatch_parallel(
@@ -351,17 +367,18 @@ def _tail_lines(text: str, *, n: int) -> str:
 def _resolve_binary(notifier=None) -> str:
     """Look up the ``schwab`` console-script. Falls back to the
     legacy ``schwab_cli`` name. When neither is on PATH we emit a
-    notifier event and return the literal ``"schwab"`` — Popen will
-    then fail loudly with FileNotFoundError, which the parent's
-    outer handling treats as a fatal scheduler error."""
+    distinct ``scheduler.binary_not_found`` event and return the
+    literal ``"schwab"`` — Popen will then fail loudly with
+    FileNotFoundError, which the parent's outer handling treats as
+    a fatal scheduler error."""
     for name in ("schwab", "schwab_cli"):
         path = shutil.which(name)
         if path:
             return path
     if notifier is not None:
         notifier.emit(
-            "scheduler.token_refresh_failed",
-            reason="schwab binary not found on PATH",
+            "scheduler.binary_not_found",
+            reason="neither `schwab` nor `schwab_cli` found on PATH",
         )
     return "schwab"
 

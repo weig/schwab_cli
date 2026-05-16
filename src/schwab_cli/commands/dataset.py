@@ -540,7 +540,15 @@ def cron_install(doc: bool = doc_option()) -> None:
     # picks up any spec change), every legacy per-job plist
     # (indices / market-data / accounts), and the pre-rename
     # `com.schwab-cli.dataset.volatility` plist if it's still there.
-    removed = uninstall_all_schwab_plists()
+    # ``uninstall_all_schwab_plists`` raises RuntimeError on a real
+    # launchctl failure; surface it as a typed CLI error rather than
+    # a raw Python traceback.
+    try:
+        removed = uninstall_all_schwab_plists()
+    except RuntimeError as e:
+        typer.secho(f"install aborted: {e}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     for path in removed:
         typer.secho(f"removed → {path}", fg=typer.colors.YELLOW)
 
@@ -566,7 +574,12 @@ def cron_install(doc: bool = doc_option()) -> None:
 )
 def cron_uninstall(doc: bool = doc_option()) -> None:
     from schwab_cli.dataset.launchd import uninstall_all_schwab_plists
-    removed = uninstall_all_schwab_plists()
+    try:
+        removed = uninstall_all_schwab_plists()
+    except RuntimeError as e:
+        typer.secho(f"uninstall aborted: {e}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     if not removed:
         typer.secho("nothing to remove", fg=typer.colors.GREEN)
         return
