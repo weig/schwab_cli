@@ -185,8 +185,11 @@ def _compute_account(
         client, sorted(today_positions.keys()),
         start=start_day, end=end_day,
     )
+    avg_price = _avg_price_by_symbol(sec)
     beginning_value = _price_state(
-        _find_state(states, start_day), closes=closes_by_symbol,
+        _find_state(states, start_day),
+        closes=closes_by_symbol,
+        avg_price=avg_price,
     )
 
     net_contrib = buckets["inflow"] + buckets["outflow"]
@@ -253,6 +256,32 @@ def _looks_like_option(symbol: str) -> bool:
     return " " in symbol or len(symbol) > 6
 
 
+def _avg_price_by_symbol(sec: dict) -> dict[str, float]:
+    """Map ``symbol → averagePrice`` from the current positions payload.
+
+    Used as a historical-valuation fallback for option symbols with no
+    OHLCV cache: cost basis × qty × contract-multiplier is a far better
+    proxy than $0 for positions that existed at the start of the
+    period. The approximation: a position's value at start_day is
+    treated as its lifetime cost basis. For options held all the way
+    through the period this materially closes the Beginning Value gap
+    against Schwab's official number.
+    """
+    out: dict[str, float] = {}
+    for pos in (sec.get("positions") or []):
+        inst = pos.get("instrument") or {}
+        sym = inst.get("symbol")
+        if not sym:
+            continue
+        try:
+            avg = float(pos.get("averagePrice") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if avg > 0:
+            out[sym] = avg
+    return out
+
+
 def _find_state(states, day: date) -> DailyState:
     for s in states:
         if s.day == day:
@@ -266,18 +295,36 @@ def _find_state(states, day: date) -> DailyState:
 
 
 def _price_state(
-    state: DailyState, *, closes: dict[str, dict[date, float]],
+    state: DailyState,
+    *,
+    closes: dict[str, dict[date, float]],
+    avg_price: dict[str, float] | None = None,
 ) -> float:
+    """Value a position+cash snapshot using daily closes.
+
+    Fallback chain per symbol:
+    1. closing price for ``state.day``
+    2. nearest earlier close in the cache
+    3. ``avg_price[symbol]`` × contract multiplier (option positions
+       have no OHLCV cache — cost basis is a sane non-zero proxy)
+    4. $0 (contribute nothing)
+    """
     value = state.cash
+    avg_price = avg_price or {}
     for sym, qty in state.positions.items():
+        price: float | None = None
         sym_closes = closes.get(sym) or {}
-        if not sym_closes:
-            continue
-        price = sym_closes.get(state.day)
-        if price is None:
-            earlier = [d for d in sym_closes if d <= state.day]
-            if earlier:
-                price = sym_closes[max(earlier)]
+        if sym_closes:
+            price = sym_closes.get(state.day)
+            if price is None:
+                earlier = [d for d in sym_closes if d <= state.day]
+                if earlier:
+                    price = sym_closes[max(earlier)]
+        if price is None and sym in avg_price:
+            # Option marketValue uses a 100× multiplier in Schwab's
+            # payload. Equity averagePrice is per share (multiplier 1).
+            mult = 100.0 if _looks_like_option(sym) else 1.0
+            price = avg_price[sym] * mult
         if price is None:
             continue
         value += qty * price

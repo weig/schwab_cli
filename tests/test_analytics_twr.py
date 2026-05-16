@@ -79,7 +79,7 @@ def test_parse_transaction_buy_records_position_and_cash():
 
 
 def test_parse_transaction_external_flow_marks_pure_cash_journal():
-    raw = {"time": "2026-03-01T15:00:00+0000", "type": "JOURNAL",
+    raw = {"time": "2026-03-01T15:00:00+0000", "type": "CASH_RECEIPT",
            "netAmount": 5000.0, "transferItems": []}
     d = twr.parse_transaction(raw)
     assert d.is_external_flow is True
@@ -182,9 +182,9 @@ def test_realized_fifo_skips_orphan_closes():
 
 def test_classify_transactions_buckets_correctly():
     txns = [
-        {"time": "2026-02-01T15:00:00+0000", "type": "JOURNAL",
+        {"time": "2026-02-01T15:00:00+0000", "type": "CASH_RECEIPT",
          "netAmount": 5000.0, "transferItems": []},
-        {"time": "2026-02-05T15:00:00+0000", "type": "JOURNAL",
+        {"time": "2026-02-05T15:00:00+0000", "type": "CASH_RECEIPT",
          "netAmount": -2000.0, "transferItems": []},
         {"time": "2026-02-15T15:00:00+0000", "type": "DIVIDEND_OR_INTEREST",
          "netAmount": 97.0, "transferItems": []},
@@ -206,7 +206,7 @@ def test_classify_transactions_buckets_correctly():
 
 def test_reconstruct_records_external_flow_on_day_of_deposit():
     today = date(2026, 3, 2)
-    txns = [{"time": "2026-03-01T15:00:00+0000", "type": "JOURNAL",
+    txns = [{"time": "2026-03-01T15:00:00+0000", "type": "CASH_RECEIPT",
              "netAmount": 1000.0, "transferItems": []}]
     states = twr.reconstruct_history(
         today=today,
