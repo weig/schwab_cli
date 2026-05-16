@@ -496,6 +496,10 @@ def _resolve_cron_kind(indices: bool, group: str | None) -> str:
 def cron_install(
     indices: bool = typer.Option(False, "--indices"),
     group: str = typer.Option(None, "--group"),
+    accounts: bool = typer.Option(
+        False, "--accounts",
+        help="Install the accounts NAV daily snapshot cron.",
+    ),
     doc: bool = doc_option(),
 ) -> None:
     import shutil
@@ -504,17 +508,31 @@ def cron_install(
     )
 
     from schwab_cli.dataset.launchd import (
+        ACCOUNTS_CRON_LOCAL,
         INDICES_CRON_LOCAL, MARKET_DATA_CRON_LOCAL,
         uninstall_legacy_volatility_job,
     )
 
-    kind = _resolve_cron_kind(indices, group)
+    if accounts:
+        if indices or group:
+            typer.secho(
+                "pass --accounts alone (no --indices or --group)",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=2)
+        kind = "accounts"
+    else:
+        kind = _resolve_cron_kind(indices, group)
     cfg = load_config_or_default()
     if not config_path().exists():
         save_config(cfg)
     # v2: cron expressions live in code (installer-owned), not config.
-    cron_expr = (INDICES_CRON_LOCAL if kind == "indices"
-                 else MARKET_DATA_CRON_LOCAL)
+    if kind == "indices":
+        cron_expr = INDICES_CRON_LOCAL
+    elif kind == "accounts":
+        cron_expr = ACCOUNTS_CRON_LOCAL
+    else:
+        cron_expr = MARKET_DATA_CRON_LOCAL
 
     # Clean up the legacy `com.schwab-cli.dataset.volatility` plist
     # before installing under the new market-data label so users
@@ -547,8 +565,124 @@ def cron_install(
 def cron_uninstall(
     indices: bool = typer.Option(False, "--indices"),
     group: str = typer.Option(None, "--group"),
+    accounts: bool = typer.Option(False, "--accounts"),
     doc: bool = doc_option(),
 ) -> None:
-    kind = _resolve_cron_kind(indices, group)
+    if accounts:
+        kind = "accounts"
+    else:
+        kind = _resolve_cron_kind(indices, group)
     path = uninstall_plist(kind)
     typer.secho(f"removed → {path}", fg=typer.colors.GREEN)
+
+
+# ---- accounts NAV ---------------------------------------------------
+
+
+accounts_app = typer.Typer(
+    help="Account NAV history — snapshot today, backfill, query."
+)
+app.add_typer(accounts_app, name="accounts")
+
+
+@accounts_app.command(
+    "snapshot",
+    help=("Snapshot today's NAV for every account. Sleeps until "
+          "NY 17:00 ET first so the snapshot reflects the day's close. "
+          "Pass --skip-wait for immediate runs."),
+)
+def accounts_snapshot(
+    skip_wait: bool = typer.Option(
+        False, "--skip-wait",
+        help="Skip sleep_until_ny anchor — write snapshot now.",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    from schwab_cli.api.client import SchwabClient
+    from schwab_cli import config as config_module
+    from schwab_cli.dataset.accounts_nav import snapshot_all_accounts
+    from schwab_cli.session import load as load_session
+
+    if not skip_wait:
+        sleep_until_ny(_TARGET_NY_HOUR, 0)
+
+    cfg = config_module.load()
+    session = load_session()
+    if cfg is None or session is None:
+        typer.secho(
+            "No auth — run `schwab setup` + `schwab auth` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    client = SchwabClient(cfg, session)
+    results = snapshot_all_accounts(client)
+    for r in results:
+        suffix = r.account_number[-4:] if len(r.account_number) >= 4 \
+            else r.account_number
+        typer.echo(
+            f"acct …{suffix}  total ${r.total_value:,.2f}  "
+            f"(cash ${r.cash:,.2f} + MV ${r.market_value:,.2f})"
+        )
+
+
+@accounts_app.command(
+    "backfill",
+    help=("Backfill historical NAV using transaction replay + BS "
+          "option pricing. Days that touched options are flagged "
+          "as estimated."),
+)
+def accounts_backfill(
+    range_str: str = typer.Option(
+        "ytd", "--range",
+        help="Date range: 'ytd', 'mtd', '<start>..<end>' (YYYYMMDD..now).",
+    ),
+    account: str = typer.Option(
+        None, "--account",
+        help="Filter to one account (full number or last-4 suffix).",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    from schwab_cli.api.client import SchwabClient
+    from schwab_cli import config as config_module
+    from schwab_cli.dataset.accounts_nav import backfill_range
+    from schwab_cli.history_spec import RangeSpecError, parse_range
+    from schwab_cli.session import load as load_session
+
+    try:
+        start_dt, end_dt = parse_range(range_str)
+    except RangeSpecError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    start_day = start_dt.astimezone(_NY_TZ).date()
+    end_day   = end_dt.astimezone(_NY_TZ).date()
+
+    cfg = config_module.load()
+    session = load_session()
+    if cfg is None or session is None:
+        typer.secho(
+            "No auth — run `schwab setup` + `schwab auth` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    client = SchwabClient(cfg, session)
+
+    typer.echo(f"Backfilling {start_day} → {end_day}…", err=True)
+
+    def _progress(*, account, day, written, total, **_):
+        if written % 10 == 0 or written == total:
+            typer.echo(
+                f"  …{account[-4:]} {day}: {written}/{total}", err=True,
+            )
+
+    results = backfill_range(
+        client, account_number=account,
+        start=start_day, end=end_day,
+        progress_cb=_progress,
+    )
+    for r in results:
+        suffix = r.account_number[-4:] if len(r.account_number) >= 4 \
+            else r.account_number
+        typer.echo(
+            f"acct …{suffix}: wrote {r.days_written} days "
+            f"({r.days_estimated} estimated)"
+        )

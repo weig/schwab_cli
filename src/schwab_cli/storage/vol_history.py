@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -99,6 +99,25 @@ CREATE TABLE IF NOT EXISTS ohlcv_daily (
 
 CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_day
     ON ohlcv_daily (symbol, day);
+
+-- Daily account NAV snapshots — what powers period-bounded
+-- performance attribution. ``is_estimated = 1`` indicates the day
+-- used BS-reconstructed option prices instead of true historical
+-- marketValue; the performance command surfaces a warning when any
+-- queried day carries this flag.
+CREATE TABLE IF NOT EXISTS account_nav_daily (
+    account_hash    TEXT    NOT NULL,
+    day             TEXT    NOT NULL,
+    market_value    REAL    NOT NULL,
+    cash            REAL    NOT NULL,
+    total_value     REAL    NOT NULL,
+    is_estimated    INTEGER NOT NULL DEFAULT 0,
+    captured_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (account_hash, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_nav_account_day
+    ON account_nav_daily (account_hash, day);
 """
 
 # Allowed values for the `source` column.
