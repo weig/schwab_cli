@@ -24,6 +24,104 @@ INDICES_GRACE_DAYS_AFTER_REMOVAL = 30
 _INDICES_GRACE_MS = INDICES_GRACE_DAYS_AFTER_REMOVAL * 86_400_000
 
 
+# ---- watchlist subscriptions ------------------------------------------
+#
+# `source='watch'` is a distinct provenance from 'equity' / 'position' /
+# 'indices'. A row exists in `subscriptions` per (symbol, group_name)
+# while the symbol is on the user's manual watchlist. Removing from the
+# watchlist soft-deletes the watch rows; the cron still picks up the
+# symbol if any OTHER source covers it.
+
+
+def subscribe_watch(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+    captured_at_ms: int | None = None,
+) -> None:
+    """Insert or revive a watchlist subscription for ``(symbol, group_name)``.
+
+    Idempotent — already-active rows are a no-op; previously-removed
+    rows have ``unsubscribed_at`` cleared.
+    """
+    if captured_at_ms is None:
+        captured_at_ms = _now_ms()
+    conn.execute(
+        """
+        INSERT INTO subscriptions
+          (symbol, group_name, source, source_key,
+           subscribed_at, unsubscribed_at)
+        VALUES (?, ?, 'watch', '', ?, NULL)
+        ON CONFLICT (symbol, group_name, source, source_key) DO UPDATE SET
+          subscribed_at   = excluded.subscribed_at,
+          unsubscribed_at = NULL
+        WHERE subscriptions.unsubscribed_at IS NOT NULL
+        """,
+        (symbol, group_name, captured_at_ms),
+    )
+
+
+def unsubscribe_watch(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+    captured_at_ms: int | None = None,
+) -> None:
+    """Soft-delete the watch row for ``(symbol, group_name)``."""
+    if captured_at_ms is None:
+        captured_at_ms = _now_ms()
+    conn.execute(
+        """
+        UPDATE subscriptions SET unsubscribed_at = ?
+        WHERE symbol = ? AND group_name = ?
+          AND source = 'watch' AND source_key = ''
+          AND unsubscribed_at IS NULL
+        """,
+        (captured_at_ms, symbol, group_name),
+    )
+
+
+def list_watched_symbols(
+    conn: sqlite3.Connection,
+) -> list[str]:
+    """Return distinct symbols on the active watchlist, ordered."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT symbol FROM subscriptions
+        WHERE source = 'watch' AND unsubscribed_at IS NULL
+        ORDER BY symbol
+        """
+    ).fetchall()
+    return [r["symbol"] for r in rows]
+
+
+def has_other_active_source(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    group_name: str,
+    exclude_source: str,
+) -> bool:
+    """True when ``symbol`` is subscribed via any source other than
+    ``exclude_source`` for the given ``group_name``. Used by watch
+    remove to decide whether other data sources still keep the symbol
+    flowing — if not, watch remove demotes ticker_state to GRACE so
+    the cron ages it out."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM subscriptions
+        WHERE symbol = ? AND group_name = ?
+          AND source != ?
+          AND unsubscribed_at IS NULL
+        LIMIT 1
+        """,
+        (symbol, group_name, exclude_source),
+    ).fetchone()
+    return row is not None
+
+
 # ---- equity subscriptions ----------------------------------------------
 
 
