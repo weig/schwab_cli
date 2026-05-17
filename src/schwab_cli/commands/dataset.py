@@ -399,6 +399,9 @@ def update(
     now_ms = int(time.time() * 1000)
 
     if indices:
+        from schwab_cli.dataset.audit_log import task_log
+        audit = task_log("indices")
+        audit.info("start")
         # --max-age-days guard for the unified scheduler. Indices
         # constituents churn slowly; weekly is plenty. Skipping in-
         # window runs lets the scheduler dispatch indices every day
@@ -421,6 +424,10 @@ def update(
             if last_ms is not None:
                 age_days = (time.time() * 1000 - last_ms) / 86_400_000
                 if age_days < max_age_days:
+                    audit.info(
+                        f"last sync {age_days:.1f}d ago, "
+                        f"within {max_age_days}d threshold; skipping"
+                    )
                     typer.secho(
                         f"indices: skipped — local subscriptions table "
                         f"last touched {age_days:.1f}d ago "
@@ -428,9 +435,14 @@ def update(
                         fg=typer.colors.GREEN,
                     )
                     return
+                audit.info(
+                    f"last sync {age_days:.1f}d ago, "
+                    f"exceeds {max_age_days}d threshold; running"
+                )
         # Optional anchor for the unified scheduler (e.g. wait until
         # 18 ET to space the request from market-data).
         if not skip_wait and anchor_hour != 17:
+            audit.info(f"sleep_until_ny({anchor_hour}:00 ET)")
             sleep_until_ny(anchor_hour, 0)
         with httpx.Client(timeout=30.0) as http_client:
             with vol_history.connect() as conn:
@@ -438,20 +450,36 @@ def update(
                     conn, http_client=http_client,
                     group_name="volatility", now_ms=now_ms,
                 )
+        errors = 0
         for idx, info in summary.items():
             if "error" in info:
+                errors += 1
+                audit.error(f"{idx}: {info['error']}")
                 typer.secho(f"{idx}: ERROR {info['error']}",
                             fg=typer.colors.RED)
             else:
+                audit.info(
+                    f"{idx}: total={info['total']} "
+                    f"+{len(info['added'])} -{len(info['removed'])}"
+                )
                 typer.echo(
                     f"{idx}: total={info['total']} "
                     f"+{len(info['added'])} −{len(info['removed'])}"
                 )
+        audit.info(
+            f"finished, {len(summary)} indices processed, "
+            f"{errors} errored"
+        )
         return
+
+    from schwab_cli.dataset.audit_log import task_log
+    audit = task_log("market-data")
+    audit.info(f"start (group={group})")
 
     cfg_full = config_module.load()
     sess = load_session()
     if cfg_full is None or sess is None:
+        audit.error("auth missing — schwab setup + schwab auth required")
         typer.secho("Run `schwab_cli setup` and `schwab_cli auth` first.",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -467,6 +495,12 @@ def update(
     typer.echo("")  # blank line before summary
     typer.echo(
         f"sampled={len(summary['sampled'])} "
+        f"skipped={len(summary['skipped'])} "
+        f"errors={len(summary['errors'])} "
+        f"transitions={len(summary['transitions'])}"
+    )
+    audit.info(
+        f"finished, sampled={len(summary['sampled'])} "
         f"skipped={len(summary['skipped'])} "
         f"errors={len(summary['errors'])} "
         f"transitions={len(summary['transitions'])}"
@@ -632,14 +666,20 @@ def accounts_snapshot(
     from schwab_cli.api.client import SchwabClient
     from schwab_cli import config as config_module
     from schwab_cli.dataset.accounts_nav import snapshot_all_accounts
+    from schwab_cli.dataset.audit_log import task_log
     from schwab_cli.session import load as load_session
 
+    audit = task_log("accounts")
+    audit.info("start")
+
     if not skip_wait:
+        audit.info(f"sleep_until_ny({_TARGET_NY_HOUR}:00 ET)")
         sleep_until_ny(_TARGET_NY_HOUR, 0)
 
     cfg = config_module.load()
     session = load_session()
     if cfg is None or session is None:
+        audit.error("auth missing — schwab setup + schwab auth required")
         typer.secho(
             "No auth — run `schwab setup` + `schwab auth` first.",
             fg=typer.colors.RED, err=True,
@@ -650,10 +690,15 @@ def accounts_snapshot(
     for r in results:
         suffix = r.account_number[-4:] if len(r.account_number) >= 4 \
             else r.account_number
+        audit.info(
+            f"acct …{suffix} total ${r.total_value:,.2f} "
+            f"(cash ${r.cash:,.2f} + MV ${r.market_value:,.2f})"
+        )
         typer.echo(
             f"acct …{suffix}  total ${r.total_value:,.2f}  "
             f"(cash ${r.cash:,.2f} + MV ${r.market_value:,.2f})"
         )
+    audit.info(f"finished, {len(results)} account(s) snapshotted")
 
 
 @accounts_app.command(

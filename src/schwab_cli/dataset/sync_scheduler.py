@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from schwab_cli.dataset.audit_log import scheduler_log
 from schwab_cli.dataset.updaters import UPDATERS
 
 
@@ -114,6 +115,8 @@ def run_daily_sync(
     operator with no signal that the cron silently broke.
     """
     started_at = datetime.now(tz=timezone.utc)
+    audit = scheduler_log()
+    audit.info("start")
 
     if notifier is None:
         from schwab_cli.notify import Notifier
@@ -126,19 +129,22 @@ def run_daily_sync(
             binary_path=binary_path,
             child_timeout_s=child_timeout_s,
             started_at=started_at,
+            audit=audit,
         )
     except Exception as e:
         import traceback as _tb
         tb = _tb.format_exc()
         _log.exception("scheduler crashed before completing run")
+        audit.error(f"crashed: {type(e).__name__}: {e}")
         try:
             notifier.emit(
                 "scheduler.crashed",
                 error=f"{type(e).__name__}: {e}",
                 traceback=tb,
             )
-        except Exception:
-            pass
+            audit.info("alert dispatched: scheduler.crashed")
+        except Exception as alert_err:
+            audit.error(f"alert dispatch failed: {alert_err}")
         try:
             _write_last_run(RunSummary(
                 started_at=started_at.isoformat(timespec="seconds"),
@@ -168,27 +174,50 @@ def _run_daily_sync_inner(
     binary_path: str | None,
     child_timeout_s: float,
     started_at: datetime,
+    audit,
 ) -> int:
     _ensure_token_valid(notifier)
 
     binary = binary_path or _resolve_binary(notifier)
+    audit.info(f"binary resolved: {binary}")
 
     jobs = _job_commands(binary, skip_wait=skip_wait, notifier=notifier)
-    results = _dispatch_parallel(jobs, child_timeout_s=child_timeout_s)
+    audit.info(
+        f"scheduled {len(jobs)} task(s): "
+        f"{', '.join(name for name, _ in jobs)}"
+    )
+    results = _dispatch_parallel(
+        jobs, child_timeout_s=child_timeout_s, audit=audit,
+    )
 
     failed = [r for r in results if not r.succeeded]
+    succeeded = [r for r in results if r.succeeded]
     finished_at = datetime.now(tz=timezone.utc)
+    elapsed = (finished_at - started_at).total_seconds()
+    audit.info(
+        f"summary: {len(results)} dispatched, "
+        f"{len(succeeded)} succeeded, {len(failed)} failed, "
+        f"{sum(1 for r in results if r.timed_out)} timed out "
+        f"(elapsed {elapsed:.1f}s)"
+    )
 
     if failed:
-        notifier.emit(
-            "scheduler.job_failed",
-            failed=", ".join(r.name for r in failed),
-            details="\n".join(
-                f"{r.name} ({_outcome_label(r)}, "
-                f"{r.duration_s:.0f}s):\n{r.stdout_tail}"
-                for r in failed
-            ),
-        )
+        try:
+            notifier.emit(
+                "scheduler.job_failed",
+                failed=", ".join(r.name for r in failed),
+                details="\n".join(
+                    f"{r.name} ({_outcome_label(r)}, "
+                    f"{r.duration_s:.0f}s):\n{r.stdout_tail}"
+                    for r in failed
+                ),
+            )
+            audit.info(
+                f"alert dispatched: scheduler.job_failed "
+                f"({', '.join(r.name for r in failed)})"
+            )
+        except Exception as alert_err:
+            audit.error(f"alert dispatch failed: {alert_err}")
 
     summary = RunSummary(
         started_at=started_at.isoformat(timespec="seconds"),
@@ -206,6 +235,9 @@ def _run_daily_sync_inner(
         ],
     )
     _write_last_run(summary)
+    audit.info(
+        f"finished (rc={0 if not failed else 1}, elapsed {elapsed:.1f}s)"
+    )
 
     return 0 if not failed else 1
 
@@ -323,6 +355,7 @@ def _dispatch_parallel(
     jobs: list[tuple[str, list[str]]],
     *,
     child_timeout_s: float,
+    audit=None,
 ) -> list[JobResult]:
     """Start every job concurrently and wait for all to finish.
 
@@ -362,8 +395,15 @@ def _dispatch_parallel(
             # open if the parent crashes before .wait().
             log_fh.close()
             children.append((name, p, log_path, time.time()))
+            if audit is not None:
+                audit.info(f"task {name} started (pid={p.pid})")
         except (OSError, ValueError) as e:
             _log.exception("failed to spawn %s", name)
+            if audit is not None:
+                audit.error(
+                    f"task {name} spawn failed: "
+                    f"{type(e).__name__}: {e}"
+                )
             spawn_failures.append(JobResult(
                 name=name,
                 returncode=-1,
@@ -401,11 +441,18 @@ def _dispatch_parallel(
         elapsed = time.time() - started_at
         output = _read_log_safe(log_path)
         tail = _tail_lines(output, n=15)
+        rc_eff = p.returncode if p.returncode is not None else -1
         _log.info("%s exited rc=%s after %.1fs (timed_out=%s)\n%s",
-                  name, p.returncode, elapsed, timed_out, output)
+                  name, rc_eff, elapsed, timed_out, output)
+        if audit is not None:
+            outcome = "timed out" if timed_out else f"exit {rc_eff}"
+            audit.info(
+                f"task {name} finished, {outcome}, "
+                f"elapsed {elapsed:.1f}s"
+            )
         results.append(JobResult(
             name=name,
-            returncode=p.returncode if p.returncode is not None else -1,
+            returncode=rc_eff,
             duration_s=elapsed,
             stdout_tail=tail,
             timed_out=timed_out,
