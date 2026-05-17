@@ -172,9 +172,23 @@ def connect() -> Iterator[sqlite3.Connection]:
     except OSError:
         pass
     _rename_legacy_db_in_place(path)
-    conn = sqlite3.connect(str(path))
+    # ``timeout`` is the connection-level busy timeout: how long
+    # sqlite3 waits to acquire a write lock before raising
+    # OperationalError("database is locked"). The scheduler runs
+    # market-data, accounts, and indices in parallel — all three
+    # write to this same file. Without a generous timeout one of
+    # them hits the lock on the others' commit and fails the whole
+    # job. 30s is comfortably longer than any single transaction we
+    # do (per-symbol upserts complete in ms), so writers wait their
+    # turn instead of failing.
+    conn = sqlite3.connect(str(path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
+    # Defence-in-depth: also set busy_timeout at the SQLite layer.
+    # Python's ``timeout=`` argument hooks the busy handler; both
+    # mechanisms target the same problem but the explicit pragma
+    # survives connection inheritance into spawned helpers.
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         _migrate(conn)
         yield conn
