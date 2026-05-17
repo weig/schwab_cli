@@ -87,9 +87,13 @@ def connect() -> Iterator[sqlite3.Connection]:
         path.parent.chmod(0o700)
     except OSError:
         pass
-    conn = sqlite3.connect(str(path))
+    # 30s busy timeout — mirrors ``vol_history.connect`` so writer
+    # contention from the scheduler's parallel children waits its
+    # turn instead of failing.
+    conn = sqlite3.connect(str(path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         _migrate(conn)
         yield conn
