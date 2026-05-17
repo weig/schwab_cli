@@ -63,6 +63,10 @@ EVENTS: dict[str, tuple[Level, str]] = {
         "warning",
         "Schwab data sync — an updater's spawn_argv() raised; skipped.",
     ),
+    "scheduler.crashed": (
+        "error",
+        "Schwab data sync — orchestrator crashed before completing the run.",
+    ),
     "test.hello": (
         "info",
         "Test notification from schwab_cli.",

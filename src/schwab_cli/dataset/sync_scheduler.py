@@ -106,6 +106,12 @@ def run_daily_sync(
     also (a) emit a structured Telegram alert and (b) write
     ``last_run.json`` next to the config file so subsequent health
     checks have an offline failure marker.
+
+    Wraps the entire body in a top-level except so any unexpected
+    crash (PATH issue, import failure, OS error) still fires a
+    ``scheduler.crashed`` alert and writes a failure marker — the
+    prior code would let the exception propagate, leaving the
+    operator with no signal that the cron silently broke.
     """
     started_at = datetime.now(tz=timezone.utc)
 
@@ -113,6 +119,56 @@ def run_daily_sync(
         from schwab_cli.notify import Notifier
         notifier = Notifier.from_file()
 
+    try:
+        return _run_daily_sync_inner(
+            notifier=notifier,
+            skip_wait=skip_wait,
+            binary_path=binary_path,
+            child_timeout_s=child_timeout_s,
+            started_at=started_at,
+        )
+    except Exception as e:
+        import traceback as _tb
+        tb = _tb.format_exc()
+        _log.exception("scheduler crashed before completing run")
+        try:
+            notifier.emit(
+                "scheduler.crashed",
+                error=f"{type(e).__name__}: {e}",
+                traceback=tb,
+            )
+        except Exception:
+            pass
+        try:
+            _write_last_run(RunSummary(
+                started_at=started_at.isoformat(timespec="seconds"),
+                finished_at=datetime.now(tz=timezone.utc).isoformat(
+                    timespec="seconds",
+                ),
+                overall_succeeded=False,
+                jobs=[{
+                    "name": "scheduler",
+                    "returncode": -1,
+                    "duration_s": (
+                        datetime.now(tz=timezone.utc) - started_at
+                    ).total_seconds(),
+                    "timed_out": False,
+                    "stdout_tail": tb,
+                }],
+            ))
+        except Exception:
+            pass
+        return 1
+
+
+def _run_daily_sync_inner(
+    *,
+    notifier,
+    skip_wait: bool,
+    binary_path: str | None,
+    child_timeout_s: float,
+    started_at: datetime,
+) -> int:
     _ensure_token_valid(notifier)
 
     binary = binary_path or _resolve_binary(notifier)
@@ -280,27 +336,43 @@ def _dispatch_parallel(
     collecting peers.
     """
     children: list[tuple[str, subprocess.Popen, Path, float]] = []
+    # Synthetic results for jobs whose Popen *itself* failed (e.g.
+    # FileNotFoundError when the binary isn't on PATH). The old code
+    # let that exception propagate out of the for-loop, taking the
+    # whole sync with it. We now record a synthetic failure and keep
+    # trying the remaining children — "one failure doesn't cascade".
+    spawn_failures: list[JobResult] = []
     tmp_dir = Path(tempfile.mkdtemp(prefix="schwab-sync-"))
     for name, argv in jobs:
         _log.info("starting %s: %s", name, " ".join(argv))
         log_path = tmp_dir / f"{name}.log"
-        log_fh = log_path.open("w")
-        # Inherit env so the child sees the same SCHWAB_CONFIG_DIR /
-        # PATH the cron launcher set up. start_new_session so we can
-        # killpg without affecting the orchestrator itself.
-        p = subprocess.Popen(
-            argv,
-            stdout=log_fh, stderr=subprocess.STDOUT,
-            text=True, env=os.environ.copy(),
-            start_new_session=True,
-        )
-        # Close our handle in the parent — the child kept its own
-        # via fd inheritance. Prevents the file from staying open
-        # if the parent crashes before .wait().
-        log_fh.close()
-        children.append((name, p, log_path, time.time()))
+        try:
+            log_fh = log_path.open("w")
+            # Inherit env so the child sees the same SCHWAB_CONFIG_DIR /
+            # PATH the cron launcher set up. start_new_session so we
+            # can killpg without affecting the orchestrator itself.
+            p = subprocess.Popen(
+                argv,
+                stdout=log_fh, stderr=subprocess.STDOUT,
+                text=True, env=os.environ.copy(),
+                start_new_session=True,
+            )
+            # Close our handle in the parent — the child kept its
+            # own via fd inheritance. Prevents the file from staying
+            # open if the parent crashes before .wait().
+            log_fh.close()
+            children.append((name, p, log_path, time.time()))
+        except (OSError, ValueError) as e:
+            _log.exception("failed to spawn %s", name)
+            spawn_failures.append(JobResult(
+                name=name,
+                returncode=-1,
+                duration_s=0.0,
+                stdout_tail=f"spawn failed: {type(e).__name__}: {e}",
+                timed_out=False,
+            ))
 
-    results: list[JobResult] = []
+    results: list[JobResult] = list(spawn_failures)
     for name, p, log_path, started_at in children:
         timed_out = False
         try:
