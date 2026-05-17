@@ -143,6 +143,27 @@ def test_indices_launcher_has_friendly_name(monkeypatch, tmp_path):
     assert "dataset update --indices" in launcher.read_text()
 
 
+def test_launcher_prepends_binary_dir_to_path(monkeypatch, tmp_path):
+    """Launchd fires children with a minimal PATH that excludes
+    ``~/.local/bin``. The launcher must prepend the binary's
+    directory so child subprocess.Popen(``schwab …``) calls in the
+    scheduler's pspawn loop find the binary."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from schwab_cli.dataset.launchd import _write_launcher
+
+    spec = DatasetPlistSpec(
+        binary_path="/Users/me/.local/bin/schwab",
+        cron="0 4 * * *",
+        kind="scheduler",
+    )
+    launcher = _write_launcher(spec)
+    body = launcher.read_text()
+    # PATH is prepended with the binary's directory before the exec.
+    assert "PATH=/Users/me/.local/bin:$PATH" in body
+    assert "export PATH" in body
+    assert body.index("PATH=") < body.index("exec ")
+
+
 def test_unsupported_kind_rejected():
     with pytest.raises(ValueError, match="unsupported plist kind"):
         DatasetPlistSpec(binary_path="/x", cron="0 22 * * *",

@@ -265,6 +265,77 @@ def test_last_run_json_written_with_overall_succeeded(
     assert all(j["returncode"] == 0 for j in payload["jobs"])
 
 
+def test_spawn_failure_does_not_abort_peer_children(monkeypatch):
+    """A child whose Popen itself raises (FileNotFoundError, etc.)
+    used to take the entire run down. Now it's recorded as a
+    synthetic failure and the remaining children still launch."""
+    notifier = _FakeNotifier()
+    _no_token_refresh(monkeypatch)
+    _no_last_run_write(monkeypatch)
+
+    # First Popen call raises (binary missing); second + third
+    # succeed with rc=0.
+    call_log: list[list[str]] = []
+
+    def _flaky_popen(argv, **kwargs):
+        call_log.append(argv)
+        if len(call_log) == 1:
+            raise FileNotFoundError(
+                2, "No such file or directory", "schwab",
+            )
+        return _FakePopen(rc=0)
+
+    monkeypatch.setattr(ss.subprocess, "Popen", _flaky_popen)
+    monkeypatch.setattr(ss.os, "killpg", lambda *_a, **_k: None)
+    monkeypatch.setattr(ss.os, "getpgid", lambda _pid: 0)
+
+    rc = ss.run_daily_sync(
+        notifier=notifier, binary_path="/bin/true",
+    )
+    # All three Popen attempts ran (first failed, two more succeeded).
+    assert len(call_log) == 3
+    # Run reports failure overall.
+    assert rc == 1
+    # Telegram alert names exactly the spawn-failed child.
+    failed_events = [
+        c for c in notifier.calls if c[0] == "scheduler.job_failed"
+    ]
+    assert failed_events, "no job_failed event emitted"
+    failed_field = failed_events[0][1]["failed"]
+    assert failed_field == ss.JOB_MARKET_DATA
+
+
+def test_top_level_crash_emits_alert_and_writes_marker(
+    monkeypatch, tmp_path,
+):
+    """Any unexpected exception in run_daily_sync must still fire a
+    `scheduler.crashed` alert AND write last_run.json so the
+    operator has a signal that the cron silently broke."""
+    notifier = _FakeNotifier()
+    monkeypatch.setattr(
+        ss, "_last_run_path", lambda: tmp_path / "last_run.json",
+    )
+
+    def _boom_in_token_check(_notifier):
+        raise RuntimeError("simulated PATH issue")
+
+    monkeypatch.setattr(ss, "_ensure_token_valid", _boom_in_token_check)
+
+    rc = ss.run_daily_sync(
+        notifier=notifier, binary_path="/bin/true",
+    )
+    assert rc == 1
+
+    crash_events = [c for c in notifier.calls if c[0] == "scheduler.crashed"]
+    assert crash_events
+    assert "simulated PATH issue" in crash_events[0][1]["error"]
+
+    import json as _json
+    payload = _json.loads((tmp_path / "last_run.json").read_text())
+    assert payload["overall_succeeded"] is False
+    assert payload["jobs"][0]["name"] == "scheduler"
+
+
 def test_last_run_json_records_failure(monkeypatch, tmp_path):
     notifier = _FakeNotifier()
     _no_token_refresh(monkeypatch)
