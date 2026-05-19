@@ -201,21 +201,111 @@ def _last_market_data_run_at(conn) -> datetime | None:
     return datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
 
 
-def _last_indices_run_at(conn) -> datetime | None:
-    """Newest subscribe/unsubscribe timestamp on any indices-source row.
+import re as _re
 
-    Proxy for "last successful indices sync". Stays stale when the
-    upstream member set is unchanged across runs — a known limitation.
+
+_INDICES_DELTA_RE = _re.compile(
+    r"^(?P<ts>\S+)\s+\[indices\]\s+(?P<sym>[A-Za-z0-9._-]+):\s+"
+    r"total=(?P<total>\d+)\s+\+(?P<added>\d+)\s+-(?P<removed>\d+)\s*$"
+)
+_INDICES_FINISHED_RE = _re.compile(
+    r"^(?P<ts>\S+)\s+\[indices\]\s+finished,\s+(?P<processed>\d+)\s+"
+    r"indices processed,\s+(?P<errored>\d+)\s+errored\s*$"
+)
+_INDICES_START_RE = _re.compile(r"^\S+\s+\[indices\]\s+start\b")
+
+
+def _parse_last_indices_run() -> dict | None:
+    """Find the most recent ``[indices] finished`` block in the audit
+    log and return its timestamp + per-index deltas.
+
+    Returns ``{"finished_at": datetime, "errored": int,
+               "deltas": [(symbol, added, removed, total), ...]}``
+    or ``None`` when no completed indices run is on file.
+
+    Authoritative source for "last indices run" — supersedes the old
+    ``MAX(subscribed_at) WHERE source='indices'`` proxy that stayed
+    stale when the upstream member set was unchanged across runs.
     """
-    row = conn.execute(
-        """
-        SELECT MAX(MAX(subscribed_at), COALESCE(MAX(unsubscribed_at), 0))
-        FROM subscriptions WHERE source = 'indices'
-        """
-    ).fetchone()
-    if not row or not row[0]:
+    from schwab_cli.dataset.audit_log import audit_log_path
+    try:
+        lines = audit_log_path().read_text().splitlines()
+    except (FileNotFoundError, OSError):
         return None
-    return datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
+
+    finished_idx = -1
+    finished_match = None
+    for i in range(len(lines) - 1, -1, -1):
+        m = _INDICES_FINISHED_RE.match(lines[i])
+        if m:
+            finished_idx = i
+            finished_match = m
+            break
+    if finished_match is None:
+        return None
+
+    finished_at = datetime.strptime(
+        finished_match.group("ts"), "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+    errored = int(finished_match.group("errored"))
+    processed = int(finished_match.group("processed"))
+
+    deltas: list[tuple[str, int, int, int]] = []
+    for j in range(finished_idx - 1, -1, -1):
+        if _INDICES_START_RE.match(lines[j]):
+            break  # crossed into the previous run's block
+        m = _INDICES_DELTA_RE.match(lines[j])
+        if m:
+            deltas.append((
+                m.group("sym"),
+                int(m.group("added")),
+                int(m.group("removed")),
+                int(m.group("total")),
+            ))
+            if len(deltas) >= processed:
+                break
+    deltas.reverse()
+    return {
+        "finished_at": finished_at,
+        "errored":     errored,
+        "deltas":      deltas,
+    }
+
+
+def _last_indices_run_at(conn=None) -> datetime | None:
+    """Datetime of the most recent successful indices run.
+
+    Backed by the audit log so it advances on every run, not just on
+    constituent changes. The ``conn`` parameter is kept for legacy
+    callers but ignored.
+    """
+    info = _parse_last_indices_run()
+    return info["finished_at"] if info else None
+
+
+def _format_indices_deltas(deltas: list[tuple[str, int, int, int]]) -> str:
+    """Render the per-index delta summary as a git-style colored
+    ``[SPX: +2 -2, NQ: 0, DJI: +1]`` string.
+
+    ``+N`` green, ``-N`` red, ``0`` (no change either way) dim. When
+    both ``added`` and ``removed`` are zero, collapse to ``0`` instead
+    of ``+0 -0`` so the eye lands on the changes.
+    """
+    if not deltas:
+        return ""
+    parts: list[str] = []
+    for sym, added, removed, _total in deltas:
+        if added == 0 and removed == 0:
+            chunk = typer.style("0", dim=True)
+        else:
+            pieces: list[str] = []
+            if added:
+                pieces.append(typer.style(f"+{added}", fg=typer.colors.GREEN))
+            if removed:
+                pieces.append(typer.style(f"-{removed}", fg=typer.colors.RED))
+            chunk = " ".join(pieces)
+        parts.append(f"{sym}: {chunk}")
+    return "[" + ", ".join(parts) + "]"
 
 
 # ---- 1. Global install ------------------------------------------------
@@ -439,23 +529,6 @@ def _check_telegram() -> None:
 _LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 _SCHEDULER_PLIST = _LAUNCH_AGENTS_DIR / "com.schwab-cli.scheduler.plist"
 
-# Pre-scheduler per-job plists. If any of these exist after the
-# scheduler is installed, the operator has a stale install — the
-# scheduler will pspawn the work AND launchd will fire the legacy
-# plist independently. Surface that loudly.
-_LEGACY_DATASET_PLISTS = (
-    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.indices.plist",
-    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.market-data.plist",
-    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.accounts.plist",
-    _LAUNCH_AGENTS_DIR / "com.schwab-cli.dataset.volatility.plist",
-)
-# Back-compat aliases kept so test modules importing the old names
-# don't break — pointed at the scheduler plist so any incidental use
-# still gets a sensible value.
-_DATASET_INDICES_PLIST     = _SCHEDULER_PLIST
-_DATASET_VOL_PLIST         = _SCHEDULER_PLIST
-_DATASET_MARKET_DATA_PLIST = _SCHEDULER_PLIST
-
 
 def _check_dataset() -> None:
     _section("Dataset")
@@ -521,6 +594,10 @@ def _check_dataset() -> None:
                 ORDER BY source
                 """,
             ).fetchall()
+            vol_longest_rows = [
+                _vol_leader_with_unique_days(conn, r)
+                for r in vol_longest_rows
+            ]
     except Exception as e:
         _bad("Dataset DB unreachable", str(e))
         return
@@ -553,18 +630,6 @@ def _check_data_sync_service() -> None:
 
     typer.echo("    Scheduler")
     _print_scheduler_block(_SCHEDULER_PLIST)
-
-    # Stale per-job plists from a pre-scheduler install. If any are
-    # still on disk, the operator has DOUBLE jobs — scheduler pspawns
-    # the work AND launchd fires the legacy plist independently.
-    # ``cron install`` sweeps these automatically, but a user who
-    # never re-ran it after upgrading would hit this.
-    stale = [p for p in _LEGACY_DATASET_PLISTS if p.exists()]
-    for path in stale:
-        _bad(
-            f"stale legacy plist: {path.name}",
-            "re-run `schwab dataset cron install` to scrub it",
-        )
 
     typer.echo("    Sync Scope")
     _print_sync_scope()
@@ -647,17 +712,32 @@ def _print_sync_scope() -> None:
             last_by_task["OHLCV"] = _ms_to_dt(ohlcv_ms)
             last_by_task["Volatility"] = _ms_to_dt(vol_ms)
             last_by_task["Account"] = _ms_to_dt(acct_ms)
-            last_by_task["Indices"] = _last_indices_run_at(conn)
     except Exception as e:
         _bad("Sync Scope: DB unreachable", str(e))
         return
+
+    indices_run = _parse_last_indices_run()
+    last_by_task["Indices"] = (
+        indices_run["finished_at"] if indices_run else None
+    )
 
     now = datetime.now(tz=timezone.utc)
     for task, hour in _TASK_ANCHOR_HOUR.items():
         last = last_by_task[task]
         next_run = _next_ny_hour(hour, now=now)
+        suffix = ""
+        if task == "Indices" and indices_run:
+            deltas_str = _format_indices_deltas(indices_run["deltas"])
+            if deltas_str:
+                suffix = f", {deltas_str}"
+            if indices_run["errored"]:
+                suffix += typer.style(
+                    f" ({indices_run['errored']} errored)",
+                    fg=typer.colors.RED,
+                )
         typer.echo(
-            f"      {task:<13} last run {_format_relative_time(last, now=now)}"
+            f"      {task:<13} last run "
+            f"{_format_relative_time(last, now=now)}{suffix}"
         )
         typer.echo(
             f"                    next run {_format_relative_time(next_run, now=now)}"
@@ -721,12 +801,39 @@ def _print_last_run_marker() -> None:
                     fg=typer.colors.RED)
 
 
+def _vol_leader_with_unique_days(conn, row):
+    """Enrich a vol-snapshot leader row with the count of unique NY
+    trading days. This matches the dedup that ``read_recent_per_day``
+    applies before computing IVP, so doctor's "days" column tracks the
+    same number ``vol`` shows.
+    """
+    ms_rows = conn.execute(
+        "SELECT captured_at_ms FROM vol_snapshots "
+        "WHERE source = ? AND symbol = ?",
+        (row["source"], row["symbol"]),
+    ).fetchall()
+    unique_days = len({
+        datetime.fromtimestamp(
+            r["captured_at_ms"] / 1000, tz=timezone.utc
+        ).astimezone(_NY_TZ).date()
+        for r in ms_rows
+    })
+    return {
+        "source": row["source"],
+        "symbol": row["symbol"],
+        "n": row["n"],
+        "first_ms": row["first_ms"],
+        "unique_days": unique_days,
+    }
+
+
 def _print_market_data_stat(ohlcv_row, vol_rows) -> None:
     """Render per-group longest-series stats.
 
-    For each group/source we show: count and earliest date of the
-    longest series — a quick read on cache depth without having to
-    query every ticker.
+    For each group/source we show: raw row count, unique NY-trading-day
+    count (matches what ``vol`` consumes), earliest capture date, and
+    the leader symbol — a quick read on cache depth and IVP-readiness
+    without having to query every ticker.
     """
     any_row = False
     if ohlcv_row and ohlcv_row["n"]:
@@ -742,10 +849,11 @@ def _print_market_data_stat(ohlcv_row, vol_rows) -> None:
             first_day = datetime.fromtimestamp(
                 r["first_ms"] / 1000, tz=timezone.utc
             ).date().isoformat()
+            counts = f"{r['n']} rows / {r['unique_days']} days"
             typer.echo(
                 f"      {label:<18} "
-                f"{r['n']:>5} since {first_day} "
-                f"({r['source']})"
+                f"{counts:>16} since {first_day} "
+                f"({r['source']}, {r['symbol']})"
             )
     if not any_row:
         _info("(no samples yet)", "")

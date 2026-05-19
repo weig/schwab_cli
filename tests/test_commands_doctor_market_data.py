@@ -168,9 +168,16 @@ def test_market_data_stat_renders_longest_per_group(
                 return list(self.values())[k]
             return super().__getitem__(k)
 
+    # Two captures on the same NY trading day for AMZN — dedup should
+    # collapse the 3 rows below to 2 unique days.
+    day1_ms = int(_dt(2026, 4, 27, 18, 0, tzinfo=_tz.utc).timestamp() * 1000)
+    day1_ms_b = int(_dt(2026, 4, 27, 21, 0, tzinfo=_tz.utc).timestamp() * 1000)
+    day2_ms = int(_dt(2026, 4, 28, 18, 0, tzinfo=_tz.utc).timestamp() * 1000)
+
     class _Cur:
-        def __init__(self, sql):
+        def __init__(self, sql, params):
             self.sql = sql
+            self.params = params
         def fetchall(self):
             if "ROW_NUMBER" in self.sql:
                 return [
@@ -179,6 +186,15 @@ def test_market_data_stat_renders_longest_per_group(
                     _Row(source="synthetic", symbol="INTC",
                          n=148, first_ms=first_ms),
                 ]
+            if "captured_at_ms" in self.sql and "WHERE source" in self.sql:
+                (source, _symbol), = self.params
+                if source == "observed":
+                    return [
+                        _Row(captured_at_ms=day1_ms),
+                        _Row(captured_at_ms=day1_ms_b),
+                        _Row(captured_at_ms=day2_ms),
+                    ]
+                return [_Row(captured_at_ms=first_ms)] * 148
             return []
         def fetchone(self):
             if "FROM ohlcv_daily" in self.sql and "GROUP BY symbol" in self.sql:
@@ -186,8 +202,8 @@ def test_market_data_stat_renders_longest_per_group(
             return [0]
 
     class _Conn:
-        def execute(self, sql, *_a, **_k):
-            return _Cur(sql)
+        def execute(self, sql, *params, **_k):
+            return _Cur(sql, params)
 
     @contextlib.contextmanager
     def _connect():
@@ -203,9 +219,7 @@ def test_market_data_stat_renders_longest_per_group(
     assert "77 since 2026-01-26" in out
     assert "(A)" not in out
     assert "volatility" in out
-    assert "43 since 2025-09-22" in out
-    assert "(observed)" in out
-    assert "AMZN" not in out
-    assert "148 since 2025-09-22" in out
-    assert "(synthetic)" in out
-    assert "INTC" not in out
+    assert "43 rows / 2 days since 2025-09-22" in out
+    assert "(observed, AMZN)" in out
+    assert "148 rows / 1 days since 2025-09-22" in out
+    assert "(synthetic, INTC)" in out

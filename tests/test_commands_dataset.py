@@ -127,7 +127,11 @@ def test_update_group_volatility_calls_orchestrator(runner, monkeypatch):
     import schwab_cli.api.client as client_mod
     monkeypatch.setattr(client_mod, "SchwabClient", lambda c, s: object())
 
-    result = runner.invoke(app, ["dataset", "update", "--group", "volatility"])
+    # Use --skip-wait so the test doesn't sleep until NY 17:00 ET
+    # when invoked outside business hours.
+    result = runner.invoke(app, [
+        "dataset", "update", "--group", "volatility", "--skip-wait",
+    ])
     assert result.exit_code == 0
     assert calls == ["vol"]
 

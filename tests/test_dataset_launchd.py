@@ -54,52 +54,32 @@ def test_field_value_out_of_range():
 import plistlib
 
 from schwab_cli.dataset.launchd import (
-    build_dataset_plist, DatasetPlistSpec,
-    INDICES_LABEL, MARKET_DATA_LABEL, VOLATILITY_LABEL,
+    build_dataset_plist, DatasetPlistSpec, SCHEDULER_LABEL,
 )
 
 
-def test_indices_plist_label_and_program_args():
+def test_scheduler_plist_label_and_program_args():
     spec = DatasetPlistSpec(
-        binary_path="/usr/local/bin/schwab_cli",
-        cron="0 6 * * 0",
-        kind="indices",
+        binary_path="/usr/local/bin/schwab",
+        cron="0 4 * * *",
+        kind="scheduler",
     )
     blob = build_dataset_plist(spec)
     parsed = plistlib.loads(blob)
-    assert parsed["Label"] == INDICES_LABEL
+    assert parsed["Label"] == SCHEDULER_LABEL
     assert parsed["ProgramArguments"] == [
-        "/usr/local/bin/schwab_cli", "dataset", "update", "--indices",
+        "/usr/local/bin/schwab", "dataset", "sync",
     ]
-    assert parsed["StartCalendarInterval"] == [
-        {"Hour": 6, "Minute": 0, "Weekday": 0}
-    ]
-    assert parsed["RunAtLoad"] is False
+    assert parsed["StartCalendarInterval"] == [{"Hour": 4, "Minute": 0}]
+    assert parsed["RunAtLoad"] is True
     assert parsed["KeepAlive"] is False
-
-
-def test_volatility_plist_args():
-    """Kind 'volatility' is now an alias for 'market-data' (the v4
-    unified daily job). Label resolves to MARKET_DATA_LABEL but the
-    invoked CLI still uses --group volatility for back-compat."""
-    spec = DatasetPlistSpec(
-        binary_path="/x/schwab_cli",
-        cron="0 22 * * *",
-        kind="volatility",
-    )
-    blob = build_dataset_plist(spec)
-    parsed = plistlib.loads(blob)
-    assert parsed["Label"] == MARKET_DATA_LABEL
-    assert parsed["ProgramArguments"] == [
-        "/x/schwab_cli", "dataset", "update", "--group", "volatility",
-    ]
 
 
 def test_log_paths_attached_when_provided():
     spec = DatasetPlistSpec(
-        binary_path="/x/schwab_cli",
-        cron="0 22 * * *",
-        kind="volatility",
+        binary_path="/x/schwab",
+        cron="0 4 * * *",
+        kind="scheduler",
         log_file="/tmp/dataset.log",
     )
     parsed = plistlib.loads(build_dataset_plist(spec))
@@ -109,38 +89,26 @@ def test_log_paths_attached_when_provided():
 
 def test_plist_uses_launcher_basename_for_friendly_display(monkeypatch, tmp_path):
     """The plist must reference the friendly-named launcher script
-    so System Settings → Login Items shows e.g. ``Schwab Indices Dataset``
-    instead of the bare ``schwab_cli`` binary name."""
+    so System Settings → Login Items shows ``Schwab Data Sync Service``
+    instead of the bare ``schwab`` binary name."""
     monkeypatch.setenv("HOME", str(tmp_path))
     from schwab_cli.dataset.launchd import _write_launcher
     spec = DatasetPlistSpec(
-        binary_path="/usr/local/bin/schwab_cli",
-        cron="0 22 * * *",
-        kind="volatility",
+        binary_path="/usr/local/bin/schwab",
+        cron="0 4 * * *",
+        kind="scheduler",
     )
     launcher = _write_launcher(spec)
-    assert launcher.name == "Schwab Market Data"
+    assert launcher.name == "Schwab Data Sync Service"
     assert launcher.exists()
-    # Launcher is executable + execs the real binary with our args.
     body = launcher.read_text()
     assert body.startswith("#!/bin/sh")
-    assert "dataset update --group volatility" in body
-    assert "/usr/local/bin/schwab_cli" in body
+    assert "dataset sync" in body
+    assert "/usr/local/bin/schwab" in body
 
     blob = build_dataset_plist(spec, launcher_path=launcher)
     parsed = plistlib.loads(blob)
     assert parsed["ProgramArguments"] == [str(launcher)]
-
-
-def test_indices_launcher_has_friendly_name(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    from schwab_cli.dataset.launchd import _write_launcher
-    spec = DatasetPlistSpec(
-        binary_path="/x/schwab_cli", cron="0 6 * * 0", kind="indices",
-    )
-    launcher = _write_launcher(spec)
-    assert launcher.name == "Schwab Indices Dataset"
-    assert "dataset update --indices" in launcher.read_text()
 
 
 def test_launcher_prepends_binary_dir_to_path(monkeypatch, tmp_path):
@@ -178,7 +146,7 @@ def _install_spec():
     # HOME → tmp_path before constructing the spec to keep filesystem writes
     # inside the test sandbox.
     return DatasetPlistSpec(
-        binary_path="/x/schwab_cli", cron="0 9 * * *", kind="volatility",
+        binary_path="/x/schwab", cron="0 4 * * *", kind="scheduler",
     )
 
 
