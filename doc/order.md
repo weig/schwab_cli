@@ -4,9 +4,10 @@ Place, preview, list, get, cancel, and replace Schwab orders — equity
 single-leg and option single- or multi-leg.
 
 > ⚠️ **Real money.** Unless you pass `--dry-run` (or use `order preview`),
-> every `order place` invocation submits a live order to Schwab. Every
-> command renders a confirmation panel and requires you to type `yes`
-> (or pass `--yes`). Read [Safety](#safety) before your first place.
+> every `order place` invocation submits a live order to Schwab.
+> Mutating commands (`place`, `cancel`, `replace`) render a confirmation
+> panel and require you to type `yes` (or pass `--yes` to skip). Read
+> [Safety](#safety) before your first place.
 
 ## Subcommands
 
@@ -41,8 +42,8 @@ schwab order place NVDA -a 1234 \
 | --- | --- |
 | `--side`     | `BUY`, `SELL`, `SELL_SHORT`, `BUY_TO_COVER` (default `BUY`). |
 | `--quantity`, `-q` | Share count (default `1`). |
-| `--type`     | `MARKET`, `LIMIT`, `STOP`, `STOP_LIMIT`, `TRAILING_STOP`, `TRAILING_STOP_LIMIT`. |
-| `--price`    | Limit price. Required for `LIMIT` / `NET_DEBIT` / `NET_CREDIT`. |
+| `--type`     | Phase 1 grammar: `MARKET`, `LIMIT`, `NET_DEBIT`, `NET_CREDIT`. Stop variants (`STOP`, `STOP_LIMIT`, `TRAILING_STOP`, `TRAILING_STOP_LIMIT`) accepted via the [stop/trailing-stop flags](#stop--trailing-stop-flags) below. |
+| `--price`    | Limit price. Required for `LIMIT` / `NET_DEBIT` / `NET_CREDIT` / `STOP_LIMIT` / `TRAILING_STOP_LIMIT`. |
 | `--duration` | `DAY`, `GTC`, `FOK`, `IOC` (default `DAY`). |
 | `--session`  | `NORMAL`, `AM`, `PM`, `SEAMLESS`. Extended sessions require `LIMIT` + `DAY`. |
 
@@ -104,6 +105,11 @@ schwab order get 1003456789 -a 1234
 
 `--range` understands `ytd` / `mtd` / `wtd` and explicit `<start>..<end>`
 with tokens like `-7d`, `-1mo`, `now`, `YYYYMMDD`.
+
+**Default range depends on `--status`:** `--status=ACTIVE` (the default)
+implies `--range=ALL` so working orders from any era surface — Schwab
+doesn't time-bound active state. Any other status falls back to
+`-7d..now` so list operations stay snappy.
 
 ## Cancel / replace
 

@@ -125,7 +125,7 @@ first HTTP 401 from Schwab auto-refreshes and retries once.
 
 `schwab_cli` can delegate the browser leg of OAuth to an external tool
 so the CLI stays browser-dep-free. The reference implementation is
-**[webauto-cli](https://github.com/weig/webauto)** — a Playwright-based
+**[webauto-cli](https://github.com/weig/webauto-cli)** — a Playwright-based
 automation runner with encrypted credential storage.
 
 Set `auto_login_command` in your config to invoke it:
@@ -263,7 +263,7 @@ PRs welcome.
 - **Avoid hardcoded paths and secrets.** Honour `SCHWAB_CLI_CONFIG_DIR`
   for anything that touches `~/.config/schwab_cli/`.
 - **Don't add browser/Playwright deps** — that lives in
-  [webauto-cli](https://github.com/weig/webauto). The CLI stays
+  [webauto-cli](https://github.com/weig/webauto-cli). The CLI stays
   pure-Python with HTTP only.
 
 Conventional-commits style for commit messages (`feat: …`, `fix: …`,

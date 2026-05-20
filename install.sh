@@ -25,20 +25,39 @@ say()  { printf '%s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
 
+# Reject whitespace in REPO/REF — they're spliced into the uv command
+# line as a single token (`git+$REPO@$REF`), so an embedded space would
+# silently split into multiple positional args.
+case "$REPO" in *[[:space:]]*)
+    die "SCHWAB_CLI_REPO must not contain whitespace: '$REPO'"
+esac
+case "$REF" in *[[:space:]]*)
+    die "SCHWAB_CLI_REF must not contain whitespace: '$REF'"
+esac
+
 # --- uv -------------------------------------------------------------
 
 if ! command -v uv >/dev/null 2>&1; then
     say "uv not found — installing via https://astral.sh/uv/install.sh ..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    # The astral installer adds uv to ~/.local/bin but doesn't update
-    # the current shell's PATH. Source the env file it drops if present.
-    for env_file in "$HOME/.local/bin/env" "$HOME/.cargo/env"; do
-        if [ -f "$env_file" ]; then
-            # shellcheck disable=SC1090
-            . "$env_file"
-            break
-        fi
-    done
+    # `set -e` does NOT catch a non-zero exit in the producer side of
+    # `curl … | sh` (POSIX sh only inspects the last command in a
+    # pipeline). Download to a temp file and check the exit status of
+    # each stage explicitly so a failed download or installer surfaces
+    # the right error.
+    uv_installer="$(mktemp -t uv-install.XXXXXX)"
+    trap 'rm -f "$uv_installer"' EXIT
+    curl -fsSL https://astral.sh/uv/install.sh -o "$uv_installer" \
+        || die "failed to download uv installer."
+    sh "$uv_installer" \
+        || die "uv installer exited non-zero."
+    rm -f "$uv_installer"
+    trap - EXIT
+    # The astral installer drops a PATH-shim env file. Source it so the
+    # rest of this script can see the freshly-installed uv binary.
+    if [ -f "$HOME/.local/bin/env" ]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.local/bin/env"
+    fi
     command -v uv >/dev/null 2>&1 \
         || die "uv installed but not on PATH; open a new shell and re-run."
 fi
@@ -57,7 +76,16 @@ fi
 # --- install schwab_cli --------------------------------------------
 
 say "Installing schwab_cli from $REPO@$REF ..."
-uv tool install --reinstall --from "git+$REPO@$REF" schwab_cli
+# Pinning SCHWAB_CLI_REF to a tag (e.g. v0.2.0) gives idempotent
+# installs across reruns. Pass --reinstall explicitly when re-bootstrapping
+# from main:
+#   SCHWAB_CLI_REINSTALL=1 sh install.sh
+reinstall_flag=""
+if [ "${SCHWAB_CLI_REINSTALL:-0}" = "1" ]; then
+    reinstall_flag="--reinstall"
+fi
+# shellcheck disable=SC2086  # $reinstall_flag is intentionally word-split.
+uv tool install $reinstall_flag --from "git+$REPO@$REF" schwab_cli
 
 # --- post-install hints --------------------------------------------
 
