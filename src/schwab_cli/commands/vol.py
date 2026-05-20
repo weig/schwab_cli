@@ -663,7 +663,7 @@ def _stitched_backfill(
     except Exception:
         return 0
 
-    from schwab_cli.ticker import OptionPart, Ticker
+    from schwab_cli.ticker import OptionPart
 
     date_str = expiry["expiry"].replace("-", "")
     opt_per_day: dict[str, list[tuple[float, float, int]]] = {}
@@ -789,7 +789,7 @@ def _pick_backfill_contract(
 def _build_atm_call_symbol(symbol: str, atm: dict[str, Any]) -> str:
     """Return the Schwab-canonical OSI symbol for the ATM call of the
     contract picked by :func:`pick_atm_contract`."""
-    from schwab_cli.ticker import OptionPart, Ticker
+    from schwab_cli.ticker import OptionPart
 
     date_str = atm["expiry"].replace("-", "")  # YYYY-MM-DD → YYYYMMDD
     return Ticker(

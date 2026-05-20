@@ -15,7 +15,6 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from schwab_cli.analytics.nav_history import (
-    NavPoint,
     backfill_day,
     snapshot_today_from_payload,
 )

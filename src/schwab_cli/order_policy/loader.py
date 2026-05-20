@@ -93,10 +93,10 @@ def _read_raw(name: str, base: Path) -> dict[str, Any]:
         listed = list_profiles(base_dir=base)
         if name == "default" and not listed:
             raise PolicyConfigError(
-                f"no profile resolved.\n"
-                f"hint: run `schwab_cli profile new --type=order` to "
-                f"create one,\n"
-                f"      or pass --profile NAME / set SCHWAB_CLI_PROFILE."
+                "no profile resolved.\n"
+                "hint: run `schwab_cli profile new --type=order` to "
+                "create one,\n"
+                "      or pass --profile NAME / set SCHWAB_CLI_PROFILE."
             )
         raise PolicyConfigError(
             f"profile file not found: {path}\n"

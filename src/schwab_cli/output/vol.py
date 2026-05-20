@@ -259,7 +259,7 @@ def render_vol_human(snap: dict) -> str:
     if hv is not None:
         lines.append(f"  HV  30d:     {hv*100:.2f}%")
     else:
-        lines.append(f"  HV  30d:     —")
+        lines.append("  HV  30d:     —")
     rr = snap.get("ivr_ivp", {})
     if rr.get("ivr") is not None:
         suffix = " ⚠ backfilled" if rr.get("backfilled") else ""

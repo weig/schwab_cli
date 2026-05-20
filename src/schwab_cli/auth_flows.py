@@ -36,7 +36,6 @@ import typer
 
 from schwab_cli.auth_handlers import (
     AuthHandler,
-    AuthHandlerError,
     AuthResult,
     AutoLoginHandler,
     AutoLoginSupervisor,

@@ -303,7 +303,6 @@ def _launchd_job_loaded(label: str) -> bool:
     currently up. Returns False on non-Darwin or when launchctl is
     missing so the function is safe to call from tests.
     """
-    import subprocess
     try:
         r = subprocess.run(
             ["launchctl", "list", label],
@@ -521,7 +520,6 @@ def run_install_service(
     the daemon talks to Schwab's OAuth flow on rotation.
     """
     import shutil
-    import subprocess
     from schwab_cli.mcp_server.launchd import (
         DEFAULT_PLIST_PATH,
         LaunchdPlistSpec,
@@ -551,11 +549,11 @@ def run_install_service(
         admin_token=admin_token,
     )
     typer.echo("Proposed LaunchAgent:")
-    typer.echo(f"  Label:     com.schwab-cli.mcp")
+    typer.echo("  Label:     com.schwab-cli.mcp")
     typer.echo(f"  Binary:    {binary}")
     typer.echo(f"  Bind:      {host}:{port}")
     typer.echo(f"  Plist:     {target}")
-    typer.echo(f"  KeepAlive: true  (exits → auto-restart)")
+    typer.echo("  KeepAlive: true  (exits → auto-restart)")
     if not yes:
         if not typer.confirm("Install and load now?", default=True):
             typer.echo("aborted")
@@ -584,7 +582,6 @@ def run_install_service(
 
 
 def run_start_service(*, plist_path: str | None) -> None:
-    import subprocess
     from schwab_cli.mcp_server.launchd import DEFAULT_PLIST_PATH
 
     target = (
@@ -613,7 +610,6 @@ def run_start_service(*, plist_path: str | None) -> None:
 
 
 def run_stop_service(*, plist_path: str | None) -> None:
-    import subprocess
     from schwab_cli.mcp_server.launchd import DEFAULT_PLIST_PATH
 
     target = (
@@ -638,7 +634,6 @@ def run_stop_service(*, plist_path: str | None) -> None:
 
 
 def run_uninstall_service(*, plist_path: str | None, yes: bool) -> None:
-    import subprocess
     from schwab_cli.mcp_server.launchd import (
         DEFAULT_PLIST_PATH, remove_launcher,
     )

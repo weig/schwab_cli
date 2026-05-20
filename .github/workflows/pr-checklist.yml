@@ -1,0 +1,51 @@
+name: PR Checklist
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, ready_for_review]
+
+# Re-runs on every edit to the PR body, so reviewers see the gate flip
+# green/red as boxes get ticked.
+jobs:
+  checkboxes:
+    name: all checkboxes ticked
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every `- [ ]` is ticked
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Skip the gate entirely on PRs marked draft — let authors
+          # iterate without nagging.
+          if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+              echo "PR is draft — checklist gate skipped."
+              exit 0
+          fi
+
+          # GitHub-Flavored Markdown checklist items render as `- [ ]`
+          # (unchecked) or `- [x]` / `- [X]` (checked). We grep the body
+          # via Python so newlines / unicode aren't mangled by bash here-strings.
+          python3 - <<'PY'
+          import os, re, sys
+
+          body = os.environ.get("PR_BODY") or ""
+          # Find every line that starts a markdown checkbox.
+          unchecked = re.findall(r"^\s*[-*]\s\[ \]\s.*$", body, flags=re.MULTILINE)
+          checked   = re.findall(r"^\s*[-*]\s\[[xX]\]\s.*$", body, flags=re.MULTILINE)
+
+          total = len(unchecked) + len(checked)
+          if total == 0:
+              # No checklist at all — print a hint, don't fail. PRs that
+              # genuinely don't need one (e.g. typo fixes) shouldn't be
+              # blocked, but the PR template makes the default to HAVE one.
+              print("::warning::No checklist found in PR body. Did you forget the Test plan section?")
+              sys.exit(0)
+
+          if unchecked:
+              print(f"::error::{len(unchecked)} unchecked item(s) in PR body — tick them before merging:")
+              for line in unchecked:
+                  print(f"  {line.strip()}")
+              sys.exit(1)
+
+          print(f"All {total} checklist item(s) ticked.")
+          PY

@@ -30,14 +30,13 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
 
 import typer
 
 from schwab_cli import audit
 from schwab_cli import config as config_module
 from schwab_cli import order_limits
-from schwab_cli.analytics.strategy_legs import LegParseError, Leg, parse_leg
+from schwab_cli.analytics.strategy_legs import LegParseError, parse_leg
 from schwab_cli.api.client import AccountIds, ApiError, SchwabClient, SessionExpired
 from schwab_cli.api.orders import (
     cancel_order,
@@ -1827,7 +1826,7 @@ def _resolve_account_for_read(
             typer.secho(str(e), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=EXIT_USAGE)
     typer.secho(
-        f"(no --account: using first available; "
+        "(no --account: using first available; "
         "passing --account is recommended for {action})".format(action=action),
         fg=typer.colors.YELLOW, err=True,
     )

@@ -20,7 +20,7 @@ Algorithm:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from schwab_cli.order_policy.conditions import (
     PredicateResult,
