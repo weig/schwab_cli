@@ -210,7 +210,8 @@ _INDICES_DELTA_RE = _re.compile(
 )
 _INDICES_FINISHED_RE = _re.compile(
     r"^(?P<ts>\S+)\s+\[indices\]\s+finished,\s+(?P<processed>\d+)\s+"
-    r"indices processed,\s+(?P<errored>\d+)\s+errored\s*$"
+    r"indices processed,\s+(?P<errored>\d+)\s+errored"
+    r"(?:\s+\((?P<note>[^)]+)\))?"
 )
 _INDICES_START_RE = _re.compile(r"^\S+\s+\[indices\]\s+start\b")
 
@@ -228,18 +229,29 @@ def _parse_last_indices_run() -> dict | None:
     stale when the upstream member set was unchanged across runs.
     """
     from schwab_cli.dataset.audit_log import audit_log_path
-    try:
-        lines = audit_log_path().read_text().splitlines()
-    except (FileNotFoundError, OSError):
-        return None
+    # RotatingFileHandler rolls scheduler.log → .1 → .2 → .3. If the
+    # active file has no [indices] finished line (e.g. just rotated),
+    # fall through to the backups newest-first so we still surface a
+    # stale-but-real last run instead of showing "—".
+    active = audit_log_path()
+    candidates = [active, *(active.with_name(active.name + f".{i}")
+                            for i in range(1, 4))]
 
     finished_idx = -1
     finished_match = None
-    for i in range(len(lines) - 1, -1, -1):
-        m = _INDICES_FINISHED_RE.match(lines[i])
-        if m:
-            finished_idx = i
-            finished_match = m
+    lines: list[str] = []
+    for path in candidates:
+        try:
+            lines = path.read_text().splitlines()
+        except (FileNotFoundError, OSError):
+            continue
+        for i in range(len(lines) - 1, -1, -1):
+            m = _INDICES_FINISHED_RE.match(lines[i])
+            if m:
+                finished_idx = i
+                finished_match = m
+                break
+        if finished_match is not None:
             break
     if finished_match is None:
         return None
@@ -249,6 +261,7 @@ def _parse_last_indices_run() -> dict | None:
     ).replace(tzinfo=timezone.utc)
     errored = int(finished_match.group("errored"))
     processed = int(finished_match.group("processed"))
+    note = finished_match.group("note")  # e.g. "skipped: within max-age threshold"
 
     deltas: list[tuple[str, int, int, int]] = []
     for j in range(finished_idx - 1, -1, -1):
@@ -269,6 +282,7 @@ def _parse_last_indices_run() -> dict | None:
         "finished_at": finished_at,
         "errored":     errored,
         "deltas":      deltas,
+        "note":        note,
     }
 
 
@@ -727,14 +741,22 @@ def _print_sync_scope() -> None:
         next_run = _next_ny_hour(hour, now=now)
         suffix = ""
         if task == "Indices" and indices_run:
-            deltas_str = _format_indices_deltas(indices_run["deltas"])
-            if deltas_str:
-                suffix = f", {deltas_str}"
-            if indices_run["errored"]:
-                suffix += typer.style(
-                    f" ({indices_run['errored']} errored)",
-                    fg=typer.colors.RED,
+            if indices_run.get("note"):
+                # Skip sentinel — no deltas to render. Show the reason
+                # in dim so it's clear the run completed without
+                # hitting the upstream provider.
+                suffix = ", " + typer.style(
+                    indices_run["note"], dim=True,
                 )
+            else:
+                deltas_str = _format_indices_deltas(indices_run["deltas"])
+                if deltas_str:
+                    suffix = f", {deltas_str}"
+                if indices_run["errored"]:
+                    suffix += typer.style(
+                        f" ({indices_run['errored']} errored)",
+                        fg=typer.colors.RED,
+                    )
         typer.echo(
             f"      {task:<13} last run "
             f"{_format_relative_time(last, now=now)}{suffix}"

@@ -402,6 +402,14 @@ def update(
                         f"last sync {age_days:.1f}d ago, "
                         f"within {max_age_days}d threshold; skipping"
                     )
+                    # Sentinel so the doctor's audit-log parser sees a
+                    # current "finished" anchor for this run instead
+                    # of resurfacing the previous real run's timestamp
+                    # and deltas as if they were current.
+                    audit.info(
+                        "finished, 0 indices processed, 0 errored "
+                        "(skipped: within max-age threshold)"
+                    )
                     typer.secho(
                         f"indices: skipped — local subscriptions table "
                         f"last touched {age_days:.1f}d ago "
