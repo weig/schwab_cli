@@ -29,7 +29,7 @@ No third-party intermediaries, no data sharing, no shared API keys.
 | Volatility / IVR / IVP | `vol`, `dataset` | [vol](doc/vol.md) |
 | Fundamentals & dividends | `fundamentals`, `div` | [fundamentals](doc/fundamentals.md) · [dividends](doc/dividends.md) |
 | Streaming | `stream`, `watch` | [stream](doc/stream.md) |
-| Orders (paper / live) | `order` | _(opt-in; see source)_ |
+| Orders (place / preview / cancel / replace) | `order` | [order](doc/order.md) |
 | Notifications | `notify` (Telegram) | [notify](doc/notify.md) |
 | MCP server | `mcp install`, `mcp status`, `mcp log`, … | [mcp](doc/mcp.md) |
 | Cached dataset backend | `dataset subscribe`, `dataset sync`, `dataset cron …` | [setup](doc/setup.md) |
@@ -44,6 +44,21 @@ Output formats are uniform across commands:
 ---
 
 ## Install
+
+### One-liner (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/weig/schwab_cli/main/install.sh | sh
+```
+
+The installer fetches [`uv`](https://github.com/astral-sh/uv) if missing,
+then `uv tool install`s `schwab_cli` from GitHub. Binary lands at
+`~/.local/bin/schwab`.
+
+> Review before running anything piped from the internet:
+> [`install.sh`](install.sh).
+
+### From a local checkout
 
 Requires **Python 3.11+** and [`uv`](https://github.com/astral-sh/uv).
 
@@ -110,7 +125,7 @@ first HTTP 401 from Schwab auto-refreshes and retries once.
 
 `schwab_cli` can delegate the browser leg of OAuth to an external tool
 so the CLI stays browser-dep-free. The reference implementation is
-**[webauto-cli](https://github.com/weig/webauto)** — a Playwright-based
+**[webauto-cli](https://github.com/weig/webauto-cli)** — a Playwright-based
 automation runner with encrypted credential storage.
 
 Set `auto_login_command` in your config to invoke it:
@@ -248,7 +263,7 @@ PRs welcome.
 - **Avoid hardcoded paths and secrets.** Honour `SCHWAB_CLI_CONFIG_DIR`
   for anything that touches `~/.config/schwab_cli/`.
 - **Don't add browser/Playwright deps** — that lives in
-  [webauto-cli](https://github.com/weig/webauto). The CLI stays
+  [webauto-cli](https://github.com/weig/webauto-cli). The CLI stays
   pure-Python with HTTP only.
 
 Conventional-commits style for commit messages (`feat: …`, `fix: …`,
