@@ -77,16 +77,31 @@ def _write_plist(home: Path, name: str) -> Path:
     return plist
 
 
-def test_sweep_removes_both_prefix_variants(fake_home):
-    """Hyphen and underscore prefixes are both ours."""
+def test_sweep_removes_scheduler_plist(fake_home):
+    """The scheduler plist is the only one we own."""
     p1 = _write_plist(fake_home, "com.schwab-cli.scheduler.plist")
-    p2 = _write_plist(fake_home, "com.schwab_cli.dataset.legacy.plist")
 
     removed = ld.uninstall_all_schwab_plists()
 
-    assert sorted(removed) == sorted([p1, p2])
+    assert removed == [p1]
     assert not p1.exists()
-    assert not p2.exists()
+
+
+def test_sweep_leaves_legacy_dataset_plists_alone(fake_home):
+    """Old per-job plists from a pre-unified-scheduler install are no
+    longer ours to manage — leave them alone."""
+    legacy = _write_plist(
+        fake_home, "com.schwab-cli.dataset.market-data.plist",
+    )
+    legacy_underscore = _write_plist(
+        fake_home, "com.schwab_cli.dataset.legacy.plist",
+    )
+
+    removed = ld.uninstall_all_schwab_plists()
+
+    assert removed == []
+    assert legacy.exists()
+    assert legacy_underscore.exists()
 
 
 def test_sweep_leaves_non_schwab_plists_alone(fake_home):
@@ -107,11 +122,8 @@ def test_sweep_does_not_touch_mcp_plist(fake_home):
     `com.schwab-cli.` prefix but is NOT a dataset cron job. The
     sweep must leave it alone — an earlier too-broad prefix list
     silently uninstalled the user's MCP plist."""
-    dataset_plist = _write_plist(
+    scheduler_plist = _write_plist(
         fake_home, "com.schwab-cli.scheduler.plist",
-    )
-    legacy_dataset_plist = _write_plist(
-        fake_home, "com.schwab-cli.dataset.market-data.plist",
     )
     mcp_plist = _write_plist(fake_home, "com.schwab-cli.mcp.plist")
 
@@ -120,10 +132,9 @@ def test_sweep_does_not_touch_mcp_plist(fake_home):
     # MCP plist must survive.
     assert mcp_plist.exists()
     assert mcp_plist not in removed
-    # Dataset plists must be removed.
-    assert not dataset_plist.exists()
-    assert not legacy_dataset_plist.exists()
-    assert set(removed) == {dataset_plist, legacy_dataset_plist}
+    # Scheduler plist must be removed.
+    assert not scheduler_plist.exists()
+    assert removed == [scheduler_plist]
 
 
 def test_sweep_returns_empty_when_launchagents_missing(monkeypatch, tmp_path):

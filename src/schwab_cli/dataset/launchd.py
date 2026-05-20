@@ -1,10 +1,14 @@
-"""Crontab string → launchd plist generators.
+"""Crontab string → launchd plist generator for the unified scheduler.
 
 We only support the standard 5-field grammar with literal integers
 or ``*``. No steps (``*/15``), no ranges (``9-17``), no name lists
 (``MON,FRI``), no named shorthand (``@daily``). The error is
 explicit so the user knows to rewrite their crontab into the simple
 form rather than wonder why their job didn't fire.
+
+Only one launchd job is installed today — the unified scheduler at
+``com.schwab-cli.scheduler``. It fires once per day and pspawns the
+market-data / accounts / indices children inline.
 """
 from __future__ import annotations
 
@@ -13,7 +17,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 
 _FIELD_RANGES = [
@@ -45,7 +48,8 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
     if stripped.startswith("@"):
         raise ValueError(
             f"crontab expression {stripped!r}: cannot translate "
-            f"named shorthand (@daily, @weekly, …) into launchd StartCalendarInterval"
+            f"named shorthand (@daily, @weekly, …) into launchd "
+            f"StartCalendarInterval"
         )
     fields = stripped.split()
     if len(fields) != 5:
@@ -77,54 +81,30 @@ def crontab_to_calendar_interval(expr: str) -> list[dict[str, int]]:
     return [out]
 
 
-INDICES_LABEL           = "com.schwab-cli.dataset.indices"
-MARKET_DATA_LABEL       = "com.schwab-cli.dataset.market-data"
-ACCOUNTS_LABEL          = "com.schwab-cli.dataset.accounts"
-# Unified scheduler — replaces the three labels above. Fires once per
-# day and pspawns market-data + accounts + indices as parallel
-# children, each anchoring to its own NY hour internally.
-SCHEDULER_LABEL         = "com.schwab-cli.scheduler"
-# Pre-rename volatility plist label. Still referenced by tests and
-# kept as a back-compat alias for ``VOLATILITY_LABEL``; the sweep
-# uninstall picks up its plist via the ``_PLIST_PREFIXES`` glob, so
-# no per-label cleanup code is needed.
-LEGACY_VOLATILITY_LABEL = "com.schwab-cli.dataset.volatility"
-VOLATILITY_LABEL        = LEGACY_VOLATILITY_LABEL  # back-compat alias
+# Unified scheduler — single launchd job. Fires once per day and
+# pspawns market-data + accounts + indices as parallel children, each
+# anchoring to its own NY hour internally.
+SCHEDULER_LABEL       = "com.schwab-cli.scheduler"
 
-# Unified scheduler cron expression. Fires earlier than NY 17:00 ET
-# (the market-close anchor) under both DST modes; sub-jobs
-# sleep_until_ny internally to the right minute. Indices is delayed
-# inside its child to NY 18:00 ET for request spacing, so launchd
-# only needs to fire before 17:00.
-SCHEDULER_CRON_LOCAL   = "0 4 * * *"
+# Cron expression. Fires before NY 17:00 ET under both DST modes;
+# sub-jobs sleep_until_ny internally to the right minute.
+SCHEDULER_CRON_LOCAL  = "0 4 * * *"
 
 
-# Plist basenames the sweep is allowed to remove. Narrower than
-# ``com.schwab-cli.`` on purpose — the MCP server installs itself as
-# ``com.schwab-cli.mcp.plist`` and is NOT a dataset cron job, so a
-# too-broad sweep would silently uninstall it.
-#
-# Everything we install for the dataset/scheduler subsystem lives
-# under ``com.schwab-cli.dataset.<kind>.plist`` (legacy per-job) or
-# ``com.schwab-cli.scheduler.plist`` (unified). Both hyphen and
-# underscore variants are listed so legacy pre-rename installs are
-# still picked up.
+# Plist basenames the sweep is allowed to remove. Narrow on purpose:
+# the MCP server installs itself as ``com.schwab-cli.mcp.plist`` and
+# must not be touched. Only the scheduler plist is ours to sweep.
 _PLIST_PREFIXES = (
-    "com.schwab-cli.dataset.",
-    "com.schwab_cli.dataset.",
     "com.schwab-cli.scheduler",
-    "com.schwab_cli.scheduler",
 )
 
 
 @dataclass(frozen=True)
 class _KindInfo:
-    """Single source of truth for per-kind metadata. Adding a new
-    plist kind = adding one entry to :data:`_KIND_INFO` below.
+    """Single source of truth for per-kind metadata.
 
     ``cli_args`` is a tuple (not list) so the frozen-dataclass
-    semantics extend to its contents — ``_KIND_INFO[k].cli_args.append``
-    can't mutate global state.
+    semantics extend to its contents.
     """
     label:           str
     cli_args:        tuple[str, ...]   # appended after the binary path
@@ -134,11 +114,6 @@ class _KindInfo:
     run_at_load:     bool
 
 
-# ``scheduler`` is the only kind ``cron install`` actually writes.
-# The legacy entries (``indices`` / ``market-data`` / ``accounts``)
-# exist so :func:`_resolve_kind` can still name pre-scheduler plists
-# for inspection and so tests can construct a :class:`DatasetPlistSpec`
-# with a legacy kind without raising.
 _KIND_INFO: dict[str, _KindInfo] = {
     "scheduler": _KindInfo(
         label=SCHEDULER_LABEL,
@@ -146,49 +121,20 @@ _KIND_INFO: dict[str, _KindInfo] = {
         launcher_name="Schwab Data Sync Service",
         run_at_load=True,  # ensures missed runs catch up on next boot
     ),
-    "indices": _KindInfo(
-        label=INDICES_LABEL,
-        cli_args=("dataset", "update", "--indices"),
-        launcher_name="Schwab Indices Dataset",
-        run_at_load=False,
-    ),
-    "market-data": _KindInfo(
-        label=MARKET_DATA_LABEL,
-        cli_args=("dataset", "update", "--group", "volatility"),
-        launcher_name="Schwab Market Data",
-        run_at_load=True,
-    ),
-    "accounts": _KindInfo(
-        label=ACCOUNTS_LABEL,
-        cli_args=("dataset", "accounts", "snapshot"),
-        launcher_name="Schwab Accounts NAV",
-        run_at_load=True,
-    ),
 }
 
 # Cross-check: every label in :data:`_KIND_INFO` must be a plist
-# basename our sweep recognises, otherwise a future kind added with a
-# typo'd label would silently escape ``uninstall_all_schwab_plists``.
-# Evaluated at import — keeps :data:`_KIND_INFO` self-validating.
+# basename our sweep recognises, otherwise the sweep would miss it.
 for _info in _KIND_INFO.values():
     assert any(_info.label.startswith(p) for p in _PLIST_PREFIXES), (
-        f"_KIND_INFO label {_info.label!r} doesn't match _PLIST_PREFIXES; "
-        "uninstall_all_schwab_plists won't pick it up"
+        f"_KIND_INFO label {_info.label!r} doesn't match _PLIST_PREFIXES"
     )
 
 
-# Legacy alias mapping — historical kind names that should resolve to
-# their canonical entry without polluting :data:`_KIND_INFO`.
-_KIND_ALIASES: dict[str, str] = {
-    "volatility": "market-data",
-}
-
-
 def _resolve_kind(kind: str) -> _KindInfo:
-    """Look up a ``_KindInfo`` row, normalising legacy aliases."""
-    canonical = _KIND_ALIASES.get(kind, kind)
+    """Look up a ``_KindInfo`` row."""
     try:
-        return _KIND_INFO[canonical]
+        return _KIND_INFO[kind]
     except KeyError:
         raise ValueError(
             f"unsupported plist kind: {kind!r} "
@@ -237,8 +183,7 @@ def _write_launcher(spec: DatasetPlistSpec) -> Path:
     # ``shutil.which("schwab")`` — that lookup fails under the minimal
     # PATH and crashes the whole sync. Prepend the binary's directory
     # so the lookup succeeds in every descendant.
-    from pathlib import Path as _P
-    bin_dir = str(_P(spec.binary_path).parent)
+    bin_dir = str(Path(spec.binary_path).parent)
     cmd = (
         f"exec {_shquote(spec.binary_path)} "
         f"{' '.join(info.cli_args)} \"$@\""
@@ -266,15 +211,10 @@ def _shquote(s: str) -> str:
 class DatasetPlistSpec:
     binary_path: str
     cron:        str
-    kind:        str  # 'indices' or 'market-data'
+    kind:        str  # currently only 'scheduler'
     log_file:    str | None = None
 
     def __post_init__(self) -> None:
-        # Normalise legacy aliases (e.g. 'volatility' → 'market-data')
-        # so the rest of the code only sees canonical kinds.
-        canonical = _KIND_ALIASES.get(self.kind, self.kind)
-        if canonical != self.kind:
-            object.__setattr__(self, "kind", canonical)
         # Validate up front — a bogus kind on construction beats a
         # KeyError two layers deep at install time.
         _resolve_kind(self.kind)
@@ -315,8 +255,7 @@ def build_dataset_plist(
         # RunAtLoad lets a daily job catch up after a missed fire
         # (laptop closed at the scheduled minute) on next boot — the
         # entry point's sleep_until_ny either runs immediately if
-        # already past target or waits until target. Per-kind in
-        # :data:`_KIND_INFO`.
+        # already past target or waits until target.
         "RunAtLoad":             _resolve_kind(spec.kind).run_at_load,
         "KeepAlive":             False,
     }
@@ -327,7 +266,7 @@ def build_dataset_plist(
 
 
 def install_plist(spec: DatasetPlistSpec) -> Path:
-    """Write the launcher + plist and ``launchctl load`` (G13.2).
+    """Write the launcher + plist and ``launchctl load``.
 
     Idempotent across schedule changes: any previously-loaded job at
     the same label is unloaded first. Without that, ``launchctl load``
@@ -362,19 +301,13 @@ def install_plist(spec: DatasetPlistSpec) -> Path:
     return spec.plist_path
 
 
-# (moved to module top — see :data:`_PLIST_PREFIXES`)
-
-
 def uninstall_all_schwab_plists() -> list[Path]:
-    """Unload + remove every Schwab-CLI plist in ``LaunchAgents``,
-    plus the launcher scripts we own.
+    """Unload + remove every Schwab-CLI scheduler plist in
+    ``LaunchAgents``, plus the launcher scripts we own.
 
     Called by both ``cron install`` (clean slate before re-installing
     the scheduler) and ``cron uninstall`` (full teardown). Sweeping by
-    filename prefix means we don't need a per-kind enumeration and
-    legacy installs from earlier builds (e.g.
-    ``com.schwab-cli.dataset.volatility``) are picked up
-    automatically.
+    filename prefix means we don't need a per-kind enumeration.
 
     Launcher cleanup is gated by the known ``launcher_name`` values
     in :data:`_KIND_INFO` — anything else in the launcher directory
@@ -450,108 +383,4 @@ def _unload_or_raise(plist_path: Path) -> None:
     raise RuntimeError(
         f"launchctl unload failed for {plist_path}: "
         f"{err or 'exit ' + str(result.returncode)}"
-    )
-
-
-# ---- Phase 4: auto-fix plist on fire-time drift ------------------------
-#
-# When the system's timezone changes after install, the launchd plist's
-# fixed `Hour=H_local` ends up firing at a different NY-clock moment.
-# `sleep_until_ny` is robust to "fire early, wait longer"; it can't
-# recover from "fire AFTER target" (it just no-ops). The cron detects
-# that and emits a Telegram alert (`fire_time_drift`). Phase 4 also
-# auto-fixes the plist:
-#
-#   * `_compute_safe_local_hour(system_tz)` — pick a local Hour that
-#     fires at NY <= 16:00 under either DST mode (we anchor on EST,
-#     UTC-5; EDT is automatically safe since it's an hour closer to
-#     UTC, so the fire moves earlier).
-#   * `reinstall_market_data_job(local_hour)` — rewrite the plist
-#     in-place and re-bootstrap via launchctl. Idempotent when the
-#     existing plist already has the right Hour.
-from datetime import datetime, timezone
-
-
-def _compute_safe_local_hour(*, system_tz: ZoneInfo) -> int:
-    """Pick a local Hour that, given the system's TZ, fires at NY-clock
-    ≤ 16:00 in either DST mode.
-
-    Strategy: anchor on **December 15** (NY is in EST, most northern
-    systems are also in standard time). 16:00 NY EST = 21:00 UTC →
-    convert to system TZ → take Hour. The launchd plist's fixed Hour
-    is then DST-invariant on the NY side: when NY flips EST→EDT, the
-    same Hour fires an hour EARLIER in NY clock (still ≤ 17 ET, so
-    sleep_until_ny just waits longer).
-
-    Systems with their own DST flip (e.g. NY itself, EU) are still
-    safe within North-America-style synchronized DST; opposite-
-    hemisphere DST (e.g. Sydney) can land in a small drift window
-    twice a year — those users may need a one-off reinstall.
-    """
-    # Year is irrelevant for the offset extraction; pick a recent one.
-    anchor_utc = datetime(2026, 12, 15, 21, 0, tzinfo=timezone.utc)
-    target_local = anchor_utc.astimezone(system_tz)
-    return target_local.hour
-
-
-def _market_data_plist_path() -> Path:
-    return _default_dir() / f"{MARKET_DATA_LABEL}.plist"
-
-
-def reinstall_market_data_job(*, local_hour: int) -> None:
-    """Rewrite the market-data plist with ``Hour=local_hour`` and
-    re-load it via launchctl bootout + bootstrap. Idempotent — if the
-    plist already has the same Hour, no-op.
-
-    Used by the cron's drift-detection branch to self-heal after a
-    system TZ change. The legacy `install_plist` is the path the
-    operator uses for a fresh install; this one is the "rewrite the
-    fixed Hour and reload" specialization.
-    """
-    import os
-    import plistlib as _plistlib
-
-    plist_path = _market_data_plist_path()
-    if plist_path.exists():
-        try:
-            existing = _plistlib.loads(plist_path.read_bytes())
-            intervals = existing.get("StartCalendarInterval")
-            if isinstance(intervals, dict):
-                intervals = [intervals]
-            if (intervals
-                    and isinstance(intervals, list)
-                    and intervals[0].get("Hour") == local_hour):
-                return  # already correct — nothing to do
-        except Exception:
-            # Corrupt plist? Fall through and overwrite.
-            pass
-
-    # Preserve everything else about the plist; only flip the Hour.
-    plist_dict: dict
-    if plist_path.exists():
-        try:
-            plist_dict = _plistlib.loads(plist_path.read_bytes())
-        except Exception:
-            plist_dict = {}
-    else:
-        plist_dict = {}
-    plist_dict.setdefault("Label", MARKET_DATA_LABEL)
-    plist_dict["StartCalendarInterval"] = [
-        {"Hour": local_hour, "Minute": 0},
-    ]
-    # Keep RunAtLoad on — it's the Phase 3 catch-up safety net.
-    plist_dict.setdefault("RunAtLoad", True)
-    plist_path.parent.mkdir(parents=True, exist_ok=True)
-    plist_path.write_bytes(_plistlib.dumps(plist_dict))
-
-    # bootout + bootstrap are the modern equivalents of unload/load.
-    subprocess.run(
-        ["launchctl", "bootout",
-         f"gui/{os.getuid()}/{MARKET_DATA_LABEL}"],
-        check=False, capture_output=True,
-    )
-    subprocess.run(
-        ["launchctl", "bootstrap",
-         f"gui/{os.getuid()}", str(plist_path)],
-        check=False, capture_output=True,
     )

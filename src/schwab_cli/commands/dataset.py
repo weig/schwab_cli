@@ -35,13 +35,6 @@ def _check_fire_time_and_alert(notifier) -> bool:
     """Emit a drift alert when we fired at NY ≥ 17:00 ET. Returns
     True when the fire-time is OK (safe window), False on drift.
 
-    On drift, additionally invoke the **Phase 4 auto-fix**:
-    recompute the right local Hour for the current system TZ, rewrite
-    the launchd plist, re-bootstrap via ``launchctl``, and emit a
-    follow-up ``fire_time_autofixed`` notification. Auto-fix errors
-    are captured and reported as ``fire_time_autofix_failed`` —
-    never silent.
-
     Skips the sleep_until_ny call on drift (which would no-op anyway)
     and lets the cron run immediately so the operator at least gets
     *some* data point — partial data > no data.
@@ -53,25 +46,6 @@ def _check_fire_time_and_alert(notifier) -> bool:
             ny_time=now_ny.strftime("%H:%M %Z"),
             target_ny_time=f"{_TARGET_NY_HOUR:02d}:00 ET",
         )
-        try:
-            from schwab_cli.dataset.launchd import (
-                _compute_safe_local_hour, reinstall_market_data_job,
-            )
-            system_tz = datetime.now().astimezone().tzinfo
-            if system_tz is None:
-                raise RuntimeError("system has no recognized timezone")
-            new_hour = _compute_safe_local_hour(system_tz=system_tz)
-            reinstall_market_data_job(local_hour=new_hour)
-            notifier.emit(
-                "dataset.market_data.fire_time_autofixed",
-                new_local_hour=f"{new_hour:02d}:00",
-                system_tz=str(system_tz),
-            )
-        except Exception as e:
-            notifier.emit(
-                "dataset.market_data.fire_time_autofix_failed",
-                error=f"{type(e).__name__}: {e}",
-            )
         return False
     return True
 from schwab_cli.dataset.update import (
@@ -427,6 +401,14 @@ def update(
                     audit.info(
                         f"last sync {age_days:.1f}d ago, "
                         f"within {max_age_days}d threshold; skipping"
+                    )
+                    # Sentinel so the doctor's audit-log parser sees a
+                    # current "finished" anchor for this run instead
+                    # of resurfacing the previous real run's timestamp
+                    # and deltas as if they were current.
+                    audit.info(
+                        "finished, 0 indices processed, 0 errored "
+                        "(skipped: within max-age threshold)"
                     )
                     typer.secho(
                         f"indices: skipped — local subscriptions table "

@@ -43,13 +43,9 @@ def test_scheduler_plist_program_args_invokes_dataset_sync():
     assert spec.program_args == ["/x/schwab", "dataset", "sync"]
 
 
-def test_kind_info_registry_lists_known_kinds():
-    """The pluggable kind registry is the single source of truth.
-    Pinning the entries means a rename or typo blows up here rather
-    than in production launchctl."""
-    assert "scheduler" in _KIND_INFO
-    # Legacy kinds retained for cleanup paths and back-compat
-    # callers that still construct DatasetPlistSpec for non-install
-    # uses (e.g. ad-hoc plist inspection).
-    for legacy in ("indices", "market-data", "accounts"):
-        assert legacy in _KIND_INFO
+def test_kind_info_registry_lists_only_scheduler():
+    """The unified scheduler is the only kind we install. Legacy
+    per-job kinds (indices/market-data/accounts) have been removed —
+    a rename or typo blows up here rather than in production
+    launchctl."""
+    assert set(_KIND_INFO) == {"scheduler"}

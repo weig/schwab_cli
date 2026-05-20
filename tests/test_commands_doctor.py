@@ -156,3 +156,136 @@ def test_next_run_returns_none_when_no_interval(tmp_path):
         "KeepAlive": True,
     }, fmt=plistlib.FMT_XML))
     assert _next_calendar_interval_run(p) is None
+
+
+# ---- indices last-run audit-log parser -------------------------------
+
+
+def test_parse_last_indices_run_extracts_deltas(monkeypatch, tmp_path):
+    """The most recent ``[indices] finished`` block in the audit log
+    is the authoritative source for last-run timestamp + per-index
+    deltas. Stale prior runs are skipped."""
+    from schwab_cli.commands import doctor as doc
+    log = tmp_path / "scheduler.log"
+    log.write_text(
+        # Earlier run — should be ignored.
+        "2026-05-10T22:00:00Z [indices] start\n"
+        "2026-05-10T22:00:01Z [indices] SPX: total=500 +1 -0\n"
+        "2026-05-10T22:00:01Z [indices] finished, 1 indices processed, 0 errored\n"
+        # Latest run — what we should parse.
+        "2026-05-18T22:00:04Z [indices] start\n"
+        "2026-05-18T22:00:04Z [indices] DJI: total=30 +0 -0\n"
+        "2026-05-18T22:00:04Z [indices] NQ: total=101 +1 -0\n"
+        "2026-05-18T22:00:04Z [indices] SPX: total=502 +2 -2\n"
+        "2026-05-18T22:00:04Z [indices] finished, 3 indices processed, 0 errored\n"
+    )
+    monkeypatch.setattr(
+        "schwab_cli.dataset.audit_log.audit_log_path", lambda: log,
+    )
+    info = doc._parse_last_indices_run()
+    assert info is not None
+    assert info["finished_at"] == datetime(
+        2026, 5, 18, 22, 0, 4, tzinfo=timezone.utc,
+    )
+    assert info["errored"] == 0
+    assert info["deltas"] == [
+        ("DJI", 0, 0, 30),
+        ("NQ",  1, 0, 101),
+        ("SPX", 2, 2, 502),
+    ]
+
+
+def test_parse_last_indices_run_returns_none_for_empty_log(
+    monkeypatch, tmp_path,
+):
+    from schwab_cli.commands import doctor as doc
+    log = tmp_path / "scheduler.log"
+    log.write_text("")
+    monkeypatch.setattr(
+        "schwab_cli.dataset.audit_log.audit_log_path", lambda: log,
+    )
+    assert doc._parse_last_indices_run() is None
+
+
+def test_parse_last_indices_run_returns_none_when_log_missing(
+    monkeypatch, tmp_path,
+):
+    from schwab_cli.commands import doctor as doc
+    monkeypatch.setattr(
+        "schwab_cli.dataset.audit_log.audit_log_path",
+        lambda: tmp_path / "absent.log",
+    )
+    assert doc._parse_last_indices_run() is None
+
+
+def test_parse_last_indices_run_recognizes_skip_sentinel(
+    monkeypatch, tmp_path,
+):
+    """When the --max-age-days guard short-circuits the run, the
+    audit log writes a sentinel ``finished, 0 indices processed,
+    0 errored (skipped: ...)`` line. The parser must accept it and
+    surface the reason via the ``note`` field — otherwise doctor
+    would resurface the previous real run's timestamp/deltas as if
+    they were current."""
+    from schwab_cli.commands import doctor as doc
+    log = tmp_path / "scheduler.log"
+    log.write_text(
+        # Earlier real run.
+        "2026-05-10T22:00:00Z [indices] start\n"
+        "2026-05-10T22:00:01Z [indices] SPX: total=500 +1 -0\n"
+        "2026-05-10T22:00:01Z [indices] finished, 1 indices processed, 0 errored\n"
+        # Latest run — got skipped by max-age guard.
+        "2026-05-18T22:00:04Z [indices] start\n"
+        "2026-05-18T22:00:04Z [indices] last sync 2.0d ago, "
+        "within 6d threshold; skipping\n"
+        "2026-05-18T22:00:04Z [indices] finished, 0 indices processed, "
+        "0 errored (skipped: within max-age threshold)\n"
+    )
+    monkeypatch.setattr(
+        "schwab_cli.dataset.audit_log.audit_log_path", lambda: log,
+    )
+    info = doc._parse_last_indices_run()
+    assert info is not None
+    assert info["finished_at"] == datetime(
+        2026, 5, 18, 22, 0, 4, tzinfo=timezone.utc,
+    )
+    assert info["deltas"] == []
+    assert info["note"] == "skipped: within max-age threshold"
+
+
+def test_parse_last_indices_run_falls_back_to_rotated_backups(
+    monkeypatch, tmp_path,
+):
+    """RotatingFileHandler rolls scheduler.log → .1. If the active
+    file rotated right after the last indices run, the finished line
+    now lives in scheduler.log.1 and the parser must find it instead
+    of returning None (which would render the row as a stale ``—``)."""
+    from schwab_cli.commands import doctor as doc
+    active = tmp_path / "scheduler.log"
+    rotated = tmp_path / "scheduler.log.1"
+    active.write_text("2026-05-19T08:00:00Z [scheduler] start\n")
+    rotated.write_text(
+        "2026-05-18T22:00:04Z [indices] start\n"
+        "2026-05-18T22:00:04Z [indices] SPX: total=502 +0 -0\n"
+        "2026-05-18T22:00:04Z [indices] finished, 1 indices processed, 0 errored\n"
+    )
+    monkeypatch.setattr(
+        "schwab_cli.dataset.audit_log.audit_log_path", lambda: active,
+    )
+    info = doc._parse_last_indices_run()
+    assert info is not None
+    assert info["deltas"] == [("SPX", 0, 0, 502)]
+
+
+def test_format_indices_deltas_collapses_no_change_to_zero():
+    """``+0 -0`` is visual noise; render as ``0`` (dim)."""
+    from schwab_cli.commands import doctor as doc
+    out = doc._format_indices_deltas([
+        ("DJI", 0, 0, 30),
+        ("NQ",  1, 0, 101),
+        ("SPX", 2, 2, 502),
+    ])
+    # Strip ANSI escapes for assertion.
+    import re as _re
+    plain = _re.sub(r"\x1b\[[0-9;]*m", "", out)
+    assert plain == "[DJI: 0, NQ: +1, SPX: +2 -2]"
