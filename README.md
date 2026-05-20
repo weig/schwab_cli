@@ -1,86 +1,88 @@
 # schwab_cli
 
-A CLI for Charles Schwab API access.
+A terminal-first CLI and MCP server for the Charles Schwab developer API.
 
-## Requirements
+> Quotes, option chains, accounts, positions, history, and a cached
+> volatility/IVP dataset — rendered as human tables, JSON, or
+> GitHub-flavored markdown, with an optional MCP server so AI agents
+> can call the same operations as tools.
 
-- Python 3.11+
-- [`uv`](https://github.com/astral-sh/uv)
+All market data is streamed through your own authenticated Schwab session.
+No third-party intermediaries, no data sharing, no shared API keys.
 
-## Install (dev)
+---
+
+## What it can do
+
+| Area | Commands | Reference |
+|---|---|---|
+| Accounts & positions | `accounts`, `account`, `positions`, `transactions` | [accounts](doc/accounts.md) · [positions](doc/positions.md) · [transactions](doc/transactions.md) |
+| Quotes & history | `quote`, `history` | [quote](doc/quote.md) · [history](doc/history.md) |
+| Options | `option`, `greeks`, `skew`, `strategy` | [option](doc/option.md) · [greeks](doc/greeks.md) · [skew](doc/skew.md) · [strategy](doc/strategy.md) |
+| Volatility / IVR / IVP | `vol`, `dataset` | [vol](doc/vol.md) |
+| Fundamentals & dividends | `fundamentals`, `div` | [fundamentals](doc/fundamentals.md) · [dividends](doc/dividends.md) |
+| Streaming | `stream`, `watch` | [stream](doc/stream.md) |
+| Orders (paper / live) | `order` | _(opt-in; see source)_ |
+| Notifications | `notify` (Telegram) | [notify](doc/notify.md) |
+| MCP server | `mcp install`, `mcp status`, `mcp log`, … | [mcp](doc/mcp.md) |
+| Cached dataset backend | `dataset subscribe`, `dataset sync`, `dataset cron …` | [setup](doc/setup.md) |
+| Health check | `doctor` | _(prints install / MCP / auth / dataset status)_ |
+
+Output formats are uniform across commands:
+- **Default**: human-readable rich table.
+- `--json`: machine-readable for `| jq` and scripts.
+- `--md`: GitHub-flavored markdown — drop into an LLM prompt and the
+  agent can read prices, greeks, etc. without parsing tables.
+
+---
+
+## Install
+
+Requires **Python 3.11+** and [`uv`](https://github.com/astral-sh/uv).
+
+```bash
+# One-time global install (creates an isolated tool venv, puts `schwab` on PATH)
+uv tool install --from . schwab_cli
+
+# After a pull or a local edit
+uv tool install --reinstall --from . schwab_cli
+
+# Or run from the project directory without installing
+uv run schwab <command> ...
+```
+
+Developer setup:
 
 ```bash
 uv sync --extra dev
+uv run pytest
 ```
 
-## Install (global)
+---
+
+## Authentication
 
 ```bash
-uv tool install --editable .
+schwab setup          # one-time: capture credentials → ~/.config/schwab_cli/config.json
+schwab auth           # refresh existing session, else open browser
+schwab auth --force   # skip refresh; full OAuth round-trip
+schwab auth --manual  # skip the auto-login subprocess (if configured)
 ```
 
-## First-time setup
+Config and session files live at `~/.config/schwab_cli/{config,session}.json`
+(mode `0600`, plain text — keep these out of git and cloud sync).
 
-```bash
-schwab_cli setup
-```
+The 7-day refresh token is reused transparently on every command. The
+first HTTP 401 from Schwab auto-refreshes and retries once.
 
-Interactive prompts capture your Schwab API credentials and the code-relay
-URL. Saved to `~/.config/schwab_cli/config.json` (mode `0600`, plain text —
-keep this file out of git, cloud-sync, and shared backups).
+### Browser auto-login (optional)
 
-## Authenticate
+`schwab_cli` can delegate the browser leg of OAuth to an external tool
+so the CLI stays browser-dep-free. The reference implementation is
+**[webauto-cli](https://github.com/weig/webauto)** — a Playwright-based
+automation runner with encrypted credential storage.
 
-```bash
-schwab_cli auth            # refresh existing session if present, else open browser
-schwab_cli auth --force    # skip refresh; always open browser for fresh login
-schwab_cli auth --manual   # skip the auto-login subprocess (if configured)
-```
-
-Tokens are saved to `~/.config/schwab_cli/session.json` (mode `0600`).
-
-### How auth works
-
-1. If you have a valid refresh token, `auth` refreshes it via HTTP — no
-   browser involved. Quick path that runs on every invocation.
-2. If refresh fails (or you passed `--force`):
-   - The CLI prints the Schwab OAuth URL to stderr and asks your OS
-     default browser to open it.
-   - You complete login + MFA in your normal browser. Schwab redirects
-     to your configured `redirect_uri`.
-   - Up to **three handlers race concurrently** to capture the `code`:
-     - **Paste fallback** — always on. The CLI shows a prompt; paste
-       the code / querystring / full redirect URL into it.
-     - **Auto-login subprocess** — when `auto_login_command` is set
-       and `--manual` is not passed. schwab_cli spawns the configured
-       command (typically a [webauto-cli](https://github.com/weig/webauto)
-       invocation) with `stdin=DEVNULL` and the right flags for the
-       active `auth_flow`. The subprocess drives the browser through
-       Schwab on your behalf.
-     - **Code-relay polling** — when `auth_flow="code_relay"`. schwab_cli
-       long-polls `code_relay_url` for a code your remote relay captured.
-   - First valid result wins; losing handlers are cancelled and the
-     subprocess is terminated (SIGTERM → 5s → SIGKILL).
-   - `oauth.resolve_auth_result` converts the result to a `TokenResponse`:
-     `code` → calls Schwab's token endpoint; `token` → already exchanged,
-     wrap and save; `error` → surfaces the OAuth error and exits 1.
-
-### `auth_flow` config field
-
-| Value | Meaning |
-|---|---|
-| `"code_relay"` | schwab_cli polls a remote relay URL. `redirect_uri` points at the relay; `code_relay_url` is the polling endpoint. |
-| `"client"` | schwab_cli stands up a local HTTP listener; the auto-login subprocess (or any other client) POSTs the captured code there. |
-
-### Auto-login (optional, via webauto)
-
-schwab_cli can delegate browser driving to an external subprocess.
-The reference implementation is the [`webauto`](https://github.com/weig/webauto)
-framework — installed separately, with its own venv and browser deps.
-schwab_cli stays browser-dep-free.
-
-Set `auto_login_command` in your config to an argv list pointing at
-`webauto-cli` (or any equivalent tool that respects the wire protocol below):
+Set `auto_login_command` in your config to invoke it:
 
 ```json
 {
@@ -93,150 +95,136 @@ Set `auto_login_command` in your config to an argv list pointing at
 }
 ```
 
-The credentials (Schwab username/password) live in webauto's `--env` file
-— **never** in schwab_cli's config. Use `webauto-cli secrets keygen` +
-`webauto-cli secrets encrypt` to keep that file encrypted at rest:
+Three handlers race concurrently to capture the OAuth code (paste
+fallback / auto-login subprocess / code-relay polling); first valid
+result wins, losers are cancelled. Full wire protocol and `auth_flow`
+options in [doc/auth.md](doc/auth.md).
 
-```bash
-# One-time
-webauto-cli secrets keygen
-cat > /tmp/plain.env <<EOF
-URL=https://api.schwabapi.com/v1/oauth/authorize?...
-USERNAME=alice
-PASSWORD=hunter2
-EOF
-webauto-cli secrets encrypt /tmp/plain.env \
-    --out ~/.config/schwab_cli/auto_login.env
-rm -P /tmp/plain.env
+**Credentials never live in `schwab_cli` config** — they belong in
+webauto's encrypted env file. See `webauto-cli secrets keygen`.
+
+### Login callback (oauth_relay)
+
+Schwab requires a pre-registered **HTTPS** redirect URI and won't accept
+`http://localhost`. To get the OAuth `code` back to your CLI without
+shipping certificates, point Schwab at a public relay.
+
+The reference implementation is
+**[oauth-relay](https://github.com/weig/oauth_relay)** — a tiny
+Cloudflare Worker that:
+
+1. Accepts Schwab's redirect at a fixed public URL
+   (`https://<your-worker>.workers.dev/<uuid>/schwab_callback?code=…`).
+2. Holds the `code` for a few seconds.
+3. Hands it to whichever `schwab auth` invocation is currently
+   long-polling it.
+
+Configure once:
+
+```json
+{
+  "auth_flow": "code_relay",
+  "redirect_uri": "https://oauth-relay.<you>.workers.dev/<uuid>/schwab_callback",
+  "code_relay_url": "https://oauth-relay.<you>.workers.dev/<uuid>/wait"
+}
 ```
 
-**Wire protocol** — schwab_cli appends per-run flags to your `auto_login_command`
-before spawning:
+Alternative `auth_flow="client"` stands up a local HTTP listener
+instead — pick this if you'd rather not run a worker. See
+[doc/auth.md](doc/auth.md) for the trade-offs.
 
-| `auth_flow` | Appended flags |
-|---|---|
-| `client` | `--notification-endpoint http://127.0.0.1:<port>/oauth/<token>` + `--state <state>` + `-a URL=<auth URL>` |
-| `code_relay` | `--no-notify` + `--state <state>` + `-a URL=<auth URL>` |
+---
 
-The action script is your own — typically a copy of one of webauto's
-examples (`~/Projects/finance/webauto/examples/schwab_auth_code_relay.py`
-for relay flow, `examples/schwab_auth.py` for client flow). It reads
-credentials from the env webauto loaded via `--env` and either:
+## MCP server
 
-- POSTs `{"kind": "code", "code": ..., "state": ...}` to the listener
-  (client flow), or
-- Calls `done()` after the browser hits the relay (code_relay flow);
-  the relay captures and schwab_cli polls for it.
-
-OAuth errors flow through as `{"kind": "error", "error": ..., "error_description": ...}`
-and schwab_cli surfaces them with exit code 1.
-
-### Testing without touching your live config + session
-
-Use `SCHWAB_CLI_CONFIG_DIR` to point both `config.json` and
-`session.json` at an isolated directory. Unlike `XDG_CONFIG_HOME`, it
-points **directly** at the schwab_cli dir (no `schwab_cli` suffix
-appended) so you can use any folder name:
+Expose `schwab_cli` as a Model Context Protocol server so AI agents
+(Claude Code, Claude Desktop, custom tools) can call Schwab operations
+as MCP tools.
 
 ```bash
-mkdir -p ./test-config
-cp ~/.config/schwab_cli/config.json ./test-config/   # or hand-write one
-SCHWAB_CLI_CONFIG_DIR=./test-config schwab_cli auth --force
-SCHWAB_CLI_CONFIG_DIR=./test-config schwab_cli accounts
+schwab mcp install         # install + load the launchd agent (macOS)
+schwab mcp status          # daemon status + last 10 logbook events
+schwab mcp log             # tail the JSONL logbook
+schwab mcp restart         # rolling restart
+schwab mcp logout          # forget the session (force re-auth on next call)
 ```
 
-Your real `~/.config/schwab_cli/session.json` stays untouched.
+Available MCP tools out of the box: `get_quote`, `get_chain`,
+`stream_quote`, `dataset_status`, `dataset_history`, `dataset_iv_rank`,
+`server_status`. See [doc/mcp.md](doc/mcp.md) for the full list,
+stdio vs SSE transport, and Claude Code integration.
 
-## Data commands
+---
 
-Once authenticated, read-only data commands are available:
+## Dataset backend (cached volatility, IVR / IVP)
 
-```bash
-schwab_cli accounts                  # all accounts: number, type, liquidation value, cash, position count
-schwab_cli account 1234              # one account (suffix or full number)
-schwab_cli positions                 # positions across all accounts
-schwab_cli positions 5678            # positions for one account
-schwab_cli quote AAPL                # one quote
-schwab_cli quote AAPL MSFT NVDA      # multi-symbol quote
-```
+The `dataset` subsystem maintains a daily-refreshed, tenor-consistent
+ATM IV series locally so `vol SYMBOL` returns fast and IVP percentiles
+are deterministic.
 
 ```bash
-schwab_cli option NVDA 270115                     # both calls & puts, 10 strikes around ATM
-schwab_cli option NVDA '270115*250'               # strike 250 exactly (quote the `*` in bash/zsh)
-schwab_cli option NVDA '270115P*' --strikes 4     # puts, 4 strikes around ATM
-schwab_cli option NVDA 270115 --detail=1          # stacked layout with greeks
-schwab_cli option NVDA 270115 --detail=2          # stacked layout + per-contract details
-```
+# Subscribe — individual tickers, an index's members, or your account.
+schwab dataset subscribe NVDA,AMZN,SPY
+schwab dataset subscribe SPX --indices
+schwab dataset subscribe --account <accountHash>
 
-**Spec grammar:** `YYMMDD[P|C]*[strike]`. `YYMMDD` expands to `20YY-MM-DD`; `P` / `C` filter to one side; `*<strike>` pins an exact strike. Shell glob quoting is required whenever `*` appears in the spec.
-
-**`--strikes N`** selects N total strikes around ATM. Even N splits evenly (`N/2` ITM + `N/2` OTM); odd N includes the ATM row (`(N-1)/2` ITM + 1 ATM + `(N-1)/2` OTM). Ignored when the spec names an exact strike.
-
-**Detail levels:**
-
-| `--detail` | Layout | Columns |
-|------------|--------|---------|
-| `0` (default) | Classic side-by-side | Bid / Ask / Last / Δ per side |
-| `1` | One row per contract | + IV, Γ, Θ, 𝒱, Vol, OI |
-| `2` | One row per contract + inline sub-table | + Mark, sizes, OHLC, ρ, time/intrinsic value, settlement type |
-
-When the terminal is too narrow, the renderer drops columns from the right and prints a `note:` line to stderr telling you which. `--json` and `--md` never drop columns.
-
-Output formats:
-
-```bash
-schwab_cli accounts --json           # JSON for scripting (| jq)
-schwab_cli accounts --md             # GitHub-flavored markdown for LLM context
-schwab_cli accounts                  # human-readable rich table (default)
-```
-
-`--json` and `--md` are mutually exclusive.
-
-The first HTTP 401 from Schwab's API triggers an automatic token refresh and a
-single retry — no user action needed as long as the 7-day refresh token is
-still valid. After it expires, re-run `schwab_cli auth --force`.
-
-## `dataset` — cached volatility data
-
-Maintain a daily-refreshed series so `vol SYMBOL` returns fast,
-tenor-consistent IVR / IVP. One-time setup:
-
-```bash
-# Subscribe individual tickers (always tracked).
-schwab_cli dataset subscribe NVDA,AMZN,SPY
-
-# Or follow an index — members auto-sync weekly.
-schwab_cli dataset subscribe SPX --indices
-
-# Or follow your account's option-bearing positions.
-schwab_cli dataset subscribe --account <accountHash>
-
-# Schedule the cron jobs (weekly index sync + daily vol sample).
-schwab_cli dataset cron install --indices
-schwab_cli dataset cron install --group volatility
+# Install the unified daily scheduler (one launchd plist, three children).
+schwab dataset cron install
 
 # Inspect.
-schwab_cli dataset status
+schwab dataset status
+schwab doctor
 ```
 
-After the first ~120 days of cron runs, `vol NVDA` shows IVR / IVP
-sourced from the clean `atm_iv_30d` series. Until then, it falls
-back to the legacy series (with a one-shot BS-reconstructed
-backfill if needed).
+`cron install` is idempotent — it sweeps any pre-existing schwab_cli
+launchd plists first and installs the single unified scheduler
+(`com.schwab-cli.scheduler`). The scheduler fires once per day in the
+early local morning and pspawns three children that internally
+`sleep_until_ny`:
 
-To stop tracking:
+- **market-data** — 17:00 ET ATM IV snapshot + OHLCV close.
+- **accounts** — 17:00 ET portfolio NAV snapshot.
+- **indices** — 18:00 ET membership refresh (rate-limited to ~weekly via `--max-age-days`).
+
+Every transition is captured in `~/.config/schwab_cli/scheduler.log`
+(rotating, 10MB × 3 backups) and the latest per-job exit status lives
+in `~/.config/schwab_cli/last_run.json`. Job failures emit Telegram
+alerts via the `notify` subsystem (configure with `schwab notify install`).
+
+Stop tracking:
 
 ```bash
-schwab_cli dataset unsubscribe NVDA
-schwab_cli dataset cron uninstall --indices
-schwab_cli dataset cron uninstall --group volatility
+schwab dataset unsubscribe NVDA
+schwab dataset cron uninstall
 ```
 
-Supported indices: SPX, DJI, NQ. RUT is recognized but not yet
-populated by an upstream provider.
+Supported indices: SPX, DJI, NQ. RUT is recognised but not yet
+populated upstream.
 
-## Run tests
+---
 
-```bash
-uv run pytest
-```
+## Contributing
+
+PRs welcome.
+
+- **Open an issue first** for non-trivial changes — design discussion
+  is cheaper than rebases.
+- **Stay terminal-first.** New features should render legibly in a
+  default-width terminal and also expose `--json` / `--md` for
+  scripting / LLM consumption.
+- **Tests required** for parsers, formatters, and any new command.
+  `uv run pytest` should be green before opening a PR.
+- **Avoid hardcoded paths and secrets.** Honour `SCHWAB_CLI_CONFIG_DIR`
+  for anything that touches `~/.config/schwab_cli/`.
+- **Don't add browser/Playwright deps** — that lives in
+  [webauto-cli](https://github.com/weig/webauto). The CLI stays
+  pure-Python with HTTP only.
+
+Conventional-commits style for commit messages (`feat: …`, `fix: …`,
+`refactor: …`, `docs: …`, `test: …`).
+
+---
+
+## License
+
+See `LICENSE`.
