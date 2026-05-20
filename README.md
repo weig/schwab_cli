@@ -284,8 +284,28 @@ PRs welcome.
   [webauto-cli](https://github.com/weig/webauto-cli). The CLI stays
   pure-Python with HTTP only.
 
+### Local dev setup
+
+```bash
+uv sync --extra dev
+uv run pre-commit install        # one-time: arm the lint/format hook
+uv run ruff check .              # lint
+uv run ruff format .             # format
+uv run pytest                    # run the suite
+```
+
+### CI gates (PR will be blocked unless green)
+
+- `ruff check` (lint — bugs, dead code, unused imports)
+- `pytest` (streaming WebSocket suite excluded — hangs CI runners)
+- **PR checklist** — every `- [ ]` in the PR body must be ticked.
+  Drop any line that doesn't apply rather than leaving it unchecked.
+
+`ruff format` is not yet enforced; the existing tree predates the
+formatter. Run `uv run ruff format path/to/file.py` opt-in.
+
 Conventional-commits style for commit messages (`feat: …`, `fix: …`,
-`refactor: …`, `docs: …`, `test: …`).
+`refactor: …`, `docs: …`, `test: …`, `chore: …`).
 
 ---
 

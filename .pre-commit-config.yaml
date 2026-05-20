@@ -1,0 +1,24 @@
+# Pre-commit hooks — run `pre-commit install` once after cloning.
+# Ruff handles both linting and formatting; no separate black / isort.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      # ruff-format intentionally NOT enabled by default — the existing
+      # tree isn't formatter-clean yet and an opt-in introduction is
+      # less disruptive than a global rewrite. Uncomment after the
+      # one-shot format-the-tree PR lands.
+      # - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]

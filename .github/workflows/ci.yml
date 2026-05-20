@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel any in-flight run of this workflow against the same PR / branch
+# when a new commit lands; saves runner time on rapid pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Install dev deps
+        run: uv sync --extra dev
+      - name: ruff check
+        run: uv run ruff check .
+      # `ruff format --check` not enforced yet — the existing tree
+      # predates the formatter. Opt in per-file via `uv run ruff format
+      # path/to/file.py`; we can flip CI to enforce after the tree is
+      # converted in a dedicated reformat PR.
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Install dev deps
+        run: uv sync --extra dev
+      - name: Run tests with coverage
+        # Skip the streaming-WebSocket suite — it hangs CI runners and
+        # is exercised by integration tests locally.
+        run: uv run pytest --ignore=tests/test_commands_stream.py

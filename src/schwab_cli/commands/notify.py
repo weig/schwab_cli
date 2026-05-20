@@ -8,7 +8,6 @@ events. Kept as its own file, parallel to ``config.json``, so
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import typer

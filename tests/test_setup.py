@@ -74,7 +74,7 @@ def test_fresh_setup_auth_flow_client(monkeypatch, tmp_path):
     """client flow (local listener) — no code_relay_url prompt."""
     # cid, secret, redirect, auth_flow=client, decline auto-login
     result = _run(
-        f"cid\ncsec\nhttps://127.0.0.1:8443\nclient\nn\n",
+        "cid\ncsec\nhttps://127.0.0.1:8443\nclient\nn\n",
         monkeypatch, tmp_path,
     )
     assert result.exit_code == 0, result.output

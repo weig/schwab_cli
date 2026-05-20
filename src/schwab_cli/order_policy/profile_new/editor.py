@@ -37,7 +37,7 @@ from schwab_cli.order_policy.profile_new.state import (
     undo_delete,
 )
 from schwab_cli.order_policy.profile_new.templates import (
-    TEMPLATES, by_key,
+    TEMPLATES,
 )
 
 

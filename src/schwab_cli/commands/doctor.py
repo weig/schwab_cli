@@ -58,12 +58,12 @@ def _check_market_data_fire_time(plist_path: Path) -> tuple[bool, str]:
 
 
 def _ok(label: str, detail: str = "") -> None:
-    typer.secho(f"  ✓ ", fg=typer.colors.GREEN, nl=False)
+    typer.secho("  ✓ ", fg=typer.colors.GREEN, nl=False)
     typer.echo(f"{label:<32} {detail}")
 
 
 def _bad(label: str, detail: str = "") -> None:
-    typer.secho(f"  ✗ ", fg=typer.colors.RED, nl=False)
+    typer.secho("  ✗ ", fg=typer.colors.RED, nl=False)
     typer.echo(f"{label:<32} {detail}")
 
 
@@ -566,20 +566,6 @@ def _check_dataset() -> None:
                 GROUP BY tier
                 """,
             ).fetchall()
-            last_vol_ms = conn.execute(
-                "SELECT MAX(captured_at_ms) FROM vol_snapshots"
-            ).fetchone()[0]
-            last_ohlcv_ms = conn.execute(
-                "SELECT MAX(captured_at_ms) FROM ohlcv_daily"
-            ).fetchone()[0]
-            last_capture = max(
-                (x for x in (last_vol_ms, last_ohlcv_ms) if x is not None),
-                default=None,
-            )
-            indices_intent = conn.execute(
-                "SELECT COUNT(*) FROM index_subscriptions "
-                "WHERE unsubscribed_at IS NULL"
-            ).fetchone()[0]
             ohlcv_longest = conn.execute(
                 """
                 SELECT symbol, COUNT(*) AS n, MIN(day) AS d

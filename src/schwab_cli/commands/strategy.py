@@ -40,7 +40,7 @@ from schwab_cli.analytics.strategy_ticket import render_ticket
 from schwab_cli.api.chains import get_chain
 from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
 from schwab_cli.output.chains import shape_envelope
-from schwab_cli.output.format import Format, FormatError, pick_format
+from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.strategy import render_strategy
 from schwab_cli.session import load as load_session
 
