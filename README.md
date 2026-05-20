@@ -97,6 +97,14 @@ anyone else.
    Secret as `client_secret`. They're written to
    `~/.config/schwab_cli/config.json` (mode `0600`).
 
+> 🔒 **`client_secret` is yours alone.** It stays on your machine in
+> `~/.config/schwab_cli/config.json` (`0600`, plain text). Never share
+> it, never commit it, never paste it into chat / issues / screenshots,
+> and keep it out of cloud sync. Anyone with your `client_id` +
+> `client_secret` + an OAuth `code` from your account can act as your
+> Schwab app. If it leaks, rotate it from the Schwab developer portal
+> immediately and re-run `schwab setup`.
+
 Developer setup:
 
 ```bash
@@ -118,8 +126,18 @@ schwab auth --manual  # skip the auto-login subprocess (if configured)
 Config and session files live at `~/.config/schwab_cli/{config,session}.json`
 (mode `0600`, plain text — keep these out of git and cloud sync).
 
-The 7-day refresh token is reused transparently on every command. The
-first HTTP 401 from Schwab auto-refreshes and retries once.
+**Session lifecycle:**
+
+- The short-lived access token (~30 min) is refreshed transparently
+  from your saved refresh token on the first HTTP 401 — no user action
+  while the refresh token is still valid.
+- Schwab's refresh token expires after **7 days**. After that, a full
+  OAuth round-trip (browser login + MFA) is required to get a fresh
+  one.
+- **Fully hands-off operation past the 7-day boundary requires
+  [auto-login](#browser-auto-login-optional)**. Without it, you'll
+  need to re-run `schwab auth --force` once a week and complete the
+  browser flow manually.
 
 ### Browser auto-login (optional)
 
