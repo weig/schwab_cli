@@ -298,11 +298,27 @@ uv run pytest                    # run the suite
 
 - `ruff check` (lint — bugs, dead code, unused imports)
 - `pytest` (streaming WebSocket suite excluded — hangs CI runners)
+- `gitleaks` (credential-leak scan; rules in [`.gitleaks.toml`](.gitleaks.toml))
 - **PR checklist** — every `- [ ]` in the PR body must be ticked.
   Drop any line that doesn't apply rather than leaving it unchecked.
 
 `ruff format` is not yet enforced; the existing tree predates the
 formatter. Run `uv run ruff format path/to/file.py` opt-in.
+
+### Local secret scan
+
+`pre-commit install` arms gitleaks on every commit, but ad-hoc scans
+are useful for periodic audits:
+
+```bash
+brew install gitleaks            # macOS; or see github.com/gitleaks/gitleaks
+gitleaks detect --no-git         # scan working tree
+gitleaks detect                  # scan full git history
+gitleaks protect --staged        # scan what would be committed
+```
+
+If a leak fires on a known-safe placeholder, add an entry to
+`.gitleaks.toml`'s `[allowlist]` — don't bypass with `--no-verify`.
 
 Conventional-commits style for commit messages (`feat: …`, `fix: …`,
 `refactor: …`, `docs: …`, `test: …`, `chore: …`).

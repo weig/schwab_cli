@@ -10,6 +10,7 @@
 
 - [ ] `uv run pytest` is green locally
 - [ ] `uv run ruff check .` is clean
+- [ ] `gitleaks detect --no-git` clean (or new placeholders allowlisted in `.gitleaks.toml`)
 - [ ] New / changed behaviour covered by tests
 - [ ] User-visible changes documented (README / `doc/`)
 - [ ] No new secrets, tokens, or hardcoded credentials in the diff

@@ -1,0 +1,67 @@
+# gitleaks config — extends the default ruleset with patterns specific
+# to this project / the webauto-cli leak class.
+#
+# Run locally:
+#   uvx gitleaks detect --no-git              # scan working tree
+#   uvx gitleaks protect --staged             # scan what would be committed
+#   uvx gitleaks detect                       # scan full git history
+#
+# `extend.useDefault = true` inherits the upstream ruleset (AWS keys,
+# Slack tokens, JWTs, generic high-entropy strings, etc.) so our
+# additions stack on top of ~150+ baseline rules.
+
+[extend]
+useDefault = true
+
+# ---- Project-specific rules ------------------------------------------------
+
+[[rules]]
+id = "plaintext-password-assignment"
+description = "PASSWORD=<value> in an env-style file — never commit"
+# Catches `PASSWORD=somevalue` (env-file shape). The `path` filter
+# scopes it to env-shaped files so README examples and test fixtures
+# don't trigger. The `regex` requires at least 6 chars of value to
+# skip placeholder lines like `PASSWORD=` or `PASSWORD=<your-pw>`.
+regex = '''(?i)PASSWORD\s*=\s*[^\s<>"'][^\s<>"']{5,}'''
+path = '''\.env(\.[^/]+)?$|\.envrc$'''
+keywords = ["PASSWORD="]
+
+[[rules]]
+id = "oauth-relay-uuid"
+description = "oauth-relay endpoint UUID — treat as a secret"
+# The relay path embeds a per-user UUID. Leaking the UUID alone
+# doesn't grant access (the OAuth code is single-use), but the
+# combination of UUID + the user's Schwab login window is enough for
+# a meaningful attack window. Fail on any commit that adds a literal
+# `oauth-relay.*workers.dev/<uuid>` reference outside of docs.
+regex = '''oauth-relay\.[a-z0-9_-]+\.workers\.dev/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'''
+keywords = ["oauth-relay"]
+
+[[rules]]
+id = "schwab-oauth-authorize-with-state"
+description = "Schwab OAuth authorize URL containing live state — usually leaked from .env"
+# Schwab's authorize URL with a non-placeholder `state=` is a strong
+# tell that a real `.env` file ended up committed. Generic enough not
+# to false-positive on README snippets (which use `<your-state>` etc).
+regex = '''https://api\.schwabapi\.com/v1/oauth/authorize\?[^"\s]*state=[A-Za-z0-9_-]{16,}'''
+keywords = ["schwabapi.com/v1/oauth/authorize"]
+
+# ---- Allow list (false-positive suppression) ------------------------------
+
+[allowlist]
+description = "Paths and patterns the scanner should not flag."
+paths = [
+    # Docs intentionally show example credentials shaped like
+    # PASSWORD=hunter2 / client_id=your_client_id_here.
+    '''(^|/)README\.md$''',
+    '''(^|/)doc/.*\.md$''',
+    # Test fixtures use synthetic credentials.
+    '''(^|/)tests/.*\.py$''',
+]
+regexes = [
+    # Common placeholder shapes.
+    '''your_client_id_here''',
+    '''your_secret_here''',
+    '''hunter2''',
+    '''<your[^>]*>''',
+]

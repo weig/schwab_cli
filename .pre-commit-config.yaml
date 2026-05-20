@@ -22,3 +22,11 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: [--maxkb=500]
+
+  # Credential-leak scanner. Fails the commit if a known secret pattern
+  # (passwords, API keys, high-entropy strings, project-specific
+  # rules from .gitleaks.toml) is found in staged content.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
