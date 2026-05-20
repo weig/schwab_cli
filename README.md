@@ -29,7 +29,7 @@ No third-party intermediaries, no data sharing, no shared API keys.
 | Volatility / IVR / IVP | `vol`, `dataset` | [vol](doc/vol.md) |
 | Fundamentals & dividends | `fundamentals`, `div` | [fundamentals](doc/fundamentals.md) · [dividends](doc/dividends.md) |
 | Streaming | `stream`, `watch` | [stream](doc/stream.md) |
-| Orders (paper / live) | `order` | _(opt-in; see source)_ |
+| Orders (place / preview / cancel / replace) | `order` | [order](doc/order.md) |
 | Notifications | `notify` (Telegram) | [notify](doc/notify.md) |
 | MCP server | `mcp install`, `mcp status`, `mcp log`, … | [mcp](doc/mcp.md) |
 | Cached dataset backend | `dataset subscribe`, `dataset sync`, `dataset cron …` | [setup](doc/setup.md) |
@@ -44,6 +44,21 @@ Output formats are uniform across commands:
 ---
 
 ## Install
+
+### One-liner (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/weig/schwab_cli/main/install.sh | sh
+```
+
+The installer fetches [`uv`](https://github.com/astral-sh/uv) if missing,
+then `uv tool install`s `schwab_cli` from GitHub. Binary lands at
+`~/.local/bin/schwab`.
+
+> Review before running anything piped from the internet:
+> [`install.sh`](install.sh).
+
+### From a local checkout
 
 Requires **Python 3.11+** and [`uv`](https://github.com/astral-sh/uv).
 
