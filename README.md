@@ -10,6 +10,13 @@ A terminal-first CLI and MCP server for the Charles Schwab developer API.
 All market data is streamed through your own authenticated Schwab session.
 No third-party intermediaries, no data sharing, no shared API keys.
 
+> **Personal / individual-developer use only.** Schwab does not issue
+> shared API keys; every user needs their own developer account and
+> their own app's `client_id` / `client_secret`. Register one at
+> [developer.schwab.com](https://developer.schwab.com) (free,
+> individual-developer tier). This project ships zero credentials —
+> you supply yours during `schwab setup`.
+
 ---
 
 ## What it can do
@@ -50,6 +57,30 @@ uv tool install --reinstall --from . schwab_cli
 # Or run from the project directory without installing
 uv run schwab <command> ...
 ```
+
+### Get your `client_id` and `client_secret`
+
+You need a Schwab developer account — the CLI cannot share keys with
+anyone else.
+
+1. Sign up at [developer.schwab.com](https://developer.schwab.com)
+   (free, individual-developer tier).
+2. **Create an app**. Suggested settings:
+   - **Type**: Individual developer.
+   - **API products**: enable both *Accounts and Trading Production*
+     and *Market Data Production*.
+   - **Callback URL** (must be HTTPS — Schwab won't accept
+     `http://localhost`):
+     - `https://127.0.0.1:8443` if you'll use the local `client`
+       auth flow, **or**
+     - `https://oauth-relay.<you>.workers.dev/<uuid>/schwab_callback`
+       if you'll use the `code_relay` flow (see
+       [Login callback](#login-callback-oauth_relay)).
+3. Wait for the app to be **approved** (usually same-day; status
+   shows on the dashboard). Approval issues `App Key` + `Secret`.
+4. Run `schwab setup` and paste the App Key as `client_id` and the
+   Secret as `client_secret`. They're written to
+   `~/.config/schwab_cli/config.json` (mode `0600`).
 
 Developer setup:
 
