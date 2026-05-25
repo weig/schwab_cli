@@ -426,12 +426,19 @@ def update(
         if not skip_wait and anchor_hour != 17:
             audit.info(f"sleep_until_ny({anchor_hour}:00 ET)")
             sleep_until_ny(anchor_hour, 0)
-        with httpx.Client(timeout=30.0) as http_client:
-            with vol_history.connect() as conn:
-                summary = run_indices_update(
-                    conn, http_client=http_client,
-                    group_name="volatility", now_ms=now_ms,
-                )
+        from schwab_cli._exit_codes import EXIT_AUTH_FAILED
+        from schwab_cli.api.client import SessionExpired
+        try:
+            with httpx.Client(timeout=30.0) as http_client:
+                with vol_history.connect() as conn:
+                    summary = run_indices_update(
+                        conn, http_client=http_client,
+                        group_name="volatility", now_ms=now_ms,
+                    )
+        except SessionExpired as e:
+            audit.error(f"auth-failed: {e}")
+            typer.secho(str(e), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=EXIT_AUTH_FAILED) from e
         errors = 0
         for idx, info in summary.items():
             if "error" in info:
@@ -489,6 +496,24 @@ def update(
     )
     for t in summary["transitions"]:
         typer.echo(f"  {t['symbol']}: {t['from']} → {t['to']}")
+
+    # Exit-code policy: sampled=0 with errors>0 is catastrophic — silent
+    # exit 0 hides the failure from the scheduler. Classify by whether
+    # every error string looks like an auth failure so the scheduler
+    # can distinguish "do a re-auth and retry" from "real data error".
+    n_errors = len(summary["errors"])
+    n_sampled = len(summary["sampled"])
+    if n_errors > 0 and n_sampled == 0:
+        from schwab_cli._exit_codes import EXIT_AUTH_FAILED
+        all_auth = all(
+            "Session expired" in str(e.get("error", ""))
+            for e in summary["errors"]
+        )
+        if all_auth:
+            audit.error(f"all {n_errors} symbols auth-failed; exiting {EXIT_AUTH_FAILED}")
+            raise typer.Exit(code=EXIT_AUTH_FAILED)
+        audit.error(f"all {n_errors} symbols errored (non-auth); exiting 1")
+        raise typer.Exit(code=1)
 
 
 def _print_volatility_progress(evt: dict) -> None:
@@ -668,7 +693,14 @@ def accounts_snapshot(
         )
         raise typer.Exit(code=1)
     client = SchwabClient(cfg, session)
-    results = snapshot_all_accounts(client)
+    from schwab_cli._exit_codes import EXIT_AUTH_FAILED
+    from schwab_cli.api.client import SessionExpired
+    try:
+        results = snapshot_all_accounts(client)
+    except SessionExpired as e:
+        audit.error(f"auth-failed: {e}")
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_AUTH_FAILED) from e
     for r in results:
         suffix = r.account_number[-4:] if len(r.account_number) >= 4 \
             else r.account_number

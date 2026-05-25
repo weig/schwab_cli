@@ -67,6 +67,31 @@ EVENTS: dict[str, tuple[Level, str]] = {
         "error",
         "Schwab data sync — orchestrator crashed before completing the run.",
     ),
+    "scheduler.proactive_auth_invoked": (
+        "info",
+        "Schwab data sync — refresh token within 24h; invoking auto-login.",
+    ),
+    "scheduler.proactive_auth_succeeded": (
+        "info",
+        "Schwab data sync — proactive auto-login succeeded.",
+    ),
+    "scheduler.proactive_auth_failed": (
+        "error",
+        "Schwab data sync — proactive auto-login failed (best-effort continue).",
+    ),
+    "scheduler.proactive_auth_skipped": (
+        "warning",
+        "Schwab data sync — refresh token marginal but no auto_login_command "
+        "configured; best-effort continue with existing session.",
+    ),
+    "scheduler.reactive_auth_retry": (
+        "warning",
+        "Schwab data sync — re-authing and respawning auth-failed tasks.",
+    ),
+    "scheduler.auth_unrecoverable": (
+        "error",
+        "Schwab data sync — auth dead; cannot recover this run.",
+    ),
     "test.hello": (
         "info",
         "Test notification from schwab_cli.",
