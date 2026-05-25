@@ -176,6 +176,11 @@ def _run_daily_sync_inner(
     started_at: datetime,
     audit,
 ) -> int:
+    # Proactive auth: if the refresh token is within 24h of expiry,
+    # do a full re-auth (via configured webauto-cli) BEFORE we burn
+    # the 1-hour sleep_until_ny. This is the primary protection; the
+    # reactive retry below is the safety net.
+    _ensure_refresh_token_lifetime(notifier, audit)
     _ensure_token_valid(notifier)
 
     binary = binary_path or _resolve_binary(notifier)
@@ -188,6 +193,21 @@ def _run_daily_sync_inner(
     )
     results = _dispatch_parallel(
         jobs, child_timeout_s=child_timeout_s, audit=audit,
+    )
+
+    # Reactive auth retry: any child that exited with EXIT_AUTH_FAILED
+    # (rc=2) signals that proactive auth didn't save us — re-auth
+    # synchronously and re-dispatch JUST those children with
+    # skip_wait=True (the timing wait already happened). One retry
+    # budget; if the retry's auth fails or the re-spawned children
+    # still come back rc=2, we accept it as unrecoverable.
+    results = _maybe_retry_auth_failed(
+        results=results,
+        binary=binary,
+        all_jobs=jobs,
+        child_timeout_s=child_timeout_s,
+        notifier=notifier,
+        audit=audit,
     )
 
     failed = [r for r in results if not r.succeeded]
@@ -249,6 +269,213 @@ def _outcome_label(r: JobResult) -> str:
 
 
 # ---- token refresh ----------------------------------------------------
+
+
+# Minimum refresh-token lifetime required at scheduler-start. Schwab's
+# refresh token has a 7-day TTL; the daily run can take ~13h (sleep
+# until NY 17:00 ET + the actual work). Requiring 24h headroom means
+# the run can complete even if the refresh token would have expired
+# mid-day, AND we trigger proactive re-auth one day before the cliff
+# so the user gets a healthy buffer rather than a midnight retry storm.
+_PROACTIVE_REFRESH_MIN_LIFETIME_S = 24 * 3600
+
+
+def _ensure_refresh_token_lifetime(notifier, audit) -> None:
+    """Proactive auth: if the saved refresh token will expire inside
+    the next ``_PROACTIVE_REFRESH_MIN_LIFETIME_S`` seconds, invoke
+    ``auto_login_command`` *before* spawning any children so the run
+    has guaranteed token coverage.
+
+    No-op when the refresh token has plenty of life left. When auth
+    runs and fails, we emit ``scheduler.proactive_auth_failed`` and
+    return — the existing ``_ensure_token_valid`` and child paths
+    still get a chance with whatever's in session.json.
+
+    When ``auto_login_command`` is not configured but the refresh
+    token is marginal, we emit ``scheduler.proactive_auth_skipped``
+    (best-effort: the children may still succeed if the access token
+    happens to be fresh enough).
+    """
+    try:
+        from schwab_cli import config as config_module
+        from schwab_cli.session import load as load_session
+    except ImportError as e:
+        audit.error(f"proactive auth: ImportError: {e}")
+        return
+
+    cfg = config_module.load()
+    if cfg is None:
+        audit.error("proactive auth: no config")
+        return
+    try:
+        session = load_session()
+    except Exception as e:
+        audit.error(f"proactive auth: session unreadable: {e}")
+        return
+    if session is None:
+        audit.error("proactive auth: no session")
+        return
+
+    now = int(time.time())
+    ttl_s = session.refresh_token_expires_at - now
+    if ttl_s >= _PROACTIVE_REFRESH_MIN_LIFETIME_S:
+        audit.info(
+            f"proactive auth check: refresh token TTL {ttl_s // 3600}h "
+            f"(>= {_PROACTIVE_REFRESH_MIN_LIFETIME_S // 3600}h threshold); skip"
+        )
+        return
+
+    audit.info(
+        f"proactive auth check: refresh token TTL {ttl_s // 3600}h "
+        f"(< {_PROACTIVE_REFRESH_MIN_LIFETIME_S // 3600}h threshold)"
+    )
+    if cfg.auto_login_command is None:
+        audit.warning(
+            "proactive auth: no auto_login_command configured; "
+            "best-effort continue with existing session"
+        )
+        try:
+            notifier.emit(
+                "scheduler.proactive_auth_skipped",
+                reason="no auto_login_command configured",
+                refresh_ttl_hours=ttl_s // 3600,
+            )
+        except Exception as alert_err:
+            audit.error(f"alert dispatch failed: {alert_err}")
+        return
+
+    audit.info("proactive auth: invoking auto_login_command")
+    try:
+        notifier.emit(
+            "scheduler.proactive_auth_invoked",
+            refresh_ttl_hours=ttl_s // 3600,
+        )
+    except Exception:
+        pass
+
+    try:
+        from schwab_cli.auth_flows import perform_full_auth
+
+        new_session = perform_full_auth(cfg)
+        new_ttl_h = (new_session.refresh_token_expires_at - int(time.time())) // 3600
+        audit.info(
+            f"proactive auth: success; new refresh token TTL {new_ttl_h}h"
+        )
+        try:
+            notifier.emit(
+                "scheduler.proactive_auth_succeeded",
+                new_refresh_ttl_hours=new_ttl_h,
+            )
+        except Exception as alert_err:
+            audit.error(f"alert dispatch failed: {alert_err}")
+    except Exception as e:
+        audit.error(f"proactive auth: failed: {type(e).__name__}: {e}")
+        try:
+            notifier.emit(
+                "scheduler.proactive_auth_failed",
+                error=f"{type(e).__name__}: {e}",
+            )
+        except Exception as alert_err:
+            audit.error(f"alert dispatch failed: {alert_err}")
+        # Best-effort continue: children might still succeed using the
+        # existing access token if it has any life left. The reactive
+        # retry path catches the rest.
+
+
+def _maybe_retry_auth_failed(
+    *,
+    results,
+    binary: str,
+    all_jobs,
+    child_timeout_s: float,
+    notifier,
+    audit,
+):
+    """If any first-pass child exited with ``EXIT_AUTH_FAILED`` (rc=2),
+    re-auth via ``perform_full_auth`` and re-dispatch just those
+    children with ``--skip-wait``. Returns the merged result list.
+
+    Tasks are required to be idempotent — re-running a successful job
+    is fine (and the indices ``--max-age-days`` guard makes it a no-op
+    anyway). We deliberately retry only the failed children to keep
+    the second pass tight.
+    """
+    from schwab_cli._exit_codes import EXIT_AUTH_FAILED
+
+    auth_failed = [r for r in results if r.returncode == EXIT_AUTH_FAILED]
+    if not auth_failed:
+        return results
+
+    failed_names = [r.name for r in auth_failed]
+    audit.warning(
+        f"reactive auth retry: {len(auth_failed)} task(s) hit EXIT_AUTH_FAILED "
+        f"({', '.join(failed_names)}); attempting re-auth"
+    )
+    try:
+        notifier.emit(
+            "scheduler.reactive_auth_retry",
+            failed=", ".join(failed_names),
+        )
+    except Exception:
+        pass
+
+    # Re-auth.
+    try:
+        from schwab_cli import config as config_module
+        from schwab_cli.auth_flows import perform_full_auth
+
+        cfg = config_module.load()
+        if cfg is None or cfg.auto_login_command is None:
+            audit.error(
+                "reactive auth retry: no auto_login_command configured; "
+                "giving up"
+            )
+            try:
+                notifier.emit(
+                    "scheduler.auth_unrecoverable",
+                    reason="no auto_login_command configured",
+                )
+            except Exception:
+                pass
+            return results
+
+        perform_full_auth(cfg)
+        audit.info("reactive auth retry: re-auth succeeded")
+    except Exception as e:
+        audit.error(
+            f"reactive auth retry: re-auth failed: {type(e).__name__}: {e}"
+        )
+        try:
+            notifier.emit(
+                "scheduler.auth_unrecoverable",
+                error=f"{type(e).__name__}: {e}",
+            )
+        except Exception:
+            pass
+        return results  # original results stand
+
+    # Re-dispatch just the auth-failed jobs with skip_wait=True. We
+    # rebuild their argv with --skip-wait appended; the dispatch loop
+    # doesn't carry per-job customisation beyond that.
+    retry_jobs = []
+    for name, argv in all_jobs:
+        if name in failed_names:
+            retry_jobs.append((name, [*argv, "--skip-wait"]))
+
+    audit.info(
+        f"reactive auth retry: respawning {len(retry_jobs)} task(s) "
+        f"with --skip-wait"
+    )
+    retry_results = _dispatch_parallel(
+        retry_jobs, child_timeout_s=child_timeout_s, audit=audit,
+    )
+
+    # Merge: replace first-pass auth-failed entries with retry results,
+    # preserving the original first-pass results for everything else.
+    by_name = {r.name: r for r in results}
+    for r in retry_results:
+        by_name[r.name] = r
+    return list(by_name.values())
 
 
 def _ensure_token_valid(notifier) -> None:

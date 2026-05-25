@@ -238,3 +238,34 @@ def _race_handlers(
                 f"{type(h).__name__}: {e}" for h, e in errors
             )
             raise AuthFlowError(f"all auth handlers failed: {detail}")
+
+
+def perform_full_auth(cfg: Config, *, manual: bool = False):
+    """Run a full OAuth round-trip and persist the resulting session.
+
+    Wraps the get_auth_response + resolve_auth_result + save_session
+    pipeline that ``schwab auth --force`` and the scheduler's auth
+    bridge both need. Returns the freshly-saved :class:`Session`.
+
+    Headless-mode note: when the scheduler invokes this, it expects
+    the configured ``auto_login_command`` (typically webauto-cli) to
+    run headless. webauto defaults to ``HEADLESS=1`` so this works
+    out-of-the-box; if you override to a visible browser in your
+    webauto env file, scheduler-time auto-logins will also try to
+    open a window — your call.
+
+    Raises:
+        AuthFlowError: every auth handler failed.
+        AuthHandlerError: a handler-specific transport failure.
+        oauth.OAuthAuthorizationError: Schwab returned an OAuth error.
+        oauth.OAuthError / httpx errors: token exchange failed.
+    """
+    import time
+    from schwab_cli import oauth
+    from schwab_cli.session import Session, save as save_session
+
+    result = get_auth_response(cfg, manual=manual)
+    tr = oauth.resolve_auth_result(cfg, result)
+    new_session = Session.from_token_response(tr, now=int(time.time()))
+    save_session(new_session)
+    return new_session
