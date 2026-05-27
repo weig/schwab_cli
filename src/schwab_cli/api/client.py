@@ -155,6 +155,15 @@ class SchwabClient:
             self._http.close()
             self._http = None
 
+    def __enter__(self) -> "SchwabClient":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        # Release the HTTP/2 connection pool when used as a context
+        # manager. Service-layer callers use `with SchwabClient(...)`
+        # so a short-lived call never leaks the pool.
+        self.close()
+
     def _request(
         self,
         method: str,

@@ -15,6 +15,7 @@ Do NOT change these values without first verifying that the production code chan
 from __future__ import annotations
 
 import json
+import time
 from unittest.mock import patch
 
 import pytest
@@ -48,8 +49,8 @@ def _prep(monkeypatch, tmp_path):
         Session(
             access_token="atok",
             refresh_token="rtok",
-            expires_at=1_000_000,
-            refresh_token_expires_at=2_000_000,
+            expires_at=int(time.time()) + 3600,
+            refresh_token_expires_at=int(time.time()) + 7 * 24 * 3600,
         )
     )
 

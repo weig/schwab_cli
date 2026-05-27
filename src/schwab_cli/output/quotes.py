@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 
 from schwab_cli.output.format import Format
+from schwab_cli.service.types import QuoteResult, QuoteRow
 
 
 def _fmt_num(v, decimals: int = 2) -> str:
@@ -43,10 +44,7 @@ def _shape_row(symbol: str, payload: dict, invalid: set[str]) -> dict:
     }
 
 
-def render_quotes(symbols: list[str], payload: dict, fmt: Format) -> str:
-    invalid = set((payload.get("errors") or {}).get("invalidSymbols") or [])
-    rows = [_shape_row(s, payload, invalid) for s in symbols]
-
+def _render_rows(rows: list[dict], fmt: Format) -> str:
     if fmt is Format.JSON:
         return _json.dumps(rows, indent=2)
     if fmt is Format.MD:
@@ -84,3 +82,41 @@ def render_quotes(symbols: list[str], payload: dict, fmt: Format) -> str:
         )
     console.print(t)
     return buf.getvalue()
+
+
+def render_quotes(symbols: list[str], payload: dict, fmt: Format) -> str:
+    """Legacy path: shape a raw Schwab payload and render it.
+
+    Retained for callers that still pass the raw payload directly. The
+    ``quote`` command now goes through :func:`render_quote_result`.
+    """
+    invalid = set((payload.get("errors") or {}).get("invalidSymbols") or [])
+    rows = [_shape_row(s, payload, invalid) for s in symbols]
+    return _render_rows(rows, fmt)
+
+
+def _row_to_dict(row: QuoteRow) -> dict[str, object]:
+    """Map a :class:`QuoteRow` to the dict shape the renderer consumes.
+
+    Maps ``change_pct`` -> the ``changePct`` JSON key so JSON output is
+    byte-identical to the legacy path, and omits ``error`` for valid rows.
+    """
+    d = {
+        "symbol": row.symbol,
+        "last": row.last,
+        "change": row.change,
+        "changePct": row.change_pct,
+        "bid": row.bid,
+        "ask": row.ask,
+        "volume": row.volume,
+    }
+    if row.error is not None:
+        d["error"] = row.error
+    return d
+
+
+def render_quote_result(result: QuoteResult, fmt: Format) -> str:
+    """Render a :class:`QuoteResult` to text, byte-identical to the
+    legacy :func:`render_quotes` output for the same data."""
+    rows = [_row_to_dict(r) for r in result.rows]
+    return _render_rows(rows, fmt)
