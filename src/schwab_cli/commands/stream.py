@@ -3,7 +3,7 @@
 Two transports:
 
 * **MCP** (``--mcp`` or auto-selected when a daemon is reachable):
-  connects to a running ``schwab_cli mcp --sse`` daemon as an MCP
+  connects to a running ``schwab_cli mcp`` daemon (Streamable HTTP) as an MCP
   client, calls the ``stream_quote`` tool, and prints every progress
   notification payload. All subscribe / unsubscribe / streamer
   events show up in the daemon's log.

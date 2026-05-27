@@ -34,7 +34,7 @@ from schwab_cli.session import load as load_session
 
 
 DEFAULT_LOG_FILE = Path.home() / ".config" / "schwab_cli" / "mcp.log"
-DEFAULT_SSE_URL = "http://127.0.0.1:7234"
+DEFAULT_MCP_URL = "http://127.0.0.1:7234"
 
 
 # ---- daemon runner ----------------------------------------------------
@@ -180,7 +180,7 @@ def _resolve_log_file(log_file: str | None, no_log_file: bool) -> Path | None:
 
 
 def run_status(*, url: str | None, token: str | None, as_json: bool) -> None:
-    base = (url or DEFAULT_SSE_URL).rstrip("/")
+    base = (url or DEFAULT_MCP_URL).rstrip("/")
     try:
         r = httpx.get(
             f"{base}/admin/status",
@@ -273,7 +273,7 @@ def _auth_headers(token: str | None) -> dict[str, str]:
 
 
 def run_logout(*, url: str | None, token: str | None) -> None:
-    base = (url or DEFAULT_SSE_URL).rstrip("/")
+    base = (url or DEFAULT_MCP_URL).rstrip("/")
     try:
         r = httpx.post(
             f"{base}/admin/shutdown",

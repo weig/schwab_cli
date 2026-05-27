@@ -394,7 +394,10 @@ def _check_mcp() -> None:
         )
     else:
         _bad("Not running")
-        _hint("schwab_cli mcp --sse  (or `mcp start-service` if installed)")
+        _hint(
+            "schwab_cli mcp  (standalone HTTP daemon), or "
+            "`schwab server --enable-mcp`, or `mcp start-service` if installed"
+        )
 
     plist_loaded = _launchctl_loaded(_MCP_LAUNCHD_LABEL)
     plist_present = _MCP_PLIST.exists()
