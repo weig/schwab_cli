@@ -1,3 +1,4 @@
+import time
 from unittest.mock import patch
 
 import pytest
@@ -22,7 +23,8 @@ def _prep(monkeypatch, tmp_path):
     ))
     save_session(Session(
         access_token="atok", refresh_token="rtok",
-        expires_at=1_000_000, refresh_token_expires_at=2_000_000,
+        expires_at=int(time.time()) + 3600,
+        refresh_token_expires_at=int(time.time()) + 7 * 24 * 3600,
     ))
 
 
@@ -33,7 +35,7 @@ _QUOTES = {
 
 def test_quote_happy_human(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.quote.get_quotes", return_value=_QUOTES):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=_QUOTES):
         result = runner.invoke(app, ["quote", "AAPL"])
     assert result.exit_code == 0, result.output
     assert "AAPL" in result.output
@@ -46,7 +48,7 @@ def test_quote_multi_symbol(monkeypatch, tmp_path):
         "AAPL": {"symbol": "AAPL", "quote": {"lastPrice": 232.14}},
         "MSFT": {"symbol": "MSFT", "quote": {"lastPrice": 451.22}},
     }
-    with patch("schwab_cli.commands.quote.get_quotes", return_value=payload):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=payload):
         result = runner.invoke(app, ["quote", "AAPL", "MSFT"])
     assert result.exit_code == 0
     assert "AAPL" in result.output
@@ -55,7 +57,7 @@ def test_quote_multi_symbol(monkeypatch, tmp_path):
 
 def test_quote_json_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.quote.get_quotes", return_value=_QUOTES):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=_QUOTES):
         result = runner.invoke(app, ["quote", "AAPL", "--json"])
     assert result.exit_code == 0
     import json
@@ -65,7 +67,7 @@ def test_quote_json_output(monkeypatch, tmp_path):
 
 def test_quote_md_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.quote.get_quotes", return_value=_QUOTES):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=_QUOTES):
         result = runner.invoke(app, ["quote", "AAPL", "--md"])
     assert result.exit_code == 0
     assert "| Symbol" in result.stdout
@@ -99,7 +101,7 @@ def test_quote_no_session_errors(monkeypatch, tmp_path):
 def test_quote_session_expired_message(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.quote.get_quotes",
+        "schwab_cli.api.client.SchwabClient.get",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["quote", "AAPL"])
@@ -110,7 +112,7 @@ def test_quote_session_expired_message(monkeypatch, tmp_path):
 def test_quote_api_error_surfaces(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.quote.get_quotes",
+        "schwab_cli.api.client.SchwabClient.get",
         side_effect=ApiError("500 internal"),
     ):
         result = runner.invoke(app, ["quote", "AAPL"])

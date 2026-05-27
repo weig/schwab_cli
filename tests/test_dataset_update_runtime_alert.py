@@ -39,14 +39,15 @@ def test_fire_at_19_00_ny_emits_drift_alert():
          patch("schwab_cli.commands.dataset._now_ny",
                return_value=datetime(2026, 5, 15, 19, 0, tzinfo=_NY)), \
          patch("schwab_cli.commands.dataset.sleep_until_ny") as m_sleep:
-        for s in _stubs():
+        stubs = _stubs()
+        for s in stubs:
             s.start()
         try:
             result = runner.invoke(app, [
                 "dataset", "update", "--group", "volatility",
             ])
         finally:
-            for s in _stubs():
+            for s in stubs:
                 s.stop()
     assert result.exit_code == 0, result.output
     drift_calls = [
@@ -66,14 +67,15 @@ def test_fire_at_04_00_ny_no_alert():
          patch("schwab_cli.commands.dataset._now_ny",
                return_value=datetime(2026, 5, 15, 4, 0, tzinfo=_NY)), \
          patch("schwab_cli.commands.dataset.sleep_until_ny") as m_sleep:
-        for s in _stubs():
+        stubs = _stubs()
+        for s in stubs:
             s.start()
         try:
             result = runner.invoke(app, [
                 "dataset", "update", "--group", "volatility",
             ])
         finally:
-            for s in _stubs():
+            for s in stubs:
                 s.stop()
     assert result.exit_code == 0, result.output
     drift_calls = [
