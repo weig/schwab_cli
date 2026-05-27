@@ -136,6 +136,74 @@ def test_update_group_volatility_calls_orchestrator(runner, monkeypatch):
     assert calls == ["vol"]
 
 
+def _run_vol_update_with_summary(runner, monkeypatch, summary):
+    """Invoke `dataset update --group volatility --skip-wait` with a
+    stubbed run_volatility_update returning ``summary``. Returns the
+    CLI result so the caller can assert on exit_code."""
+    def fake_run(conn, *, client, group_name, now_ms, accounts, progress=None):
+        return summary
+
+    monkeypatch.setattr(
+        "schwab_cli.commands.dataset.run_volatility_update", fake_run
+    )
+    import schwab_cli.api.client as client_mod
+    import schwab_cli.config as cfg_mod
+    import schwab_cli.session as sess_mod
+    monkeypatch.setattr(cfg_mod, "load", lambda: object())
+    monkeypatch.setattr(sess_mod, "load", lambda: object())
+    monkeypatch.setattr(client_mod, "SchwabClient", lambda c, s: object())
+    return runner.invoke(app, [
+        "dataset", "update", "--group", "volatility", "--skip-wait",
+    ])
+
+
+def test_update_norun_rerun_with_skips_exits_zero(runner, monkeypatch):
+    """Regression: a no-op RE-RUN (everything already sampled today →
+    skipped) with a few incidental errors must NOT fail. sampled=0 here
+    is expected, not catastrophic. Previously this false-failed with
+    exit 1 and fired a bogus scheduler.job_failed alert."""
+    result = _run_vol_update_with_summary(runner, monkeypatch, {
+        "sampled": [], "skipped": ["A"] * 515,
+        "errors": [{"symbol": "X", "error": "no chain"}] * 3,
+        "transitions": [], "positions": {},
+    })
+    assert result.exit_code == 0, result.output
+
+
+def test_update_total_failure_nonauth_exits_one(runner, monkeypatch):
+    """Nothing sampled, nothing skipped, all errors non-auth → exit 1."""
+    result = _run_vol_update_with_summary(runner, monkeypatch, {
+        "sampled": [], "skipped": [],
+        "errors": [{"symbol": "X", "error": "boom"}] * 3,
+        "transitions": [], "positions": {},
+    })
+    assert result.exit_code == 1
+
+
+def test_update_total_failure_all_auth_exits_two(runner, monkeypatch):
+    """Nothing sampled/skipped, every error is a session-expiry → exit
+    EXIT_AUTH_FAILED (2) so the scheduler re-auths and retries."""
+    from schwab_cli._exit_codes import EXIT_AUTH_FAILED
+    result = _run_vol_update_with_summary(runner, monkeypatch, {
+        "sampled": [], "skipped": [],
+        "errors": [
+            {"symbol": "X", "error": "Session expired. Run `schwab_cli auth --force`."}
+        ] * 3,
+        "transitions": [], "positions": {},
+    })
+    assert result.exit_code == EXIT_AUTH_FAILED
+
+
+def test_update_partial_success_with_errors_exits_zero(runner, monkeypatch):
+    """sampled>0 with some errors is partial success — must exit 0."""
+    result = _run_vol_update_with_summary(runner, monkeypatch, {
+        "sampled": ["NVDA"] * 500, "skipped": [],
+        "errors": [{"symbol": "X", "error": "boom"}] * 18,
+        "transitions": [], "positions": {},
+    })
+    assert result.exit_code == 0, result.output
+
+
 def test_update_requires_indices_or_group(runner):
     result = runner.invoke(app, ["dataset", "update"])
     assert result.exit_code != 0

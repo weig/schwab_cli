@@ -497,22 +497,35 @@ def update(
     for t in summary["transitions"]:
         typer.echo(f"  {t['symbol']}: {t['from']} → {t['to']}")
 
-    # Exit-code policy: sampled=0 with errors>0 is catastrophic — silent
-    # exit 0 hides the failure from the scheduler. Classify by whether
-    # every error string looks like an auth failure so the scheduler
-    # can distinguish "do a re-auth and retry" from "real data error".
+    # Exit-code policy: only a run where NOTHING got through is
+    # catastrophic — i.e. zero sampled AND zero skipped, with errors.
+    # That's the auth-dead / total-failure shape the scheduler must see.
+    #
+    # A run with sampled=0 but skipped>0 is a no-op RE-RUN: the symbols
+    # were already captured today and skipped before any API call, so
+    # 0-sampled is expected. A handful of incidental errors there
+    # (illiquid/renamed tickers) is normal noise and must NOT fail the
+    # run — otherwise the nightly cron re-running after a completed
+    # manual sync false-alarms with scheduler.job_failed every time.
     n_errors = len(summary["errors"])
     n_sampled = len(summary["sampled"])
-    if n_errors > 0 and n_sampled == 0:
+    n_skipped = len(summary["skipped"])
+    if n_errors > 0 and n_sampled == 0 and n_skipped == 0:
         from schwab_cli._exit_codes import EXIT_AUTH_FAILED
         all_auth = all(
             "Session expired" in str(e.get("error", ""))
             for e in summary["errors"]
         )
         if all_auth:
-            audit.error(f"all {n_errors} symbols auth-failed; exiting {EXIT_AUTH_FAILED}")
+            audit.error(
+                f"nothing sampled, all {n_errors} attempts auth-failed; "
+                f"exiting {EXIT_AUTH_FAILED}"
+            )
             raise typer.Exit(code=EXIT_AUTH_FAILED)
-        audit.error(f"all {n_errors} symbols errored (non-auth); exiting 1")
+        audit.error(
+            f"nothing sampled, all {n_errors} attempts errored (non-auth); "
+            f"exiting 1"
+        )
         raise typer.Exit(code=1)
 
 
