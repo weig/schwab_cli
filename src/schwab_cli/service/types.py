@@ -172,6 +172,29 @@ class DividendsResult:
 
 
 @dataclass(frozen=True)
+class TransactionsResult:
+    """Transaction-list view.
+
+    Wraps the shaped display rows that ``output.transactions`` renders
+    verbatim, keeping the rendered HUMAN/JSON/MD output byte-identical to
+    the pre-migration command. The companion fields carry the two signals
+    the renderer needs beyond the rows themselves:
+
+    * ``show_account`` toggles the Account column off when the caller
+      filtered to a single account (``--account``), making the column
+      redundant for HUMAN/MD output (JSON is unaffected).
+    * ``cache_stats`` surfaces the cache hit ratio in the HUMAN header.
+
+    Typed as a read-only ``tuple`` / ``Mapping`` to signal callers must not
+    mutate it.
+    """
+
+    rows: tuple[Mapping[str, Any], ...]
+    show_account: bool
+    cache_stats: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class HistoryResult:
     """OHLCV price-history view.
 

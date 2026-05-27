@@ -5,14 +5,14 @@ upcoming service-layer (strangler-fig) migration can be proven
 behaviour-preserving without touching production code.
 
 Stable seam (patch target):
-    ``schwab_cli.commands.transactions.fetch_cached``
+    ``schwab_cli.api.transactions_cache.fetch_cached``
 
     After migration this name will be re-pointed to
     ``schwab_cli.api.transactions_cache.fetch_cached``.
     The golden assertions in this file must NOT change — only the
     patch-target string will be updated.
 
-    A second seam, ``schwab_cli.commands.transactions.get_all_transactions``,
+    A second seam, ``schwab_cli.api.transactions.get_all_transactions``,
     is the legacy surface imported (noqa: F401) in the commands module.
     Tests that need to verify the command does NOT call the raw API patch
     both names simultaneously.
@@ -44,8 +44,8 @@ runner = CliRunner()
 # Fixture helpers
 # ---------------------------------------------------------------------------
 
-_FETCH_CACHED = "schwab_cli.commands.transactions.fetch_cached"
-_GET_ALL_TXN = "schwab_cli.commands.transactions.get_all_transactions"
+_FETCH_CACHED = "schwab_cli.api.transactions_cache.fetch_cached"
+_GET_ALL_TXN = "schwab_cli.api.transactions.get_all_transactions"
 
 
 def _prep(monkeypatch, tmp_path) -> None:
@@ -229,7 +229,7 @@ _GOLDEN_EMPTY_MD_NET = "**Net cashflow:** +0.00"
 class TestGoldenHumanOutput:
     """Pin the human-readable table for a known canned payload.
 
-    Seam: patch ``schwab_cli.commands.transactions.fetch_cached``.
+    Seam: patch ``schwab_cli.api.transactions_cache.fetch_cached``.
     """
 
     def test_exit_0(self, monkeypatch, tmp_path):
@@ -356,7 +356,7 @@ class TestGoldenHumanOutput:
 class TestGoldenJsonOutput:
     """Pin JSON structure and field values for the canned payload.
 
-    Seam: patch ``schwab_cli.commands.transactions.fetch_cached``.
+    Seam: patch ``schwab_cli.api.transactions_cache.fetch_cached``.
     """
 
     def _get_data(self, monkeypatch, tmp_path) -> list[dict]:
@@ -489,7 +489,7 @@ class TestGoldenJsonOutput:
 class TestGoldenMdOutput:
     """Pin Markdown rendering for the canned payload.
 
-    Seam: patch ``schwab_cli.commands.transactions.fetch_cached``.
+    Seam: patch ``schwab_cli.api.transactions_cache.fetch_cached``.
     """
 
     def _invoke(self, monkeypatch, tmp_path, extra_args=None):
@@ -573,7 +573,7 @@ class TestTypeFilter:
     fetch_cached is always called WITHOUT a type kwarg; the command
     applies the filter itself on the returned list.
 
-    Seam: patch ``schwab_cli.commands.transactions.fetch_cached``.
+    Seam: patch ``schwab_cli.api.transactions_cache.fetch_cached``.
     """
 
     def test_trade_filter_keeps_only_trades(self, monkeypatch, tmp_path):
@@ -737,7 +737,7 @@ class TestTypeFilter:
 class TestRangeForwarding:
     """Valid range strings must be parsed and forwarded to fetch_cached.
 
-    Seam: patch ``schwab_cli.commands.transactions.fetch_cached``.
+    Seam: patch ``schwab_cli.api.transactions_cache.fetch_cached``.
     """
 
     def test_explicit_range_start_forwarded(self, monkeypatch, tmp_path):
@@ -955,7 +955,7 @@ class TestAuthErrors:
     """Missing config, missing session, and expired session must all
     produce exit 1 with a human-readable message.
 
-    Seam: patch ``schwab_cli.commands.transactions.fetch_cached`` for
+    Seam: patch ``schwab_cli.api.transactions_cache.fetch_cached`` for
     SessionExpired and ApiError tests; no patch needed for config/session
     absence tests (the error occurs before the fetch is attempted).
     """
@@ -1052,7 +1052,7 @@ class TestEmptyResult:
     """When fetch_cached returns [] the command must exit 0 and render
     gracefully — no crash, no spurious error message.
 
-    Seam: patch ``schwab_cli.commands.transactions.fetch_cached``.
+    Seam: patch ``schwab_cli.api.transactions_cache.fetch_cached``.
     """
 
     def test_empty_human_exit_0(self, monkeypatch, tmp_path):
