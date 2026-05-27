@@ -100,6 +100,58 @@ class TestBuildPlistProgramArguments:
         assert args[1] == "server"
 
 
+class TestBuildPlistModeFlags:
+    """The plist bakes the `schwab server` mode flags into ProgramArguments."""
+
+    def test_enable_mcp_bakes_flag(self):
+        data = _parse(build_plist(
+            ServerPlistSpec(binary_path="/bin/schwab", enable_mcp=True),
+        ))
+        args = data["ProgramArguments"]
+        assert args[:2] == ["/bin/schwab", "server"]
+        assert "--enable-mcp" in args
+
+    def test_enable_mcp_bakes_host_and_port(self):
+        data = _parse(build_plist(ServerPlistSpec(
+            binary_path="/bin/schwab", enable_mcp=True,
+            host="127.0.0.1", port=7234,
+        )))
+        args = data["ProgramArguments"]
+        assert "--mcp-host" in args
+        assert args[args.index("--mcp-host") + 1] == "127.0.0.1"
+        assert "--mcp-port" in args
+        assert args[args.index("--mcp-port") + 1] == "7234"
+
+    def test_enable_mcp_bakes_log_file(self):
+        data = _parse(build_plist(ServerPlistSpec(
+            binary_path="/bin/schwab", enable_mcp=True,
+            mcp_log_file="/tmp/mcp.log",
+        )))
+        args = data["ProgramArguments"]
+        assert "--log-file" in args
+        assert args[args.index("--log-file") + 1] == "/tmp/mcp.log"
+
+    def test_host_port_ignored_without_enable_mcp(self):
+        """--host/--port only matter with --enable-mcp; bare stays bare."""
+        data = _parse(build_plist(ServerPlistSpec(
+            binary_path="/bin/schwab", host="0.0.0.0", port=9999,
+        )))
+        args = data["ProgramArguments"]
+        assert args == ["/bin/schwab", "server"]
+        assert "--mcp-host" not in args
+
+    def test_enable_rest_bakes_flag(self):
+        data = _parse(build_plist(
+            ServerPlistSpec(binary_path="/bin/schwab", enable_rest=True),
+        ))
+        args = data["ProgramArguments"]
+        assert "--enable-rest" in args
+
+    def test_default_is_bare_server(self):
+        data = _parse(build_plist(ServerPlistSpec(binary_path="/bin/schwab")))
+        assert data["ProgramArguments"] == ["/bin/schwab", "server"]
+
+
 class TestBuildPlistLaunchdBooleans:
     def test_run_at_load_is_true(self):
         data = _parse(build_plist(ServerPlistSpec(binary_path="/x")))

@@ -28,6 +28,9 @@ This split is why `--enable-mcp` disables the MCP server's own auth
 monitor (see below): the maintenance loop is already the renewer, and
 two renewers competing would thrash the OAuth flow.
 
+`schwab server` is the **only daemon**. The standalone `schwab mcp`
+command was removed — MCP now runs *under* `server` via `--enable-mcp`.
+
 ## Usage
 
 ```
@@ -41,10 +44,21 @@ schwab server --enable-mcp [--mcp-host 127.0.0.1] [--mcp-port 7234]
 # Also serve the unauthenticated REST PoC.
 schwab server --enable-rest [--rest-host 127.0.0.1] [--rest-port 8000]
 
-# launchd LaunchAgent management (macOS).
-schwab server install   [--plist-path PATH] [--log-file PATH] [--yes]
-schwab server status
+# launchd LaunchAgent management (macOS). install bakes the mode flags.
+schwab server install [--enable-mcp] [--enable-rest]
+                      [--host 127.0.0.1] [--port 7234]
+                      [--plist-path PATH] [--log-file PATH] [--yes]
 schwab server uninstall [--plist-path PATH] [--yes]
+
+# Diagnostics — talk to a running daemon (needs --enable-mcp for /health
+# + /admin/*).
+schwab server status   [--url URL] [--port P] [--token T] [--json]
+schwab server log      [-f] [--session S] [--symbol X] [--level warning]
+                       [--json] [--tail N] [--log-file PATH]
+schwab server logout   [--url URL] [--token T]
+schwab server restart  [--url URL] [--token T] [--host H] [--port P]
+schwab server register-claude [--url URL] [--token T]
+                       [--claude-settings PATH] [--yes] [--force]
 ```
 
 The `--enable-*` flags **compose**: `schwab server --enable-mcp
@@ -78,10 +92,10 @@ refresh-token renewer; the MCP server runs on the main thread with its
 renewal the loop hands the fresh session to the in-memory MCP client so
 its next call uses the rotated token.
 
-This is the **integrated** way to run MCP. The standalone
-[`schwab mcp`](mcp.md) daemon is the alternative when you don't want the
-maintenance loop in the same process — there, the MCP server runs its
-own auth monitor.
+This is the only way to run MCP — `schwab server --enable-mcp` is the
+daemon, and the MCP *tools* it exposes are documented in
+[`mcp.md`](mcp.md). To register it with Claude Code, run
+`schwab server register-claude` (see below).
 
 ### `--enable-rest` — also serve the REST PoC
 
@@ -101,25 +115,72 @@ path:
 > service wiring only; auth / allowlisting is a deliberate later step.
 > Keep it on loopback (the default) and do not expose it publicly.
 
-Standalone (`--enable-rest` without `--enable-mcp`) it runs via uvicorn
-on `--rest-host:--rest-port` (default `127.0.0.1:8000`). Combined with
-`--enable-mcp`, its routes mount onto the MCP server's Starlette app and
-share that single port instead.
+### Ports: standalone REST vs. composed with `--enable-mcp`
+
+This is the subtle bit (review #4):
+
+- **Standalone** `--enable-rest` (no `--enable-mcp`) runs the REST app
+  via uvicorn on its **own** `--rest-host:--rest-port` (default
+  `127.0.0.1:8000`). MCP is not running, so there is no MCP port.
+- **Composed** `--enable-mcp --enable-rest` mounts the REST routes onto
+  the **MCP server's** Starlette app. They then **share the single MCP
+  port** (`--mcp-host:--mcp-port`, default `127.0.0.1:7234`) on
+  **different paths**: MCP at `/mcp`, REST at `/quote/{symbol}` and
+  `/health`. In this mode `--rest-host` / `--rest-port` are ignored —
+  there is no second listener.
+
+## Diagnostics — talk to a running daemon
+
+These subcommands operate on a daemon you started with `--enable-mcp`
+(they hit its HTTP `/health` and `/admin/*` endpoints), except `log`
+which just reads the structured log file off disk.
+
+```bash
+# Health: launchd-label check + a real GET /health probe. When the
+# daemon is up with --enable-mcp, also prints the /admin/status snapshot
+# (PID, uptime, token expiries, subscriptions).
+schwab server status
+schwab server status --port 9000 --json   # custom port, raw JSON
+
+# Tail the structured JSONL log (default ~/.config/schwab_cli/mcp.log).
+schwab server log -f
+schwab server log -f --level warning
+schwab server log -f --symbol NVDA --json | jq '.'
+
+# Graceful shutdown via /admin/shutdown.
+schwab server logout
+
+# Bounce: launchctl kickstart when the job is loaded, else logout + a
+# fresh foreground `schwab server`.
+schwab server restart
+
+# Register the /mcp endpoint with Claude Code (~/.claude/settings.json).
+schwab server register-claude
+schwab server register-claude --token "s3cr3t"   # add a bearer header
+```
+
+`server status`'s `/health` probe targets `http://127.0.0.1:7234` by
+default; override the whole base with `--url` or just the port with
+`--port`. If the daemon is running **without** `--enable-mcp` there is
+no HTTP listener, so `/health` is unreachable — that is expected.
 
 ## Running as a macOS service (launchd)
 
 ```bash
-schwab server install     # write the plist + launchctl load
-schwab server status      # is com.schwab-cli.server loaded?
-schwab server uninstall   # launchctl unload + remove the plist
+schwab server install                 # bare maintenance loop
+schwab server install --enable-mcp    # bake --enable-mcp into the plist
+schwab server status                  # is com.schwab-cli.server loaded?
+schwab server uninstall               # launchctl unload + remove plist
 ```
 
 `install` writes the LaunchAgent at
 `~/Library/LaunchAgents/com.schwab-cli.server.plist` with
 `KeepAlive=true`, so any exit triggers a relaunch, and loads it
-immediately. The plist runs the **bare** maintenance loop by default;
-edit it (or re-install) if you want the launchd job to add
-`--enable-mcp` / `--enable-rest`.
+immediately. By default the plist runs the **bare** maintenance loop;
+pass `--enable-mcp` / `--enable-rest` (and `--host` / `--port` /
+`--mcp-log-file`) to **bake those flags into the plist's
+`ProgramArguments`**, so launchd starts e.g.
+`schwab server --enable-mcp --mcp-host 127.0.0.1 --mcp-port 7234`.
 
 **Why a LaunchAgent, not a LaunchDaemon**: it runs under your user, so
 it can read `~/.config/schwab_cli/session.json` and drive the browser
@@ -134,7 +195,9 @@ Telegram. Configure with `schwab notify setup --channel telegram`; see
 
 ## Related
 
-- [`mcp`](mcp.md) — the standalone MCP daemon + admin subcommands.
+- [`mcp`](mcp.md) — the MCP **tools** reference (`get_quote`,
+  `get_chain`, `stream_quote`, …) and Claude Code integration. The
+  daemon itself is `schwab server --enable-mcp` (this doc).
 - [`auth`](auth.md) — the OAuth flow and browser auto-login the server
   drives on renewal.
 - [`notify`](notify.md) — alert channels for maintenance events.

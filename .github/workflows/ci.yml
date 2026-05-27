@@ -49,7 +49,6 @@ jobs:
         # re-enable a file once its assertions are refreshed.
         #
         #   test_commands_stream            — WebSocket suite hangs CI runners
-        #   test_commands_mcp_install       — asserts on old ``schwab_cli`` binary name
         #   test_commands_order_override    — Telegram log assertion drift
         #   test_commands_profile_new       — profile-loader interaction
         #   test_mcp_auth_monitor           — env / fixture leak
@@ -62,7 +61,6 @@ jobs:
         run: |
           uv run pytest \
             --ignore=tests/test_commands_stream.py \
-            --ignore=tests/test_commands_mcp_install.py \
             --ignore=tests/test_commands_order_override.py \
             --ignore=tests/test_commands_profile_new.py \
             --ignore=tests/test_mcp_auth_monitor.py \

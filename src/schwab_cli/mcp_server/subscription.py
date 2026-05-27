@@ -160,12 +160,12 @@ class SubscriptionManager:
         after a dropped WebSocket."""
         return set(self._refcount)
 
-    # ---- introspection (for `mcp status`) -----------------------------
+    # ---- introspection (for `server status`) --------------------------
 
     def snapshot(self) -> dict[str, object]:
         """Admin-endpoint-friendly state snapshot.
 
-        Shape is stable for consumers — ``mcp status`` relies on
+        Shape is stable for consumers — ``server status`` relies on
         these exact keys.
         """
         sessions = {}

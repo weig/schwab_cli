@@ -65,10 +65,13 @@ def test_doc_flag_on_strategy_shows_strategy_page():
     assert "OCC-style" in result.output or "±N@YYYYMMDD" in result.output
 
 
-def test_doc_flag_on_mcp_shows_mcp_page():
-    result = runner.invoke(app, ["mcp", "--doc"])
+def test_doc_flag_on_server_shows_server_page():
+    # `schwab mcp` was consolidated into `schwab server` (PR #52): the
+    # server is the only daemon, and `--enable-mcp` runs the Streamable
+    # HTTP MCP server. `server --doc` surfaces doc/server.md.
+    result = runner.invoke(app, ["server", "--doc"])
     assert result.exit_code == 0, result.output
-    # Distinctive phrasing from doc/mcp.md:
+    # Distinctive phrasing from doc/server.md:
     assert "MCP server" in result.output
     assert "Streamable HTTP" in result.output
 

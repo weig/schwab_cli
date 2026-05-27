@@ -9,8 +9,8 @@ streamer lifecycle:
 * Reconnects on transient failure (TODO — Phase 3).
 
 All subscribe / unsubscribe / Schwab-wire events emit structured log
-entries via the injected :class:`LogBook` so ``schwab_cli mcp log
--f`` and `mcp status` can observe the daemon's behavior.
+entries via the injected :class:`LogBook` so ``schwab server log
+-f`` and `server status` can observe the daemon's behavior.
 """
 
 from __future__ import annotations

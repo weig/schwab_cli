@@ -497,6 +497,12 @@ class SchwabMcpServer:
         # subscriptions. This is acceptable for 3b — the `/admin/flush`
         # endpoint plus a process restart still clear all stream state.
 
+        async def health(request):
+            # Unauthenticated liveness probe — powers `server status`'s
+            # real /health reachability check. Mirrors the REST app's
+            # /health so both daemons answer the same shape.
+            return JSONResponse({"ok": True})
+
         async def admin_status(request):
             if not self._admin_auth_ok(request):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -538,6 +544,7 @@ class SchwabMcpServer:
         # tries to treat the None return as a Response.
         routes = [
             Mount("/mcp", app=handle_mcp),
+            Route("/health", endpoint=health, methods=["GET"]),
             Route("/admin/status", endpoint=admin_status, methods=["GET"]),
             Route("/admin/shutdown", endpoint=admin_shutdown, methods=["POST"]),
             Route("/admin/flush", endpoint=admin_flush, methods=["POST"]),

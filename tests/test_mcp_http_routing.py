@@ -50,6 +50,9 @@ def _build_app():
     async def handle_mcp(scope, receive, send):
         await session_manager.handle_request(scope, receive, send)
 
+    async def health(request):
+        return JSONResponse({"ok": True})
+
     async def admin_status(request):
         return JSONResponse(server._status_payload())
 
@@ -64,6 +67,7 @@ def _build_app():
     routes = [
         # The original bug: this MUST be Mount, not Route.
         Mount("/mcp", app=handle_mcp),
+        Route("/health", endpoint=health, methods=["GET"]),
         Route("/admin/status", endpoint=admin_status, methods=["GET"]),
         Route("/admin/shutdown", endpoint=admin_shutdown, methods=["POST"]),
     ]
@@ -87,6 +91,28 @@ def test_admin_shutdown_returns_ok():
         r = client.post("/admin/shutdown")
     assert r.status_code == 200
     assert r.json() == {"ok": True}
+
+
+def test_health_returns_ok():
+    """`run_http` mounts a `/health` liveness probe (powers `server
+    status`'s reachability check). It must return 200 {"ok": true}."""
+    app, _ = _build_app()
+    with TestClient(app) as client:
+        r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+
+def test_run_http_source_mounts_health_route():
+    """Guard that the production `run_http` actually wires `/health` (the
+    locally-rebuilt _build_app mirrors it, but this asserts the real
+    source so the two cannot drift)."""
+    import inspect
+
+    from schwab_cli.mcp_server.app import SchwabMcpServer
+
+    src = inspect.getsource(SchwabMcpServer.run_http)
+    assert 'Route("/health"' in src
 
 
 def test_mcp_endpoint_is_mounted_not_routed():

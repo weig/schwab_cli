@@ -92,8 +92,8 @@ SCHEDULER_CRON_LOCAL  = "0 4 * * *"
 
 
 # Plist basenames the sweep is allowed to remove. Narrow on purpose:
-# the MCP server installs itself as ``com.schwab-cli.mcp.plist`` and
-# must not be touched. Only the scheduler plist is ours to sweep.
+# the server daemon installs itself as ``com.schwab-cli.server.plist``
+# and must not be touched. Only the scheduler plist is ours to sweep.
 _PLIST_PREFIXES = (
     "com.schwab-cli.scheduler",
 )

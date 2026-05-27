@@ -31,8 +31,7 @@ No third-party intermediaries, no data sharing, no shared API keys.
 | Streaming | `stream`, `watch` | [stream](doc/stream.md) |
 | Orders (place / preview / cancel / replace) | `order` | [order](doc/order.md) |
 | Notifications | `notify` (Telegram) | [notify](doc/notify.md) |
-| MCP server | `mcp install`, `mcp status`, `mcp log`, … | [mcp](doc/mcp.md) |
-| Auth-maintenance server | `server`, `server install`, `server --enable-mcp`, `server --enable-rest` | [server](doc/server.md) |
+| Server / MCP daemon | `server`, `server --enable-mcp`, `server install`, `server status`, `server register-claude` | [server](doc/server.md) · [mcp tools](doc/mcp.md) |
 | Cached dataset backend | `dataset subscribe`, `dataset sync`, `dataset cron …` | [setup](doc/setup.md) |
 | Health check | `doctor` | _(prints install / MCP / auth / dataset status)_ |
 
@@ -231,21 +230,24 @@ instead — pick this if you'd rather not run a worker. See
 
 Expose `schwab_cli` as a Model Context Protocol server so AI agents
 (Claude Code, Claude Desktop, custom tools) can call Schwab operations
-as MCP tools.
+as MCP tools. **The MCP server runs under the daemon** — there is no
+separate `schwab mcp` command; use `schwab server --enable-mcp`.
 
 ```bash
-schwab mcp install         # install + load the launchd agent (macOS)
-schwab mcp status          # daemon status + last 10 logbook events
-schwab mcp log             # tail the JSONL logbook
-schwab mcp restart         # rolling restart
-schwab mcp logout          # forget the session (force re-auth on next call)
+schwab server --enable-mcp        # run the MCP server (single /mcp endpoint)
+schwab server register-claude     # register /mcp in ~/.claude/settings.json
+schwab server status              # launchd check + GET /health probe + snapshot
+schwab server log                 # tail the JSONL logbook
+schwab server restart             # bounce the daemon
+schwab server logout              # graceful /admin/shutdown
 ```
 
 Available MCP tools out of the box: `get_quote`, `get_chain`,
 `stream_quote`, `dataset_status`, `dataset_history`, `dataset_iv_rank`,
 `server_status`. The daemon speaks Streamable HTTP only — a single
-`/mcp` endpoint. See [doc/mcp.md](doc/mcp.md) for the full list,
-transport details, and Claude Code integration.
+`/mcp` endpoint. See [doc/mcp.md](doc/mcp.md) for the tool list and
+Claude Code integration, and [doc/server.md](doc/server.md) for running
+and managing the daemon.
 
 ---
 
@@ -259,19 +261,21 @@ headless browser auto-login). Run it under launchd
 indefinitely.
 
 ```bash
-schwab server                 # bare: auth-maintenance loop only
-schwab server --enable-mcp    # + Streamable HTTP MCP server (single /mcp)
-schwab server --enable-rest   # + unauthenticated REST PoC (GET /quote/{symbol}, /health)
-schwab server install         # install + load the launchd LaunchAgent
-schwab server status          # is the launchd job loaded?
-schwab server uninstall       # unload + remove the LaunchAgent
+schwab server                       # bare: auth-maintenance loop only
+schwab server --enable-mcp          # + Streamable HTTP MCP server (single /mcp)
+schwab server --enable-rest         # + unauthenticated REST PoC (GET /quote/{symbol}, /health)
+schwab server install               # install + load the launchd LaunchAgent (bare)
+schwab server install --enable-mcp  # bake --enable-mcp into the launchd plist
+schwab server status                # launchd check + GET /health probe + snapshot
+schwab server uninstall             # unload + remove the LaunchAgent
 ```
 
 The `--enable-*` flags compose. When MCP runs under `schwab server` its
 own auth monitor is disabled — the maintenance loop is the sole renewer,
-so there is no competing rotation. `--enable-rest` is a proof-of-concept
-only and serves **unauthenticated**; don't expose it beyond loopback.
-See [doc/server.md](doc/server.md) for the full picture.
+so there is no competing rotation. `server install` bakes whichever mode
+flags you pass into the plist's `ProgramArguments`. `--enable-rest` is a
+proof-of-concept only and serves **unauthenticated**; don't expose it
+beyond loopback. See [doc/server.md](doc/server.md) for the full picture.
 
 ---
 

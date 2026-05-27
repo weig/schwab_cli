@@ -11,7 +11,6 @@ from schwab_cli.commands import doctor as doctor_cmd
 from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
-from schwab_cli.commands import mcp as mcp_cmd
 from schwab_cli.commands import notify as notify_cmd
 from schwab_cli.commands import performance as performance_cmd
 from schwab_cli.commands import option as option_cmd
@@ -423,17 +422,7 @@ def skew(
     )
 
 
-mcp_app = typer.Typer(
-    help=(
-        "Run and manage the Schwab MCP server. Bare `mcp` starts "
-        "the daemon; use subcommands for status / log / logout / "
-        "install."
-    ),
-    no_args_is_help=False,
-    invoke_without_command=True,
-)
 app.add_typer(dataset_cmd.app, name="dataset")
-app.add_typer(mcp_app, name="mcp")
 
 
 watch_app = typer.Typer(
@@ -473,170 +462,6 @@ def watch_list(
 @watch_app.command("show", help="Live streaming table. Ctrl-C to exit.")
 def watch_show(doc: bool = doc_option()) -> None:
     watch_cmd.run_show()
-
-
-@mcp_app.callback(invoke_without_command=True)
-def mcp_root(
-    ctx: typer.Context,
-    host: str = typer.Option(
-        "127.0.0.1", "--host",
-        help="HTTP bind host. Loopback-only by default.",
-    ),
-    port: int = typer.Option(
-        7234, "--port",
-        help="HTTP bind port.",
-    ),
-    log_file: str = typer.Option(
-        None, "--log-file",
-        help="Path to the structured log file. Default: ~/.config/schwab_cli/mcp.log.",
-    ),
-    no_log_file: bool = typer.Option(
-        False, "--no-log-file",
-        help="Disable the disk log; events still go to stderr.",
-    ),
-    no_auto_login: bool = typer.Option(
-        False, "--no-auto-login",
-        help=(
-            "Disable browser auto-login. If the refresh token has "
-            "expired at startup, exit 1 instead of spawning "
-            "`schwab_cli auth --force`. Also disables the proactive "
-            "rotation task that runs at the 1h expiry threshold."
-        ),
-    ),
-    doc: bool = doc_option(),
-) -> None:
-    """When no subcommand, run the daemon (Streamable HTTP only)."""
-    if ctx.invoked_subcommand is not None:
-        return
-    mcp_cmd.run(
-        host=host, port=port,
-        log_file=log_file, no_log_file=no_log_file,
-        no_auto_login=no_auto_login,
-    )
-
-
-@mcp_app.command("status", help="Print a snapshot of the running MCP server.")
-def mcp_status(
-    url: str = typer.Option(
-        None, "--url",
-        help="Base URL of the running server (default: http://127.0.0.1:7234).",
-    ),
-    token: str = typer.Option(None, "--token", help="Bearer token if set at start."),
-    as_json: bool = typer.Option(False, "--json", help="Raw JSON output."),
-) -> None:
-    mcp_cmd.run_status(url=url, token=token, as_json=as_json)
-
-
-@mcp_app.command("log", help="Read or tail the MCP server's structured log.")
-def mcp_log(
-    follow: bool = typer.Option(False, "-f", "--follow", help="Tail the file."),
-    log_file: str = typer.Option(
-        None, "--log-file",
-        help="Log file path (default: ~/.config/schwab_cli/mcp.log).",
-    ),
-    session: str = typer.Option(None, "--session", help="Filter by session id."),
-    symbol: str = typer.Option(None, "--symbol", help="Filter by symbol."),
-    level: str = typer.Option(
-        None, "--level",
-        help="Filter: info | warning | error (shows that level and above).",
-    ),
-    as_json: bool = typer.Option(False, "--json", help="Raw JSONL pass-through."),
-    tail: int = typer.Option(None, "--tail", help="Show only the last N lines."),
-) -> None:
-    mcp_cmd.run_log(
-        follow=follow, log_file=log_file,
-        session=session, symbol=symbol, level=level,
-        as_json=as_json, tail=tail,
-    )
-
-
-@mcp_app.command("logout", help="Gracefully shut down a running MCP server.")
-def mcp_logout(
-    url: str = typer.Option(None, "--url"),
-    token: str = typer.Option(None, "--token"),
-) -> None:
-    mcp_cmd.run_logout(url=url, token=token)
-
-
-@mcp_app.command("restart", help="Logout + start again in-place.")
-def mcp_restart(
-    url: str = typer.Option(None, "--url"),
-    token: str = typer.Option(None, "--token"),
-    host: str = typer.Option("127.0.0.1", "--host"),
-    port: int = typer.Option(7234, "--port"),
-) -> None:
-    mcp_cmd.run_restart(
-        url=url, token=token, host=host, port=port,
-    )
-
-
-@mcp_app.command(
-    "install-service",
-    help=(
-        "Install a macOS launchd LaunchAgent so the Streamable HTTP "
-        "daemon starts on login and restarts on exit."
-    ),
-)
-def mcp_install_service(
-    host: str = typer.Option("127.0.0.1", "--host"),
-    port: int = typer.Option(7234, "--port"),
-    log_file: str = typer.Option(
-        None, "--log-file",
-        help="Captures stderr+stdout. Default: ~/Library/Logs/schwab_cli-mcp.log",
-    ),
-    admin_token: str = typer.Option(None, "--admin-token"),
-    plist_path: str = typer.Option(None, "--plist-path"),
-    yes: bool = typer.Option(False, "--yes"),
-) -> None:
-    mcp_cmd.run_install_service(
-        host=host, port=port, log_file=log_file,
-        admin_token=admin_token, plist_path=plist_path, yes=yes,
-    )
-
-
-@mcp_app.command("start-service", help="launchctl load the installed plist.")
-def mcp_start_service(
-    plist_path: str = typer.Option(None, "--plist-path"),
-) -> None:
-    mcp_cmd.run_start_service(plist_path=plist_path)
-
-
-@mcp_app.command("stop-service", help="launchctl unload — stops without auto-restart.")
-def mcp_stop_service(
-    plist_path: str = typer.Option(None, "--plist-path"),
-) -> None:
-    mcp_cmd.run_stop_service(plist_path=plist_path)
-
-
-@mcp_app.command("uninstall-service", help="Unload and remove the launchd plist.")
-def mcp_uninstall_service(
-    plist_path: str = typer.Option(None, "--plist-path"),
-    yes: bool = typer.Option(False, "--yes"),
-) -> None:
-    mcp_cmd.run_uninstall_service(plist_path=plist_path, yes=yes)
-
-
-@mcp_app.command("install", help="Register this MCP server in ~/.claude/settings.json.")
-def mcp_install(
-    url: str = typer.Option(
-        "http://127.0.0.1:7234/mcp", "--url",
-        help="Streamable HTTP URL of the daemon's /mcp endpoint.",
-    ),
-    token: str = typer.Option(
-        None, "--token",
-        help="Bearer token to include in the entry.",
-    ),
-    settings: str = typer.Option(
-        None, "--claude-settings",
-        help="Override path (default: ~/.claude/settings.json).",
-    ),
-    yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
-    force: bool = typer.Option(False, "--force", help="Overwrite existing entry."),
-) -> None:
-    mcp_cmd.run_install(
-        url=url, token=token, settings=settings,
-        yes=yes, force=force,
-    )
 
 
 # ---- server sub-app ---------------------------------------------------
@@ -722,6 +547,7 @@ def server_root(
             "--force`."
         ),
     ),
+    doc: bool = doc_option(),
 ) -> None:
     """Bare `schwab server` → maintenance loop; `--enable-mcp` adds MCP."""
     if ctx.invoked_subcommand is not None:
@@ -740,7 +566,14 @@ def server_root(
     )
 
 
-@server_app.command("install", help="Install + load the launchd LaunchAgent.")
+@server_app.command(
+    "install",
+    help=(
+        "Install + load the launchd LaunchAgent. Bakes the mode flags "
+        "(--enable-mcp / --enable-rest / --host / --port) into the plist. "
+        "With no flags it installs the bare maintenance daemon."
+    ),
+)
 def server_install(
     plist_path: str = typer.Option(
         None, "--plist-path",
@@ -751,9 +584,42 @@ def server_install(
         None, "--log-file",
         help="Capture stdout+stderr to this file.",
     ),
+    enable_mcp: bool = typer.Option(
+        False, "--enable-mcp",
+        help="Bake `--enable-mcp` into the plist so launchd runs the "
+        "Streamable HTTP MCP server on top of the maintenance loop.",
+    ),
+    enable_rest: bool = typer.Option(
+        False, "--enable-rest",
+        help="Bake `--enable-rest` into the plist (REST PoC).",
+    ),
+    host: str = typer.Option(
+        None, "--host",
+        help="MCP bind host baked into the plist (only with --enable-mcp; "
+        "default 127.0.0.1).",
+    ),
+    port: int = typer.Option(
+        None, "--port",
+        help="MCP bind port baked into the plist (only with --enable-mcp; "
+        "default 7234).",
+    ),
+    mcp_log_file: str = typer.Option(
+        None, "--mcp-log-file",
+        help="MCP structured log file baked into the plist "
+        "(only with --enable-mcp).",
+    ),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
 ) -> None:
-    server_cmd.run_install(plist_path=plist_path, log_file=log_file, yes=yes)
+    server_cmd.run_install(
+        plist_path=plist_path,
+        log_file=log_file,
+        enable_mcp=enable_mcp,
+        enable_rest=enable_rest,
+        host=host,
+        port=port,
+        mcp_log_file=mcp_log_file,
+        yes=yes,
+    )
 
 
 @server_app.command("uninstall", help="Unload and remove the launchd plist.")
@@ -767,9 +633,98 @@ def server_uninstall(
     server_cmd.run_uninstall(plist_path=plist_path, yes=yes)
 
 
-@server_app.command("status", help="Report whether the server job is loaded.")
-def server_status() -> None:
-    server_cmd.run_status()
+@server_app.command(
+    "status",
+    help=(
+        "Report server health: launchd-label check + a real GET /health "
+        "probe (and the /admin/status snapshot when --enable-mcp is up)."
+    ),
+)
+def server_status(
+    url: str = typer.Option(
+        None, "--url",
+        help="Base URL of the running daemon (default: http://127.0.0.1:7234).",
+    ),
+    port: int = typer.Option(
+        None, "--port",
+        help="Override just the port on the default loopback host.",
+    ),
+    token: str = typer.Option(None, "--token", help="Bearer token if set."),
+    as_json: bool = typer.Option(False, "--json", help="Raw JSON output."),
+) -> None:
+    server_cmd.run_status(url=url, port=port, token=token, as_json=as_json)
+
+
+@server_app.command(
+    "log", help="Read or tail the server's structured log.",
+)
+def server_log(
+    follow: bool = typer.Option(False, "-f", "--follow", help="Tail the file."),
+    log_file: str = typer.Option(
+        None, "--log-file",
+        help="Log file path (default: ~/.config/schwab_cli/mcp.log).",
+    ),
+    session: str = typer.Option(None, "--session", help="Filter by session id."),
+    symbol: str = typer.Option(None, "--symbol", help="Filter by symbol."),
+    level: str = typer.Option(
+        None, "--level",
+        help="Filter: info | warning | error (shows that level and above).",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Raw JSONL pass-through."),
+    tail: int = typer.Option(None, "--tail", help="Show only the last N lines."),
+) -> None:
+    server_cmd.run_log(
+        follow=follow, log_file=log_file,
+        session=session, symbol=symbol, level=level,
+        as_json=as_json, tail=tail,
+    )
+
+
+@server_app.command("logout", help="Gracefully shut down the running daemon.")
+def server_logout(
+    url: str = typer.Option(None, "--url"),
+    token: str = typer.Option(None, "--token"),
+) -> None:
+    server_cmd.run_logout(url=url, token=token)
+
+
+@server_app.command(
+    "restart",
+    help="Bounce the daemon (launchctl kickstart, or logout + re-exec).",
+)
+def server_restart(
+    url: str = typer.Option(None, "--url"),
+    token: str = typer.Option(None, "--token"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(7234, "--port"),
+) -> None:
+    server_cmd.run_restart(url=url, token=token, host=host, port=port)
+
+
+@server_app.command(
+    "register-claude",
+    help="Register this server's /mcp endpoint in ~/.claude/settings.json.",
+)
+def server_register_claude(
+    url: str = typer.Option(
+        "http://127.0.0.1:7234/mcp", "--url",
+        help="Streamable HTTP URL of the daemon's /mcp endpoint "
+        "(run with `schwab server --enable-mcp`).",
+    ),
+    token: str = typer.Option(
+        None, "--token",
+        help="Bearer token to include in the entry.",
+    ),
+    settings: str = typer.Option(
+        None, "--claude-settings",
+        help="Override path (default: ~/.claude/settings.json).",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing entry."),
+) -> None:
+    server_cmd.run_register_claude(
+        url=url, token=token, settings=settings, yes=yes, force=force,
+    )
 
 
 @app.command(

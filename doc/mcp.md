@@ -1,115 +1,44 @@
-# `mcp`
+# `mcp` — MCP tools reference
 
-Run `schwab_cli` as an MCP server so agents (Claude Code, Claude
+Expose `schwab_cli` as an MCP server so agents (Claude Code, Claude
 Desktop, custom tools) can call Schwab operations as tools.
 
-## Feature summary
+> **There is no `schwab mcp` command.** The MCP server runs under the
+> auth-maintenance daemon: **`schwab server --enable-mcp`**. See
+> [`server.md`](server.md) for how to run, install, probe, and manage
+> the daemon. This page documents the **tools** the MCP server exposes
+> and how to register it with Claude Code.
 
-| Feature | Status |
-| --- | --- |
-| Streamable HTTP transport (long-lived daemon, single `/mcp` endpoint) | ✅ shipped |
-| REST tools: `get_quote`, `get_chain`, `server_status` | ✅ shipped |
-| Streaming tool: `stream_quote` (refcounted, fan-out, progress notifications) | ✅ shipped |
-| Structured JSONL logbook (stderr + file) with session / subscribe / unsubscribe / streamer events | ✅ shipped |
-| `mcp status` / `mcp log` / `mcp logout` / `mcp restart` / `mcp install` | ✅ shipped |
-| `schwab_cli stream` with auto-routing (MCP when daemon up, else direct) | ✅ shipped |
-| Proactive browser auto-login at 1h expiry threshold | ✅ shipped |
-| Telegram notifications for auth / streamer lifecycle events | ✅ shipped |
-| launchd LaunchAgent install + start/stop/uninstall subcommands | ✅ shipped |
-| `stream_option_quote` tool | 🚧 next |
-| `reauth` tool | 🚧 next |
-| Slack notification channel | 🚧 Phase 2b |
-
-## Usage
-
-```
-# Start the daemon (Streamable HTTP — the only transport).
-schwab_cli mcp [--host 127.0.0.1] [--port 7234]
-               [--log-file PATH | --no-log-file]
-
-# Subcommands operate on a running server.
-schwab_cli mcp status   [--url URL] [--token T] [--json]
-schwab_cli mcp log      [-f] [--session S] [--symbol X] [--level warning]
-                        [--json] [--tail N] [--log-file PATH]
-schwab_cli mcp logout   [--url URL] [--token T]
-schwab_cli mcp restart  [--url URL] [--token T] [--host H] [--port P]
-schwab_cli mcp install  [--url URL] [--token T]
-                        [--claude-settings PATH] [--yes] [--force]
-```
-
-## Transport mode
-
-### Streamable HTTP (long-lived daemon)
-
-The daemon is HTTP-only. stdio cannot hold the long-lived
-authenticated session the daemon requires, so it is not supported.
-
-Run once, many agents connect as clients to the same process over a
-single `/mcp` endpoint:
+## Running the MCP server
 
 ```bash
-schwab_cli mcp                              # http://127.0.0.1:7234/mcp
-schwab_cli mcp --host 0.0.0.0 --port 9000   # remote bind
+# Run the daemon with the MCP server on top (single /mcp endpoint).
+schwab server --enable-mcp                              # http://127.0.0.1:7234/mcp
+schwab server --enable-mcp --mcp-host 0.0.0.0 --mcp-port 9000
+
+# Or install it as a launchd LaunchAgent that bakes the flag in:
+schwab server install --enable-mcp
 ```
 
-> Back-compat: a bare `--sse` (and `--stdio`) flag is still accepted
-> as a hidden no-op so an already-installed launchd plist that bakes
-> in `mcp --sse` keeps launching the HTTP daemon. The flags have no
-> effect.
-
-Benefits:
-
-- **Shared Schwab WebSocket** across all connected agents (one
-  SUBS per symbol, not N).
-- **Auth-keeper for the machine** — the daemon rotates
-  `session.json` tokens in the background, so every other
-  `schwab_cli` command on the box sees a fresh session.
-- Survives agent restarts; subscriptions persist.
-
-Cost: you manage the lifecycle (tmux, launchd, systemd, or just a
-terminal tab). See "Service management" below.
-
-### Standalone `schwab mcp` vs. integrated `schwab server --enable-mcp`
-
-There are two ways to run the MCP server:
-
-- **`schwab mcp`** (this doc) — the *standalone* daemon. It runs its
-  own auth monitor, so it both serves MCP **and** keeps the session
-  fresh on its own.
-- **`schwab server --enable-mcp`** — the *integrated* option. Here the
-  long-lived [auth-maintenance loop](server.md) is the single proactive
-  refresh-token renewer and the MCP server runs with its auth monitor
-  **disabled** (no competing rotation). Prefer this when you also want
-  the maintenance daemon running (e.g. to keep every other
-  `schwab_cli` command on the box logged in).
-
-Both speak the same Streamable HTTP transport on the same `/mcp`
-endpoint; pick one renewer, not both.
-
-## Schwab streamer constraint
-
-Schwab allows **one concurrent streamer session per account**. If
-two `schwab_cli mcp` processes both try to stream, whichever logs in
-most recently kicks the other off. The tool warns you on start when
-it detects this pattern. Use one HTTP daemon and let agents share it.
+The daemon is HTTP-only (Streamable HTTP). stdio cannot hold the
+long-lived authenticated session the daemon requires, so it is not
+supported. Run once; many agents connect as clients to the same process
+over a single `/mcp` endpoint, sharing one Schwab WebSocket (one `SUBS`
+per symbol, not N) and one background auth-keeper.
 
 ## Registering with Claude Code
 
-Either write the entry manually or use the installer:
-
 ```bash
-# Streamable HTTP entry — registers the /mcp URL:
-schwab_cli mcp install
+# Streamable HTTP entry — registers the /mcp URL in ~/.claude/settings.json:
+schwab server register-claude
 
-# With a shared-secret token for the HTTP daemon:
-schwab_cli mcp install --token "s3cr3t"
+# With a shared-secret bearer token for the HTTP daemon:
+schwab server register-claude --token "s3cr3t"
 ```
 
-The HTTP entry registers `{"type": "http", "url":
-"http://127.0.0.1:7234/mcp"}` in `~/.claude/settings.json`.
-
-The installer merges into `~/.claude/settings.json`, preserves other
-keys, and refuses to clobber an existing `schwab` entry without
+This writes `{"type": "http", "url": "http://127.0.0.1:7234/mcp"}` into
+`~/.claude/settings.json`. The installer merges into the file, preserves
+other keys, and refuses to clobber an existing `schwab` entry without
 `--force`.
 
 ## Tools
@@ -132,10 +61,10 @@ Returns the flattened envelope the `option` command emits.
 
 ### `stream_quote`
 
-Long-running tool. Subscribe to real-time level-1 equity quotes for
-one or more symbols. Each update arrives as an MCP progress
-notification whose `message` field is a JSON object with
-`bid` / `ask` / `last` / `volume` / `quote_time` / etc.
+Long-running tool. Subscribe to real-time level-1 equity quotes for one
+or more symbols. Each update arrives as an MCP progress notification
+whose `message` field is a JSON object with `bid` / `ask` / `last` /
+`volume` / `quote_time` / etc.
 
 ```json
 {"symbols": ["NVDA", "AAPL"]}
@@ -143,38 +72,44 @@ notification whose `message` field is a JSON object with
 
 Implementation details:
 
-- Refcounted at the Schwab side: two agents subscribing to `NVDA`
-  share one `SUBS` wire command.
-- Keepalive progress notifications every 60s during quiet periods
-  so the client knows the stream is still live (useful
-  after-hours — see off-hours note below).
-- On client cancel: `UNSUBS` is sent to Schwab for any refcount
-  that hit zero, queues are dropped, and a `unsubscribe` log
-  entry is emitted with the reason.
-- TCP close cleanup: if the MCP client disconnects without
-  cancelling, a `session.drop` event runs the same cleanup path.
+- Refcounted at the Schwab side: two agents subscribing to `NVDA` share
+  one `SUBS` wire command.
+- Keepalive progress notifications every 60s during quiet periods so the
+  client knows the stream is still live (useful after-hours).
+- On client cancel: `UNSUBS` is sent to Schwab for any refcount that hit
+  zero, queues are dropped, and an `unsubscribe` log entry is emitted.
+- TCP close cleanup: if the MCP client disconnects without cancelling, a
+  `session.drop` event runs the same cleanup path.
 
-**After-hours behaviour**: Schwab sends one snapshot frame on
-`SUBS` then delta frames only on actual trades. Outside market
-hours you'll see the initial snapshot and then silence until the
-market moves. The subscription stays live — the keepalives
-confirm that.
+**After-hours behaviour**: Schwab sends one snapshot frame on `SUBS`
+then delta frames only on actual trades. Outside market hours you'll see
+the initial snapshot and then silence until the market moves. The
+subscription stays live — the keepalives confirm that.
 
 ### `server_status`
 
 No arguments. Returns PID, uptime, token expiries, transport, and
-current subscription state.
+current subscription state — the same payload `schwab server status`
+renders.
 
-## Admin endpoints (HTTP mode only)
+### Dataset tools
+
+`dataset_status`, `dataset_history`, `dataset_iv_rank` — read from the
+cached dataset backend. See [`setup.md`](setup.md).
+
+## HTTP endpoints (when `--enable-mcp` is running)
 
 | Path | Method | Purpose |
 | --- | --- | --- |
-| `/admin/status` | GET | Powers `mcp status`. |
-| `/admin/shutdown` | POST | Graceful shutdown; powers `mcp logout`. |
+| `/mcp` | (Streamable HTTP) | The MCP transport endpoint agents connect to. |
+| `/health` | GET | Liveness probe; powers `schwab server status`. |
+| `/admin/status` | GET | Snapshot; powers `server status` / `server_status`. |
+| `/admin/shutdown` | POST | Graceful shutdown; powers `server logout`. |
 | `/admin/flush` | POST | Clear subscription state (panic button). |
 
-Bearer token required if the daemon was started with `--token`.
-Otherwise loopback-only is the default; no auth is enforced.
+`/health` is unauthenticated. The `/admin/*` endpoints require the
+bearer token when the daemon was started with one; otherwise loopback is
+the default and no auth is enforced.
 
 ## Logging
 
@@ -185,110 +120,20 @@ line:
 {"ts":"2026-04-24T14:32:17.123Z","level":"info","event":"tool.call","tool":"get_quote","args":{"symbols":["NVDA"]}}
 ```
 
-**Tail live** (works from any terminal, even if the daemon is in
-tmux or launchd):
+Tail it live with `schwab server log -f` (see [`server.md`](server.md)).
+Default path: `~/.config/schwab_cli/mcp.log`.
 
-```bash
-schwab_cli mcp log -f                           # everything
-schwab_cli mcp log -f --level warning           # warnings + errors
-schwab_cli mcp log -f --session s_ab12          # one session only
-schwab_cli mcp log -f --symbol NVDA             # events touching NVDA
-schwab_cli mcp log -f --json | jq '.'           # raw for jq pipelines
-```
+## Schwab streamer constraint
 
-Default log path: `~/.config/schwab_cli/mcp.log`. Append-mode, no
-rotation in MVP — truncate manually if it grows large.
+Schwab allows **one concurrent streamer session per account**. Run one
+HTTP daemon and let agents share it rather than opening several streamer
+connections — whichever logs in most recently kicks the others off.
 
-## Running as a macOS service (launchd)
+## Related
 
-For a set-and-forget daemon that starts on login and auto-restarts
-on exit:
-
-```bash
-# Install + start:
-schwab_cli mcp install-service
-
-# Verify:
-schwab_cli mcp status
-
-# Stop without uninstalling (auto-restart pauses until next start):
-schwab_cli mcp stop-service
-
-# Fully remove the service:
-schwab_cli mcp uninstall-service
-```
-
-The installed plist lives at
-`~/Library/LaunchAgents/com.schwab-cli.mcp.plist` and uses
-`KeepAlive=true` so any exit triggers a relaunch — which makes
-`schwab_cli mcp restart` a no-op apart from calling `mcp logout`;
-launchd takes it from there.
-
-**Why LaunchAgent, not LaunchDaemon**: Agents run under your user,
-so they can read `~/.config/schwab_cli/session.json` natively.
-Daemons would need root + user-switching gymnastics.
-
-## Proactive auto-login
-
-With the daemon running as a service (or in HTTP mode generally), a
-background task monitors the refresh-token expiry and proactively
-rotates the 7-day token via `schwab_cli auth --force` at the 1h
-threshold. Headless Chromium + saved credentials make it silent
-in the common case.
-
-- Default threshold: **1h** before `refresh_token_expires_at`.
-- Anti-thrash: at most **one attempt per hour** on repeated
-  failures.
-- At **15m remaining**, an `auth.refresh_expiring` warning fires
-  if rotation still hasn't succeeded — shown via
-  `notifications/message` to all connected MCP sessions and
-  pushed to any subscribed notification channels (see
-  `doc/notify.md`).
-- On success: bridge reconnects the Schwab streamer with the
-  fresh access token; active subscriptions resume automatically.
-- On failure: `auth.auto_login.failed` notification with the
-  subprocess stderr tail so you know what to fix.
-
-Opt out with a future `--no-auto-login` flag (the code already
-scaffolds it); for now the monitor runs whenever the daemon is
-in HTTP mode.
-
-## Notifications
-
-Configure Telegram to receive alerts on auth / streamer events:
-
-```bash
-schwab_cli notify setup --channel telegram
-schwab_cli notify test  --channel telegram
-```
-
-Details in [`doc/notify.md`](notify.md).
-
-## Code-update workflow
-
-```bash
-cd ~/src/schwab_cli && git pull
-uv tool install --reinstall --from . schwab_cli
-schwab_cli mcp restart
-```
-
-`mcp restart` tells the running server to shut down, then starts a
-fresh foreground process in the same terminal. Connected agents see
-~1-3s of downtime and re-subscribe on their next tool call.
-
-## What's next
-
-- **Streaming tools** (`stream_quote`, `stream_option_quote`): the
-  subscription manager and streamer module are in place; they need
-  an async bridge from the Schwab WebSocket to per-session MCP
-  progress notifications.
-- **Proactive browser auto-login** at the 1h refresh-token
-  threshold so long-running daemons rotate through 7-day cycles
-  without manual intervention.
-- **`reauth` tool** for agent-triggered re-authentication.
-- **`schwab_cli stream --mcp`** — connect to the daemon's
-  `stream_quote` tool instead of opening a separate streamer
-  connection.
-
-See [`docs/plan/mcp-streaming.md`](../docs/plan/mcp-streaming.md)
-for the full design and phase breakdown.
+- [`server`](server.md) — the daemon that hosts the MCP server
+  (`--enable-mcp`), plus install / status / log / logout / restart /
+  register-claude.
+- [`stream`](stream.md) — `schwab stream` auto-routes through this MCP
+  server's `stream_quote` tool when the daemon is reachable.
+- [`notify`](notify.md) — Telegram alerts for auth / streamer events.

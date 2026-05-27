@@ -1,27 +1,50 @@
-"""`server` command — long-lived auth-maintenance daemon + launchd install.
+"""`server` command — long-lived daemon + launchd install + diagnostics.
 
-Bare ``schwab server`` runs the maintenance loop (keeps the OAuth refresh
-token alive). Subcommands manage the macOS launchd LaunchAgent:
+``schwab server`` is the **only** daemon. Bare ``schwab server`` runs the
+maintenance loop (keeps the OAuth refresh token alive); ``--enable-mcp``
+ALSO runs the Streamable HTTP MCP server on top of it; ``--enable-rest``
+adds the REST PoC.
 
-* ``server install`` — write the plist + ``launchctl load``.
+Subcommands manage the macOS launchd LaunchAgent and talk to a running
+daemon's HTTP admin/health endpoints (exposed with ``--enable-mcp``):
+
+* ``server install`` — write the plist + ``launchctl load``; bakes the
+  ``--enable-mcp`` / ``--enable-rest`` / host / port / log-file flags
+  into the plist's ProgramArguments.
 * ``server uninstall`` — ``launchctl unload`` + remove the plist.
-* ``server status`` — report whether the job is loaded.
+* ``server status`` — launchd-label check AND a real ``GET /health``
+  probe against the daemon, with the ``/admin/status`` snapshot.
+* ``server log`` — read / tail the structured log file.
+* ``server logout`` — graceful shutdown via ``/admin/shutdown``.
+* ``server restart`` — kickstart the ``com.schwab-cli.server`` launchd
+  job.
+* ``server register-claude`` — register the server in
+  ``~/.claude/settings.json``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
+import httpx
 import typer
 
 from schwab_cli import config as config_module
+from schwab_cli.commands._daemon import (
+    DEFAULT_LOG_FILE,
+    attempt_startup_autologin as _attempt_startup_autologin,
+    resolve_log_file as _resolve_log_file,
+)
 from schwab_cli.server import maintenance
 from schwab_cli.server.launchd import (
     DEFAULT_PLIST_PATH,
@@ -30,6 +53,9 @@ from schwab_cli.server.launchd import (
     write_plist,
 )
 from schwab_cli.server.maintenance import DEFAULT_INTERVAL_S
+
+
+DEFAULT_MCP_URL = "http://127.0.0.1:7234"
 
 
 # ---- bare `server` runner --------------------------------------------
@@ -154,10 +180,6 @@ def _run_with_mcp(
     SIGINT/SIGTERM, so we install NO signal handlers here.
     """
     from schwab_cli.api.client import SchwabClient
-    from schwab_cli.commands.mcp import (
-        _attempt_startup_autologin,
-        _resolve_log_file,
-    )
     from schwab_cli.mcp_server.app import SchwabMcpServer
     from schwab_cli.mcp_server.logbook import LogBook
     from schwab_cli.session import load as load_session
@@ -334,10 +356,6 @@ def _run_with_rest(
     The REST app is UNAUTHENTICATED — it is a proof of the REST ->
     service path only (auth/allowlisting is a deliberate later step).
     """
-    from schwab_cli.commands.mcp import (
-        _attempt_startup_autologin,
-        _resolve_log_file,
-    )
     from schwab_cli.mcp_server.logbook import LogBook
     from schwab_cli.server.rest import build_rest_app
     from schwab_cli.session import load as load_session
@@ -490,9 +508,21 @@ def run_install(
     *,
     plist_path: str | None = None,
     log_file: str | None = None,
+    enable_mcp: bool = False,
+    enable_rest: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+    mcp_log_file: str | None = None,
     yes: bool = False,
 ) -> None:
-    """Write the LaunchAgent plist and ``launchctl load`` it."""
+    """Write the LaunchAgent plist and ``launchctl load`` it.
+
+    With no mode flags the plist runs the bare maintenance loop. The
+    ``enable_mcp`` / ``enable_rest`` / ``host`` / ``port`` /
+    ``mcp_log_file`` options are baked into the plist's
+    ProgramArguments so launchd starts e.g.
+    ``schwab server --enable-mcp --mcp-host 127.0.0.1 --mcp-port 7234``.
+    """
     binary = shutil.which("schwab") or shutil.which("schwab_cli")
     if not binary:
         typer.secho(
@@ -506,9 +536,18 @@ def run_install(
         Path(plist_path).expanduser() if plist_path else DEFAULT_PLIST_PATH
     )
 
+    modes = []
+    if enable_mcp:
+        modes.append("--enable-mcp")
+    if enable_rest:
+        modes.append("--enable-rest")
+
     typer.echo("Proposed LaunchAgent:")
     typer.echo(f"  Label:     {LABEL}")
     typer.echo(f"  Binary:    {binary}")
+    typer.echo(f"  Modes:     {' '.join(modes) if modes else 'bare maintenance loop'}")
+    if enable_mcp:
+        typer.echo(f"  MCP bind:  {host or '127.0.0.1'}:{port or 7234}")
     typer.echo(f"  Plist:     {target}")
     if log_file:
         typer.echo(f"  Log:       {log_file}")
@@ -518,7 +557,18 @@ def run_install(
             typer.echo("aborted")
             raise typer.Exit(code=0)
 
-    write_plist(ServerPlistSpec(binary_path=binary, log_file=log_file), target)
+    write_plist(
+        ServerPlistSpec(
+            binary_path=binary,
+            log_file=log_file,
+            enable_mcp=enable_mcp,
+            enable_rest=enable_rest,
+            host=host,
+            port=port,
+            mcp_log_file=mcp_log_file,
+        ),
+        target,
+    )
     result = subprocess.run(
         ["launchctl", "load", "-w", str(target)],
         capture_output=True, text=True,
@@ -570,14 +620,102 @@ def run_uninstall(
 # ---- server status ---------------------------------------------------
 
 
-def run_status() -> None:
-    """Report whether the launchd job is loaded via ``launchctl list``."""
-    result = subprocess.run(
+def _auth_headers(token: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _launchd_job_loaded(label: str) -> bool:
+    """Return True when ``launchctl list`` recognizes ``label``.
+
+    Covers both running and throttled-retry states — what we care about
+    is whether launchd owns the daemon's lifecycle, not whether it's
+    currently up. Returns False on non-Darwin / missing launchctl so the
+    helper is safe to call from tests.
+    """
+    try:
+        r = subprocess.run(
+            ["launchctl", "list", label],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def run_status(
+    *,
+    url: str | None = None,
+    port: int | None = None,
+    token: str | None = None,
+    as_json: bool = False,
+) -> None:
+    """Report server health: launchd-label check + a real ``/health`` probe.
+
+    Two checks, both reported:
+
+    1. **launchd** — is ``com.schwab-cli.server`` loaded (``launchctl
+       list``)?
+    2. **HTTP** — a real ``GET /health`` against the daemon's bound
+       address (default ``http://127.0.0.1:7234``; override with
+       ``--url`` or ``--port``). When ``--enable-mcp`` is running this
+       returns ``{"ok": true}``; the ``/admin/status`` snapshot is then
+       fetched and rendered too.
+    """
+    # 1. launchd label check.
+    list_result = subprocess.run(
         ["launchctl", "list"],
         capture_output=True, text=True,
     )
-    stdout = result.stdout or ""
-    loaded = result.returncode == 0 and LABEL in stdout
+    stdout = list_result.stdout or ""
+    loaded = list_result.returncode == 0 and LABEL in stdout
+
+    # 2. Real /health probe against the bound address.
+    base = (url or DEFAULT_MCP_URL).rstrip("/")
+    if port is not None and url is None:
+        base = f"http://127.0.0.1:{port}"
+    health_ok = False
+    health_err: str | None = None
+    snapshot: dict[str, Any] | None = None
+    try:
+        hr = httpx.get(
+            f"{base}/health",
+            headers=_auth_headers(token),
+            timeout=5.0,
+        )
+        health_ok = hr.status_code == 200
+        if not health_ok:
+            health_err = f"{hr.status_code}: {hr.text[:200]}"
+    except httpx.RequestError as e:
+        health_err = f"{type(e).__name__}"
+
+    # Pull the /admin/status snapshot when the daemon is reachable.
+    if health_ok:
+        try:
+            sr = httpx.get(
+                f"{base}/admin/status",
+                headers=_auth_headers(token),
+                timeout=5.0,
+            )
+            if sr.status_code == 200:
+                snapshot = sr.json()
+        except (httpx.RequestError, json.JSONDecodeError):
+            snapshot = None
+
+    if as_json:
+        typer.echo(json.dumps(
+            {
+                "launchd_label": LABEL,
+                "launchd_loaded": loaded,
+                "health_url": f"{base}/health",
+                "health_reachable": health_ok,
+                "health_error": health_err,
+                "status": snapshot,
+            },
+            indent=2, default=str,
+        ))
+        return
+
+    # launchd line.
     if loaded:
         typer.secho(
             f"{LABEL}: loaded (launchd is managing the server)",
@@ -589,3 +727,361 @@ def run_status() -> None:
             "Run `schwab server install` to register it.",
             fg=typer.colors.YELLOW,
         )
+
+    # /health line.
+    if health_ok:
+        typer.secho(
+            f"health: reachable at {base}/health",
+            fg=typer.colors.GREEN,
+        )
+        if snapshot is not None:
+            typer.echo(_format_status(snapshot))
+        else:
+            typer.secho(
+                "  (/admin/status unavailable — daemon may be running "
+                "without --enable-mcp)",
+                fg=typer.colors.YELLOW,
+            )
+    else:
+        typer.secho(
+            f"health: NOT reachable at {base}/health "
+            f"({health_err or 'unknown error'}). "
+            "Is the daemon running with --enable-mcp?",
+            fg=typer.colors.YELLOW,
+        )
+
+
+# ---- status formatting (shared with the snapshot render) -------------
+
+
+def _format_status(data: dict[str, Any]) -> str:
+    lines: list[str] = ["=== schwab_cli server ==="]
+    lines.append(f"PID:              {data.get('pid', '—')}")
+    lines.append(f"Uptime:           {_fmt_duration(data.get('uptime_sec'))}")
+    lines.append(f"Transport:        {data.get('transport', '—')}")
+    lines.append("")
+    auth = data.get("auth") or {}
+    lines.append("Auth:")
+    lines.append(f"  Access expires:  {auth.get('access_expires_at', '—')}")
+    lines.append(f"  Refresh expires: {auth.get('refresh_expires_at', '—')}")
+    lines.append("")
+    stream = data.get("streamer") or {}
+    lines.append("Schwab streamer:")
+    lines.append(f"  State:           {stream.get('state', '—')}")
+    lines.append(f"  Reconnects:      {stream.get('reconnects', 0)}")
+    lines.append("")
+    summary = data.get("subscription_summary") or {}
+    lines.append(f"Active sessions:  {summary.get('session_count', 0)}")
+    sessions = summary.get("sessions") or {}
+    for sid, sess in sessions.items():
+        lines.append(
+            f"  {sid}  subs: {', '.join(sess.get('symbols') or []) or '—'}  "
+            f"streams: {sess.get('progress_stream_count', 0)}"
+        )
+    lines.append("")
+    subs = summary.get("subscriptions") or []
+    lines.append(f"Subscriptions (refcounted): {len(subs)}")
+    for s in subs:
+        sessions_str = ", ".join(s.get("sessions") or [])
+        lines.append(
+            f"  {s.get('service', '?'):20} {s.get('symbol', '?'):10} "
+            f"x{s.get('refcount', 0)}   ({sessions_str})"
+        )
+    return "\n".join(lines)
+
+
+def _fmt_duration(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "—"
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    d, rem = divmod(s, 86400)
+    h, rem = divmod(rem, 3600)
+    m, sec = divmod(rem, 60)
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h or d:
+        parts.append(f"{h}h")
+    parts.append(f"{m}m {sec}s")
+    return " ".join(parts)
+
+
+# ---- server logout ---------------------------------------------------
+
+
+def run_logout(*, url: str | None = None, token: str | None = None) -> None:
+    """Gracefully shut down the running daemon via ``/admin/shutdown``."""
+    base = (url or DEFAULT_MCP_URL).rstrip("/")
+    try:
+        r = httpx.post(
+            f"{base}/admin/shutdown",
+            headers=_auth_headers(token),
+            timeout=5.0,
+        )
+    except httpx.RequestError as e:
+        typer.secho(
+            f"Could not reach server at {base}: {type(e).__name__}.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if r.status_code != 200:
+        typer.secho(f"{r.status_code}: {r.text}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo("shutdown signalled")
+
+
+# ---- server restart --------------------------------------------------
+
+
+def run_restart(
+    *,
+    url: str | None = None,
+    token: str | None = None,
+    host: str = "127.0.0.1",
+    port: int = 7234,
+) -> None:
+    """Bounce the daemon.
+
+    Two paths:
+
+    1. **launchd-managed.** When ``com.schwab-cli.server`` is loaded,
+       ``launchctl kickstart -k`` is the canonical bounce — it SIGTERMs
+       the existing PID and lets ``KeepAlive=true`` respawn under the
+       same job. Returns immediately; the terminal stays free.
+    2. **Manual foreground.** No launchd job loaded → fall back to
+       logout-via-admin + ``os.execvp`` a fresh bare ``schwab server``.
+
+    Any non-default ``--host``/``--port`` are incompatible with launchd
+    (the plist bakes the bound config); a mismatch surfaces as a warning.
+    """
+    if _launchd_job_loaded(LABEL):
+        if (host, port) != ("127.0.0.1", 7234):
+            typer.secho(
+                f"warning: --host/--port flags ({host}:{port}) are ignored "
+                f"in launchd mode; the plist's baked config wins. "
+                f"Re-run `schwab server install` to change the bound "
+                f"address.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        target = f"gui/{os.getuid()}/{LABEL}"
+        typer.echo(f"kickstarting launchd job: {target}")
+        result = subprocess.run(
+            ["launchctl", "kickstart", "-k", target],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            typer.secho(
+                f"launchctl kickstart failed: {err}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(
+            "server will respawn momentarily — `schwab server status` to "
+            "verify."
+        )
+        return
+
+    try:
+        run_logout(url=url, token=token)
+    except typer.Exit:
+        typer.secho(
+            "(no running server to stop, starting fresh)",
+            fg=typer.colors.YELLOW, err=True,
+        )
+    # Give the old server a moment to release the port.
+    time.sleep(1.5)
+    args = [sys.argv[0], "server"]
+    typer.echo(f"starting: {' '.join(args)}")
+    os.execvp(sys.argv[0], args)
+
+
+# ---- server log ------------------------------------------------------
+
+
+def run_log(
+    *,
+    follow: bool,
+    log_file: str | None,
+    session: str | None,
+    symbol: str | None,
+    level: str | None,
+    as_json: bool,
+    tail: int | None,
+) -> None:
+    """Reader / follower for the daemon's structured log file."""
+    path = Path(log_file).expanduser() if log_file else DEFAULT_LOG_FILE
+    if not path.exists():
+        typer.secho(
+            f"Log file not found: {path}. "
+            "Has the daemon run at least once?",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(code=0)
+
+    # Historical portion.
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if tail is not None and tail > 0:
+        lines = lines[-tail:]
+    for line in lines:
+        rendered = _render_log_line(
+            line, session=session, symbol=symbol, level=level, as_json=as_json,
+        )
+        if rendered is not None:
+            typer.echo(rendered)
+
+    if not follow:
+        return
+
+    # Follow mode — simple seek-to-end + sleep loop. Good enough without
+    # an inotify dependency.
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)  # end
+            while True:
+                chunk = f.readline()
+                if not chunk:
+                    time.sleep(0.25)
+                    continue
+                rendered = _render_log_line(
+                    chunk.rstrip("\n"),
+                    session=session, symbol=symbol, level=level,
+                    as_json=as_json,
+                )
+                if rendered is not None:
+                    typer.echo(rendered)
+    except KeyboardInterrupt:
+        return
+
+
+_LEVEL_ORDER = {"debug": 0, "info": 1, "warning": 2, "error": 3}
+
+
+def _render_log_line(
+    raw: str,
+    *,
+    session: str | None,
+    symbol: str | None,
+    level: str | None,
+    as_json: bool,
+) -> str | None:
+    """Apply filters; return the rendered line or None to skip."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        entry = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw if as_json else None
+
+    # Level filter (accept threshold and above).
+    if level is not None:
+        threshold = _LEVEL_ORDER.get(level.lower(), 0)
+        cur = _LEVEL_ORDER.get(str(entry.get("level", "info")).lower(), 1)
+        if cur < threshold:
+            return None
+
+    # Session filter.
+    if session is not None:
+        if entry.get("session") != session:
+            return None
+
+    # Symbol filter — matches `symbol` key or a list in `symbols`.
+    if symbol is not None:
+        syms = entry.get("symbols")
+        if isinstance(syms, list):
+            if symbol not in syms:
+                return None
+        elif entry.get("symbol") != symbol:
+            return None
+
+    if as_json:
+        return raw
+
+    # Pretty-print one-line format.
+    ts = entry.get("ts", "")[-12:-1] if isinstance(entry.get("ts"), str) else "?"
+    lvl = str(entry.get("level", "info")).upper()[:4]
+    event = entry.get("event", "?")
+    extras = {
+        k: v for k, v in entry.items()
+        if k not in {"ts", "level", "event"}
+    }
+    extra_str = " ".join(f"{k}={_short(v)}" for k, v in extras.items())
+    return f"{ts} {lvl:5} {event:24} {extra_str}"
+
+
+def _short(v: Any) -> str:
+    """Compact repr for log-line extras — avoid huge blobs."""
+    s = json.dumps(v, default=str)
+    if len(s) > 80:
+        return s[:77] + "..."
+    return s
+
+
+# ---- server register-claude ------------------------------------------
+
+
+def run_register_claude(
+    *, url: str, token: str | None,
+    settings: str | None, yes: bool, force: bool,
+) -> None:
+    """Merge a `schwab` MCP server entry into ~/.claude/settings.json.
+
+    Points Claude Code at the daemon's ``/mcp`` endpoint (run the daemon
+    with ``schwab server --enable-mcp``).
+    """
+    settings_path = (
+        Path(settings).expanduser() if settings
+        else Path.home() / ".claude" / "settings.json"
+    )
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                typer.secho(
+                    f"{settings_path} is not a JSON object; refusing to edit.",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
+        except json.JSONDecodeError as e:
+            typer.secho(
+                f"{settings_path} is not valid JSON: {e}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+    if "schwab" in mcp_servers and not force:
+        typer.secho(
+            f"schwab entry already exists in {settings_path}. "
+            "Pass --force to overwrite.",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    http_url = url.rstrip("/")
+    if not http_url.endswith("/mcp"):
+        http_url = http_url + "/mcp"
+    entry: dict[str, Any] = {"type": "http", "url": http_url}
+    if token:
+        entry["headers"] = {"Authorization": f"Bearer {token}"}
+
+    mcp_servers["schwab"] = entry
+
+    typer.echo("Proposed write:")
+    typer.echo(json.dumps({"mcpServers": {"schwab": entry}}, indent=2))
+    if not yes:
+        if not typer.confirm(f"Apply to {settings_path}?", default=True):
+            typer.echo("aborted")
+            raise typer.Exit(code=0)
+
+    tmp = settings_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, settings_path)
+    typer.echo(f"wrote {settings_path}")
