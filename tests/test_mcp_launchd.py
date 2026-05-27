@@ -30,7 +30,8 @@ def test_build_plist_program_arguments_shape():
     args = data["ProgramArguments"]
     assert args[0] == "/abs/schwab_cli"
     assert args[1] == "mcp"
-    assert "--sse" in args
+    # HTTP-only daemon: the plist no longer bakes the legacy --sse flag.
+    assert "--sse" not in args
     assert "--host" in args
     assert "--port" in args
     assert "7234" in args
@@ -95,4 +96,4 @@ def test_write_plist_overwrites_existing(tmp_path):
     # launcher itself contains our chosen binary.
     launcher = tmp_path / "Schwab MCP Server"
     assert data["ProgramArguments"][0] == str(launcher)
-    assert "/new mcp --sse" in launcher.read_text()
+    assert "/new mcp " in launcher.read_text()

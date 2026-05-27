@@ -1,7 +1,8 @@
 """`mcp` command — MCP server runner + admin subcommands.
 
-Bare ``schwab_cli mcp`` starts the daemon in stdio (default) or
-Streamable HTTP mode. Subcommands live under the ``mcp`` typer group:
+Bare ``schwab_cli mcp`` starts the daemon over Streamable HTTP (the
+only supported transport). Subcommands live under the ``mcp`` typer
+group:
 
 * ``mcp status`` — HTTP client for ``/admin/status``.
 * ``mcp log [-f]`` — read / tail the structured log file.
@@ -41,7 +42,6 @@ DEFAULT_SSE_URL = "http://127.0.0.1:7234"
 
 def run(
     *,
-    stdio: bool,
     host: str,
     port: int,
     log_file: str | None,
@@ -50,8 +50,8 @@ def run(
 ) -> None:
     """Entry point from :mod:`schwab_cli.cli` for the bare `mcp` call.
 
-    In stdio mode: runs until stdin EOF. In Streamable HTTP mode: runs
-    until SIGINT or the admin shutdown endpoint is called.
+    Runs the daemon over Streamable HTTP until SIGINT or the admin
+    shutdown endpoint is called.
 
     Startup sequence (before the server runs):
 
@@ -121,15 +121,12 @@ def run(
     logbook.info(
         "daemon.start",
         pid=os.getpid(),
-        transport="stdio" if stdio else "http",
-        bind=f"{host}:{port}" if not stdio else None,
+        transport="http",
+        bind=f"{host}:{port}",
         log_file=str(resolved_log_file) if resolved_log_file else None,
     )
     try:
-        if stdio:
-            asyncio.run(server.run_stdio())
-        else:
-            asyncio.run(server.run_http(host, port))
+        asyncio.run(server.run_http(host, port))
     except KeyboardInterrupt:
         logbook.info("daemon.stop", reason="SIGINT")
     except Exception as e:
@@ -315,7 +312,7 @@ def _launchd_job_loaded(label: str) -> bool:
 
 def run_restart(
     *, url: str | None, token: str | None,
-    stdio: bool, host: str, port: int,
+    host: str, port: int,
 ) -> None:
     """Bounce the Streamable HTTP daemon.
 
@@ -330,15 +327,14 @@ def run_restart(
        logout-via-admin + ``os.execvp``, the original behavior. The
        restarted daemon takes over the user's terminal.
 
-    The ``--stdio`` flag and any non-default ``--host``/``--port`` are
-    incompatible with launchd (the plist bakes in ``--sse 127.0.0.1:7234``
-    by default). When ``--stdio`` is set we always take the foreground
-    path; mismatched host/port surface as a warning so the user can
-    decide whether to ``mcp install-service`` to re-bake the plist.
+    Any non-default ``--host``/``--port`` are incompatible with launchd
+    (the plist bakes in ``127.0.0.1:7234`` by default); mismatched
+    host/port surface as a warning so the user can decide whether to
+    ``mcp install-service`` to re-bake the plist.
     """
     from schwab_cli.mcp_server.launchd import LABEL
 
-    if not stdio and _launchd_job_loaded(LABEL):
+    if _launchd_job_loaded(LABEL):
         if (host, port) != ("127.0.0.1", 7234):
             typer.secho(
                 f"warning: --host/--port flags ({host}:{port}) are ignored "
@@ -374,11 +370,7 @@ def run_restart(
         )
     # Give the old server a moment to release the port.
     time.sleep(1.5)
-    args = [sys.argv[0], "mcp"]
-    if stdio:
-        args.append("--stdio")
-    else:
-        args.extend(["--sse", "--host", host, "--port", str(port)])
+    args = [sys.argv[0], "mcp", "--host", host, "--port", str(port)]
     typer.echo(f"starting: {' '.join(args)}")
     os.execvp(sys.argv[0], args)
 
@@ -661,7 +653,7 @@ def run_uninstall_service(*, plist_path: str | None, yes: bool) -> None:
 
 
 def run_install(
-    *, stdio: bool, url: str, token: str | None,
+    *, url: str, token: str | None,
     settings: str | None, yes: bool, force: bool,
 ) -> None:
     """Merge a `schwab` MCP server entry into ~/.claude/settings.json."""
@@ -697,18 +689,12 @@ def run_install(
         )
         raise typer.Exit(code=1)
 
-    if stdio:
-        entry: dict[str, Any] = {
-            "command": "schwab",
-            "args": ["mcp", "--stdio"],
-        }
-    else:
-        http_url = url.rstrip("/")
-        if not http_url.endswith("/mcp"):
-            http_url = http_url + "/mcp"
-        entry = {"type": "http", "url": http_url}
-        if token:
-            entry["headers"] = {"Authorization": f"Bearer {token}"}
+    http_url = url.rstrip("/")
+    if not http_url.endswith("/mcp"):
+        http_url = http_url + "/mcp"
+    entry: dict[str, Any] = {"type": "http", "url": http_url}
+    if token:
+        entry["headers"] = {"Authorization": f"Bearer {token}"}
 
     mcp_servers["schwab"] = entry
 

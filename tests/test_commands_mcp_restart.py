@@ -7,7 +7,7 @@ Two paths exercised:
   NOT fall through to ``os.execvp``.
 * When the job isn't loaded (or we're not on Darwin), restart keeps
   the historical foreground behavior — logout via admin endpoint and
-  ``os.execvp`` a fresh ``mcp --sse`` invocation.
+  ``os.execvp`` a fresh ``mcp`` invocation (Streamable HTTP only).
 """
 from __future__ import annotations
 
@@ -84,32 +84,11 @@ def test_restart_falls_back_to_execvp_when_no_launchd_job():
     assert result.exit_code == 0, result.output
     assert mock_logout.called
     assert mock_execvp.called
-    # Reconstruct the spawn command from the execvp call.
+    # Reconstruct the spawn command from the execvp call. The daemon is
+    # HTTP-only now, so the fresh invocation carries no transport flag.
     _file, args = mock_execvp.call_args.args
-    assert "mcp" in args and "--sse" in args
-
-
-def test_restart_stdio_skips_launchd_even_when_job_loaded():
-    """``--stdio`` is incompatible with launchd's --sse plist; force
-    foreground regardless of job state."""
-    def fake_run(args, **kwargs):
-        # _launchd_job_loaded shouldn't even be called when --stdio is on,
-        # but if it is, claim the job is loaded — the test validates that
-        # we still fall through to execvp.
-        if args[:2] == ["launchctl", "list"]:
-            return _list_loaded()
-        raise AssertionError(f"unexpected subprocess call: {args}")
-
-    with patch("schwab_cli.commands.mcp.subprocess.run", side_effect=fake_run), \
-         patch("schwab_cli.commands.mcp.run_logout"), \
-         patch("schwab_cli.commands.mcp.time.sleep"), \
-         patch("os.execvp") as mock_execvp:
-        result = runner.invoke(app, ["mcp", "restart", "--stdio"])
-
-    assert result.exit_code == 0, result.output
-    assert mock_execvp.called
-    _file, args = mock_execvp.call_args.args
-    assert "--stdio" in args
+    assert "mcp" in args
+    assert "--stdio" not in args
     assert "--sse" not in args
 
 

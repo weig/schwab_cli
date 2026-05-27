@@ -25,18 +25,22 @@ def test_install_creates_new_settings_http(tmp_path):
     assert entry["url"].endswith("/mcp")
 
 
-def test_install_stdio_emits_spawn_form(tmp_path):
+def test_install_defaults_to_http_entry(tmp_path):
+    """The daemon is HTTP-only: with no flags, install registers the
+    Streamable HTTP entry pointing at the default /mcp endpoint — never
+    a stdio spawn form."""
     settings = tmp_path / "settings.json"
     result = runner.invoke(
         app,
-        ["mcp", "install", "--claude-settings", str(settings),
-         "--yes", "--stdio"],
+        ["mcp", "install", "--claude-settings", str(settings), "--yes"],
     )
     assert result.exit_code == 0, result.output
     data = json.loads(settings.read_text())
     entry = data["mcpServers"]["schwab"]
-    assert entry["command"] == "schwab_cli"
-    assert entry["args"] == ["mcp", "--stdio"]
+    assert entry["type"] == "http"
+    assert entry["url"] == "http://127.0.0.1:7234/mcp"
+    assert "command" not in entry
+    assert "args" not in entry
 
 
 def test_install_with_token_adds_authorization_header(tmp_path):

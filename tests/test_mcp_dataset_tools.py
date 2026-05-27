@@ -1,6 +1,6 @@
 """MCP read-only dataset tools.
 
-We exercise the dispatcher directly (no SSE / stdio transport),
+We exercise the dispatcher directly (no HTTP transport),
 asserting the tool returns properly-shaped JSON content.
 
 WAL isolation: SQLite's WAL journal mode allows readers to see a

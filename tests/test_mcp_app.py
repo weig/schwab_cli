@@ -1,7 +1,7 @@
 """Tests for the SchwabMcpServer tool handlers.
 
 Exercises the tool handlers directly by calling the private
-coroutine methods — avoids needing an actual stdio client for the
+coroutine methods — avoids needing an actual MCP client for the
 assertions while still walking the same code paths a live MCP
 client would trigger.
 """
