@@ -140,6 +140,38 @@ class SkewResult:
 
 
 @dataclass(frozen=True)
+class FundamentalsResult:
+    """Fundamentals view.
+
+    Wraps the raw Schwab quotes payload plus the (normalized) symbol list
+    the renderer keys off, so ``output.fundamentals.render_fundamentals``
+    can consume them verbatim and keep rendered HUMAN/JSON/MD output
+    byte-identical to the pre-migration command. ``symbols`` is the
+    normalized (``to_schwab_form``) list, preserving input order. Typed as
+    a read-only ``tuple`` / ``Mapping`` to signal callers must not mutate.
+    """
+
+    symbols: tuple[str, ...]
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class DividendsResult:
+    """Dividends view.
+
+    Wraps the raw Schwab quotes payload plus the (normalized) symbol list
+    the renderer keys off, so ``output.dividends.render_dividends`` can
+    consume them verbatim and keep rendered HUMAN/JSON/MD output
+    byte-identical to the pre-migration command. ``symbols`` is the
+    normalized (``to_schwab_form``) list, preserving input order. Typed as
+    a read-only ``tuple`` / ``Mapping`` to signal callers must not mutate.
+    """
+
+    symbols: tuple[str, ...]
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class HistoryResult:
     """OHLCV price-history view.
 
