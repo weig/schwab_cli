@@ -28,7 +28,7 @@ import pytest
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.history import NoCandles, get_history
+from schwab_cli.service.history import HistoryService, NoCandles
 from schwab_cli.service.types import HistoryResult
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
@@ -97,7 +97,7 @@ class _FakeCM:
 
 
 def _call(symbol="AAPL", *, frequency_type="daily", frequency=1, label="1day"):
-    return get_history(
+    return HistoryService().get_history(
         symbol,
         frequency_type=frequency_type,
         frequency=frequency,

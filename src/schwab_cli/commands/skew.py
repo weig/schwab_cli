@@ -27,10 +27,11 @@ import typer
 
 from schwab_cli.api.client import ApiError, SessionExpired
 from schwab_cli.commands._error import cli_errors
+from schwab_cli.commands._output import skew_cli_sink
 from schwab_cli.option_spec import OptionSpecError, parse_option_spec
 from schwab_cli.output.format import Format, FormatError, pick_format
 from schwab_cli.output.skew import render_cross, render_skew, render_term
-from schwab_cli.service import skew as service_skew
+from schwab_cli.service.skew import SkewService
 
 
 def _parse_yymmdd(s: str) -> date:
@@ -52,11 +53,10 @@ def _fail(message: str, *, code: int) -> None:
     raise typer.Exit(code=code)
 
 
-def _warn(message: str) -> None:
-    """Print a non-fatal partial-failure skip notice to stderr in yellow."""
-    typer.secho(message, fg=typer.colors.YELLOW, err=True)
-
-
+# Partial-failure skip notices (YELLOW / stderr) are emitted by the service
+# through the injected output sink (`skew_cli_sink()`), reproducing the old
+# `_warn` callback exactly.
+#
 # Auth errors (NotConfigured / NotAuthenticated) and the bare-message service
 # errors (NoSkewData with `str(e)`, DiscoveryError) are routed through the
 # @cli_errors decorator on `run`. Only the ApiError / SessionExpired cases that
@@ -75,7 +75,9 @@ def _run_l1(
 ) -> None:
     expiry = _parse_yymmdd(expiry_str)
     try:
-        result = service_skew.get_skew_l1(symbol, expiry, strikes=strikes)
+        result = SkewService(out=skew_cli_sink()).get_skew_l1(
+            symbol, expiry, strikes=strikes
+        )
     except (ApiError, SessionExpired) as e:
         msg = str(e) if str(e) else type(e).__name__
         _fail(
@@ -96,8 +98,8 @@ def _run_term(
     fmt: Format,
 ) -> None:
     expiries = [_parse_yymmdd(s) for s in expiry_strs]
-    result = service_skew.get_skew_term(
-        symbol, expiries, strikes=strikes, on_skip=_warn
+    result = SkewService(out=skew_cli_sink()).get_skew_term(
+        symbol, expiries, strikes=strikes
     )
     typer.echo(render_term(result.metrics, fmt=fmt, symbol=result.symbol), nl=False)
 
@@ -113,8 +115,8 @@ def _run_dtes(
     fmt: Format,
 ) -> None:
     try:
-        result = service_skew.get_skew_dtes(
-            symbol, target_dtes, strikes=strikes, on_skip=_warn
+        result = SkewService(out=skew_cli_sink()).get_skew_dtes(
+            symbol, target_dtes, strikes=strikes
         )
     except (ApiError, SessionExpired) as e:
         msg = str(e) if str(e) else type(e).__name__
@@ -133,8 +135,8 @@ def _run_cross(
     fmt: Format,
 ) -> None:
     expiry = _parse_yymmdd(expiry_str)
-    result = service_skew.get_skew_cross(
-        expiry, symbols, strikes=strikes, on_skip=_warn
+    result = SkewService(out=skew_cli_sink()).get_skew_cross(
+        expiry, symbols, strikes=strikes
     )
     typer.echo(render_cross(result.metrics, fmt=fmt), nl=False)
 
@@ -159,8 +161,8 @@ def _run_cross_dtes(
     # the up-front token-mint ApiError / SessionExpired all map to the canonical
     # `str(e) or type(e).__name__` + exit 1 — identical to @cli_errors — so they
     # are routed through the decorator on `run` rather than handled locally.
-    result = service_skew.get_skew_cross_dtes(
-        target_dte, symbols, strikes=strikes, on_skip=_warn
+    result = SkewService(out=skew_cli_sink()).get_skew_cross_dtes(
+        target_dte, symbols, strikes=strikes
     )
     typer.echo(render_cross(result.metrics, fmt=fmt), nl=False)
 

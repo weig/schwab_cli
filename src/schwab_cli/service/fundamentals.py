@@ -1,31 +1,26 @@
 from __future__ import annotations
 
-from schwab_cli import config as config_module
 from schwab_cli.api import quotes as api_quotes
-from schwab_cli.api.client import SchwabClient
-from schwab_cli.service import auth as service_auth
-from schwab_cli.service.auth import NotConfigured
+from schwab_cli.service.base import BaseService
 from schwab_cli.service.types import FundamentalsResult
 from schwab_cli.ticker import to_schwab_form
 
 
-def get_fundamentals(symbols: list[str]) -> FundamentalsResult:
-    """Owns auth + business logic for the ``fundamentals`` command.
+class FundamentalsService(BaseService):
+    """Layer-2 service for the ``fundamentals`` command."""
 
-    Loads config and session, builds the HTTP client, normalizes the
-    requested symbols to Schwab form (so the renderer's per-symbol lookup
-    matches the canonical keys Schwab returns), fetches the full quotes
-    payload, and returns it wrapped with the normalized symbol list the
-    renderer keys off — preserving input order.
-    """
-    cfg = config_module.load()
-    if cfg is None:
-        raise NotConfigured
+    def get_fundamentals(self, symbols: list[str]) -> FundamentalsResult:
+        """Owns auth + business logic for the ``fundamentals`` command.
 
-    session = service_auth.get_session(cfg)
-    normalized = [to_schwab_form(s) for s in symbols]
+        Loads config and session, builds the HTTP client, normalizes the
+        requested symbols to Schwab form (so the renderer's per-symbol lookup
+        matches the canonical keys Schwab returns), fetches the full quotes
+        payload, and returns it wrapped with the normalized symbol list the
+        renderer keys off — preserving input order.
+        """
+        normalized = [to_schwab_form(s) for s in symbols]
 
-    with SchwabClient(cfg, session) as client:
-        payload = api_quotes.get_quotes(client, normalized, fields="all")
+        with self._authed_client() as client:
+            payload = api_quotes.get_quotes(client, normalized, fields="all")
 
-    return FundamentalsResult(symbols=tuple(normalized), payload=payload)
+        return FundamentalsResult(symbols=tuple(normalized), payload=payload)

@@ -42,8 +42,8 @@ from schwab_cli.mcp_server.logbook import LogBook
 from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
 from schwab_cli.notify import Notifier
-from schwab_cli.service import chains as service_chains
-from schwab_cli.service import quotes as service_quotes
+from schwab_cli.service.chains import ChainsService
+from schwab_cli.service.quotes import QuoteService
 from schwab_cli.service.auth import (
     ApiError,
     NotAuthenticated,
@@ -285,7 +285,7 @@ class SchwabMcpServer:
             return [TextContent(type="text", text="symbols list is empty")]
         upcased = [s.upper() for s in symbols]
         try:
-            data = service_quotes.get_quote_payload(upcased)
+            data = QuoteService().get_quote_payload(upcased)
         except (NotConfigured, NotAuthenticated, ApiError, SessionExpired) as e:
             return [TextContent(
                 type="text", text=f"schwab error: {type(e).__name__}: {e}",
@@ -307,7 +307,7 @@ class SchwabMcpServer:
                 type="text", text=f"invalid expiry {expiry_str!r} (need YYYY-MM-DD)",
             )]
         try:
-            envelope = service_chains.get_chain_envelope(
+            envelope = ChainsService().get_chain_envelope(
                 symbol.upper(),
                 expiry=expiry,
                 strike_count=strike_count,

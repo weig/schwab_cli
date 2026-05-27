@@ -25,7 +25,7 @@ import pytest
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.greeks import ContractNotFound, get_greeks
+from schwab_cli.service.greeks import ContractNotFound, GreeksService
 from schwab_cli.service.types import GreeksResult
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
@@ -106,7 +106,7 @@ _PUT_CHAIN_RESP = {
 def test_get_greeks_picks_exact_strike_and_side(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=_CHAIN_RESP):
-        result = get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
+        result = GreeksService().get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
     assert isinstance(result, GreeksResult)
     c = result.envelope["contract"]
     assert c["optionSymbol"] == "NVDA  260501C00202500"
@@ -120,7 +120,7 @@ def test_get_greeks_picks_exact_strike_and_side(monkeypatch, tmp_path):
 def test_get_greeks_picks_put_side(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=_PUT_CHAIN_RESP):
-        result = get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="P")
+        result = GreeksService().get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="P")
     c = result.envelope["contract"]
     assert c["side"] == "P"
     assert c["optionSymbol"] == "NVDA  260501P00202500"
@@ -131,7 +131,7 @@ def test_get_greeks_strike_epsilon_tolerates_drift(monkeypatch, tmp_path):
     """A requested strike within 1e-4 of the contract's strike still matches."""
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=_CHAIN_RESP):
-        result = get_greeks(
+        result = GreeksService().get_greeks(
             "NVDA", strike=202.50001, expiry=date(2026, 5, 1), side="C"
         )
     assert result.envelope["contract"]["strike"] == 202.5
@@ -140,7 +140,7 @@ def test_get_greeks_strike_epsilon_tolerates_drift(monkeypatch, tmp_path):
 def test_get_greeks_envelope_shape(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=_CHAIN_RESP):
-        result = get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
+        result = GreeksService().get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
     env = result.envelope
     assert set(env.keys()) == {
         "underlyingSymbol",
@@ -171,7 +171,7 @@ def test_get_greeks_contract_not_found(monkeypatch, tmp_path):
     }
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=no_strike_resp):
         with pytest.raises(ContractNotFound) as exc:
-            get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
+            GreeksService().get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
     err = exc.value
     assert err.underlying == "NVDA"
     assert err.expiry == date(2026, 5, 1)
@@ -184,7 +184,7 @@ def test_get_greeks_contract_not_found_put_type(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=_CHAIN_RESP):
         with pytest.raises(ContractNotFound) as exc:
-            get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="P")
+            GreeksService().get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="P")
     assert exc.value.contract_type == "PUT"
 
 
@@ -193,7 +193,7 @@ def test_get_greeks_no_config_raises_not_configured(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     with pytest.raises(NotConfigured):
-        get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
+        GreeksService().get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
 
 
 def test_get_greeks_no_session_raises_not_authenticated(monkeypatch, tmp_path):
@@ -209,4 +209,4 @@ def test_get_greeks_no_session_raises_not_authenticated(monkeypatch, tmp_path):
         )
     )
     with pytest.raises(NotAuthenticated):
-        get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")
+        GreeksService().get_greeks("NVDA", strike=202.5, expiry=date(2026, 5, 1), side="C")

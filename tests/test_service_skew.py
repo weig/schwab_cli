@@ -27,17 +27,32 @@ from schwab_cli.service.auth import NotAuthenticated, NotConfigured
 from schwab_cli.service.skew import (
     DiscoveryError,
     NoSkewData,
-    get_skew_cross,
-    get_skew_cross_dtes,
-    get_skew_dtes,
-    get_skew_l1,
-    get_skew_term,
+    SkewService,
 )
 from schwab_cli.service.types import SkewResult
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
 
 _GET_CHAIN = "schwab_cli.api.chains.get_chain"
+
+
+class _RecordingSink:
+    """Capture the service's skip notices (the old `on_skip` callback).
+
+    ``SkewService`` emits partial-failure skip lines via ``self._out.info``;
+    the recording sink appends them so the assertions that used to inspect
+    the ``on_skip`` callback's captures keep working unchanged.
+    """
+
+    def __init__(self, sink_list: list[str]) -> None:
+        self._sink = sink_list
+
+    def info(self, message: str) -> None:
+        self._sink.append(message)
+
+    def progress(self, message: str) -> None:  # never used by skew
+        self._sink.append(message)
+
 
 
 def _prep(monkeypatch, tmp_path):
@@ -135,7 +150,7 @@ def test_l1_happy_path(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     iso, exp = _future(30)
     with patch(_GET_CHAIN, return_value=_chain_resp(iso)):
-        result = get_skew_l1("AMZN", exp, strikes=40)
+        result = SkewService().get_skew_l1("AMZN", exp, strikes=40)
     assert isinstance(result, SkewResult)
     assert result.symbol is None
     m = result.metrics
@@ -155,7 +170,7 @@ def test_l1_empty_envelope_raises_no_skew_data(monkeypatch, tmp_path):
     }
     with patch(_GET_CHAIN, return_value=empty):
         with pytest.raises(NoSkewData) as exc:
-            get_skew_l1("AMZN", exp, strikes=40)
+            SkewService().get_skew_l1("AMZN", exp, strikes=40)
     assert "No contracts for AMZN" in str(exc.value)
 
 
@@ -164,7 +179,7 @@ def test_l1_api_error_propagates(monkeypatch, tmp_path):
     iso, exp = _future(30)
     with patch(_GET_CHAIN, side_effect=ApiError("503")):
         with pytest.raises(ApiError):
-            get_skew_l1("AMZN", exp, strikes=40)
+            SkewService().get_skew_l1("AMZN", exp, strikes=40)
 
 
 def test_l1_no_config_raises(monkeypatch, tmp_path):
@@ -173,7 +188,7 @@ def test_l1_no_config_raises(monkeypatch, tmp_path):
     monkeypatch.delenv("SCHWAB_CLI_CONFIG", raising=False)
     _iso, exp = _future(30)
     with pytest.raises(NotConfigured):
-        get_skew_l1("AMZN", exp, strikes=40)
+        SkewService().get_skew_l1("AMZN", exp, strikes=40)
 
 
 def test_l1_no_session_raises(monkeypatch, tmp_path):
@@ -185,7 +200,7 @@ def test_l1_no_session_raises(monkeypatch, tmp_path):
     )
     _iso, exp = _future(30)
     with pytest.raises(NotAuthenticated):
-        get_skew_l1("AMZN", exp, strikes=40)
+        SkewService().get_skew_l1("AMZN", exp, strikes=40)
 
 
 # ---- L2 --term ---------------------------------------------------------
@@ -201,7 +216,7 @@ def test_term_happy_path(monkeypatch, tmp_path):
         return _chain_resp(iso1, dte=10) if fd == iso1 else _chain_resp(iso2, dte=40)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_term("AMZN", [e1, e2], strikes=40)
+        result = SkewService().get_skew_term("AMZN", [e1, e2], strikes=40)
     assert result.symbol == "AMZN"
     assert isinstance(result.metrics, list)
     assert [m["dte"] for m in result.metrics] == [10, 40]
@@ -221,7 +236,9 @@ def test_term_partial_failure_continues(monkeypatch, tmp_path):
         return _chain_resp(iso1, dte=10)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_term("AMZN", [e1, e2], strikes=40, on_skip=skips.append)
+        result = SkewService(out=_RecordingSink(skips)).get_skew_term(
+            "AMZN", [e1, e2], strikes=40
+        )
     assert len(result.metrics) == 1
     assert len(skips) == 1
     assert "skip AMZN" in skips[0]
@@ -233,7 +250,7 @@ def test_term_all_fail_raises_no_skew_data(monkeypatch, tmp_path):
     _iso2, e2 = _future(40)
     with patch(_GET_CHAIN, side_effect=ApiError("down")):
         with pytest.raises(NoSkewData) as exc:
-            get_skew_term("AMZN", [e1, e2], strikes=40)
+            SkewService().get_skew_term("AMZN", [e1, e2], strikes=40)
     assert "No usable chains for AMZN across 2 expiries" in str(exc.value)
 
 
@@ -251,7 +268,7 @@ def test_term_session_expired_skipped(monkeypatch, tmp_path):
         return _chain_resp(iso1, dte=10)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_term("AMZN", [e1, e2], strikes=40)
+        result = SkewService().get_skew_term("AMZN", [e1, e2], strikes=40)
     assert len(result.metrics) == 1
 
 
@@ -261,7 +278,7 @@ def test_term_no_config_raises(monkeypatch, tmp_path):
     monkeypatch.delenv("SCHWAB_CLI_CONFIG", raising=False)
     _iso, exp = _future(30)
     with pytest.raises(NotConfigured):
-        get_skew_term("AMZN", [exp], strikes=40)
+        SkewService().get_skew_term("AMZN", [exp], strikes=40)
 
 
 # ---- L2 --dtes ---------------------------------------------------------
@@ -281,7 +298,7 @@ def test_dtes_happy_path(monkeypatch, tmp_path):
         return _chain_resp(iso10, dte=10) if fd == iso10 else _chain_resp(iso40, dte=40)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_dtes("AMZN", [10, 40], strikes=40)
+        result = SkewService().get_skew_dtes("AMZN", [10, 40], strikes=40)
     assert result.symbol == "AMZN"
     assert [m["dte"] for m in result.metrics] == [10, 40]
 
@@ -290,7 +307,7 @@ def test_dtes_no_expiries_raises(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(_GET_CHAIN, return_value=_disc_resp([])):
         with pytest.raises(NoSkewData) as exc:
-            get_skew_dtes("AMZN", [30], strikes=40)
+            SkewService().get_skew_dtes("AMZN", [30], strikes=40)
     assert "No expiries discoverable for AMZN" in str(exc.value)
 
 
@@ -298,7 +315,7 @@ def test_dtes_discovery_api_error_propagates(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(_GET_CHAIN, side_effect=ApiError("503")):
         with pytest.raises(ApiError):
-            get_skew_dtes("AMZN", [30], strikes=40)
+            SkewService().get_skew_dtes("AMZN", [30], strikes=40)
 
 
 def test_dtes_partial_failure_continues(monkeypatch, tmp_path):
@@ -318,7 +335,9 @@ def test_dtes_partial_failure_continues(monkeypatch, tmp_path):
         return _chain_resp(iso10, dte=10)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_dtes("AMZN", [10, 40], strikes=40, on_skip=skips.append)
+        result = SkewService(out=_RecordingSink(skips)).get_skew_dtes(
+            "AMZN", [10, 40], strikes=40
+        )
     assert len(result.metrics) == 1
     assert len(skips) == 1
 
@@ -336,7 +355,7 @@ def test_dtes_all_fetch_fail_raises(monkeypatch, tmp_path):
 
     with patch(_GET_CHAIN, side_effect=_side):
         with pytest.raises(NoSkewData) as exc:
-            get_skew_dtes("AMZN", [10], strikes=40)
+            SkewService().get_skew_dtes("AMZN", [10], strikes=40)
     assert "No usable chains for AMZN at target DTEs" in str(exc.value)
 
 
@@ -351,7 +370,7 @@ def test_cross_happy_path(monkeypatch, tmp_path):
         return _chain_resp(iso, symbol=symbol)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_cross(exp, ["AAPL", "NVDA"], strikes=40)
+        result = SkewService().get_skew_cross(exp, ["AAPL", "NVDA"], strikes=40)
     assert result.symbol is None
     assert isinstance(result.metrics, list)
     assert len(result.metrics) == 2
@@ -369,8 +388,8 @@ def test_cross_partial_failure_continues(monkeypatch, tmp_path):
         return _chain_resp(iso, symbol=symbol)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_cross(
-            exp, ["AAPL", "NVDA"], strikes=40, on_skip=skips.append
+        result = SkewService(out=_RecordingSink(skips)).get_skew_cross(
+            exp, ["AAPL", "NVDA"], strikes=40
         )
     assert len(result.metrics) == 1
     assert result.metrics[0]["symbol"] == "AAPL"
@@ -382,7 +401,7 @@ def test_cross_all_fail_raises(monkeypatch, tmp_path):
     _iso, exp = _future(30)
     with patch(_GET_CHAIN, side_effect=ApiError("down")):
         with pytest.raises(NoSkewData) as exc:
-            get_skew_cross(exp, ["AAPL", "NVDA"], strikes=40)
+            SkewService().get_skew_cross(exp, ["AAPL", "NVDA"], strikes=40)
     assert "No usable chains across 2 symbols" in str(exc.value)
 
 
@@ -400,7 +419,7 @@ def test_cross_dtes_happy_path(monkeypatch, tmp_path):
         return _chain_resp(iso30, symbol=symbol)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_cross_dtes(30, ["AAPL", "NVDA"], strikes=40)
+        result = SkewService().get_skew_cross_dtes(30, ["AAPL", "NVDA"], strikes=40)
     assert len(result.metrics) == 2
     assert {m["symbol"] for m in result.metrics} == {"AAPL", "NVDA"}
 
@@ -420,8 +439,8 @@ def test_cross_dtes_discovery_empty_skipped(monkeypatch, tmp_path):
         return _chain_resp(iso30, symbol=symbol)
 
     with patch(_GET_CHAIN, side_effect=_side):
-        result = get_skew_cross_dtes(
-            30, ["AAPL", "NVDA"], strikes=40, on_skip=skips.append
+        result = SkewService(out=_RecordingSink(skips)).get_skew_cross_dtes(
+            30, ["AAPL", "NVDA"], strikes=40
         )
     assert len(result.metrics) == 1
     assert result.metrics[0]["symbol"] == "AAPL"
@@ -432,7 +451,7 @@ def test_cross_dtes_all_fail_raises(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(_GET_CHAIN, return_value=_disc_resp([])):
         with pytest.raises(NoSkewData) as exc:
-            get_skew_cross_dtes(30, ["AAPL", "NVDA"], strikes=40)
+            SkewService().get_skew_cross_dtes(30, ["AAPL", "NVDA"], strikes=40)
     assert "No usable chains across 2 symbols at ~30 DTE" in str(exc.value)
 
 
@@ -442,5 +461,5 @@ def test_cross_dtes_discovery_error_names_symbol(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(_GET_CHAIN, side_effect=ApiError("500 boom")):
         with pytest.raises(DiscoveryError) as exc:
-            get_skew_cross_dtes(30, ["NVDA", "AAPL"], strikes=40)
+            SkewService().get_skew_cross_dtes(30, ["NVDA", "AAPL"], strikes=40)
     assert str(exc.value) == "chain discovery failed for NVDA: 500 boom"

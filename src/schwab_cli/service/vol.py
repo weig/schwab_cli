@@ -10,6 +10,12 @@ Layer-1 is reached via MODULE ATTRIBUTES (``api_chains.get_chain`` /
 ``api_history.get_history``) and storage via ``vol_history.<fn>`` — these
 are the stable test seams. ``compute_iv_rank_and_percentile`` stays PUBLIC
 (no underscore): it has external callers (mcp_server, tests).
+
+Per-day backfill progress + the one-line backfill notice are emitted via
+the injected :class:`~schwab_cli.service.base.OutputSink`
+(``self._out.progress`` / ``self._out.info``); the CLI wires a sink that
+reproduces the old stderr/stdout text + colors, MCP / REST use the no-op
+:class:`~schwab_cli.service.base.NullSink`.
 """
 
 from __future__ import annotations
@@ -19,7 +25,6 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from schwab_cli import config as config_module
 from schwab_cli.analytics.bs import implied_vol
 from schwab_cli.analytics.vol import (
     aggregate_pc,
@@ -36,8 +41,7 @@ from schwab_cli.api.chains import flatten_chain as _flatten_chain
 from schwab_cli.api.client import SchwabClient
 from schwab_cli.history_spec import parse_range
 from schwab_cli.service import ServiceError
-from schwab_cli.service import auth as service_auth
-from schwab_cli.service.auth import NotConfigured
+from schwab_cli.service.base import BaseService
 from schwab_cli.service.types import VolResult
 from schwab_cli.storage import vol_history
 from schwab_cli.storage.vol_history import SOURCE_OBSERVED, SOURCE_SYNTHETIC
@@ -46,7 +50,7 @@ from schwab_cli.ticker import Ticker
 __all__ = [
     "NoVolData",
     "VolStorageError",
-    "get_vol",
+    "VolService",
     "compute_iv_rank_and_percentile",
 ]
 
@@ -87,234 +91,234 @@ class VolStorageError(ServiceError):
 # ---- main entry --------------------------------------------------------
 
 
-def get_vol(
-    symbol: str,
-    *,
-    hv_window: int = 30,
-    hv_lookback: int = 252,
-    ivp_lookback: int = 252,
-    no_record: bool = False,
-    snapshot_only: bool = False,
-    progress=None,
-    on_backfill_notice=None,
-) -> VolResult | None:
-    """Owns auth + the full ``vol`` orchestration.
+class VolService(BaseService):
+    """Layer-2 service for the ``vol`` command."""
 
-    Loads config and session, opens one client, fetches the chain + price
-    history, computes IV/HV/HVP/IVP/IVR, optionally records today's
-    snapshot and runs the first-run synthetic backfill, then either returns
-    a :class:`VolResult` (the render envelope) or ``None`` for
-    ``snapshot_only`` (the command emits nothing, exit 0).
+    def get_vol(
+        self,
+        symbol: str,
+        *,
+        hv_window: int = 30,
+        hv_lookback: int = 252,
+        ivp_lookback: int = 252,
+        no_record: bool = False,
+        snapshot_only: bool = False,
+    ) -> VolResult | None:
+        """Owns auth + the full ``vol`` orchestration.
 
-    ``progress`` is an optional per-day backfill progress callable (human
-    mode only); ``on_backfill_notice`` is an optional callable invoked with
-    the number of synthetic rows written so the command can print the
-    one-line stderr notice. Both default to ``None`` (silent), matching the
-    JSON / MD / snapshot-only output modes.
+        Loads config and session, opens one client, fetches the chain + price
+        history, computes IV/HV/HVP/IVP/IVR, optionally records today's
+        snapshot and runs the first-run synthetic backfill, then either returns
+        a :class:`VolResult` (the render envelope) or ``None`` for
+        ``snapshot_only`` (the command emits nothing, exit 0).
 
-    Raises :class:`schwab_cli.service.auth.NotConfigured` when no config is
-    on disk, the auth exceptions from :mod:`schwab_cli.service.auth` when the
-    session is missing/expired, :class:`NoVolData` when the chain has no
-    spot, and :class:`VolStorageError` when ``snapshot_only`` accumulation
-    hit a SQLite error. ``(ApiError, SessionExpired)`` from the API calls
-    propagate unchanged.
-    """
-    cfg = config_module.load()
-    if cfg is None:
-        raise NotConfigured
+        Per-day backfill progress lines stream via ``self._out.progress`` and
+        the one-line backfill notice via ``self._out.info``. The CLI injects a
+        sink that reproduces the old stdout (progress) / stderr (notice) text +
+        CYAN colors in human mode and a no-op sink otherwise, so JSON / MD /
+        snapshot-only output stays clean.
 
-    session = service_auth.get_session(cfg)
+        Raises :class:`schwab_cli.service.auth.NotConfigured` when no config is
+        on disk, the auth exceptions from :mod:`schwab_cli.service.auth` when the
+        session is missing/expired, :class:`NoVolData` when the chain has no
+        spot, and :class:`VolStorageError` when ``snapshot_only`` accumulation
+        hit a SQLite error. ``(ApiError, SessionExpired)`` from the API calls
+        propagate unchanged.
+        """
+        under = symbol
 
-    under = symbol
+        with self._authed_client() as client:
+            # Call 1 — chain (wide strikes, ~1y of expirations) for IV + P/C.
+            today = date.today()
+            # Expiry window goes out ~1.5 years so the backfill can find a
+            # long-dated LEAPS with real trading history without a second
+            # /chains call.
+            chain_raw = api_chains.get_chain(
+                client,
+                under,
+                contract_type="ALL",
+                strike_count=60,
+                from_date=today,
+                to_date=today + timedelta(days=540),
+            )
 
-    with SchwabClient(cfg, session) as client:
-        # Call 1 — chain (wide strikes, ~1y of expirations) for IV + P/C.
-        today = date.today()
-        # Expiry window goes out ~1.5 years so the backfill can find a
-        # long-dated LEAPS with real trading history without a second
-        # /chains call.
-        chain_raw = api_chains.get_chain(
-            client,
-            under,
-            contract_type="ALL",
-            strike_count=60,
-            from_date=today,
-            to_date=today + timedelta(days=540),
+            underlying = (chain_raw or {}).get("underlying") or {}
+            spot = underlying.get("last")
+            if spot is None:
+                raise NoVolData(f"No spot price in chain response for {under}.")
+
+            expiries, flat_contracts = _flatten_chain(chain_raw)
+
+            atm = pick_atm_contract(expiries, spot)
+            pc = aggregate_pc(flat_contracts)
+
+            # IVP is computed against a long-dated reference contract whose price
+            # history can be backfilled across a full year. Mixing that series
+            # with today's near-term IV gives nonsense percentiles (near-term is
+            # structurally lower than LEAPS). We pick the LEAPS now so we can
+            # surface its current IV next to the near-term one and record *that*
+            # value as today's snapshot — keeping display, storage, and
+            # percentile all term-consistent.
+            ivp_ref = _pick_backfill_contract(expiries, atm["strike"]) if atm else None
+
+            # Call 2 — 1-year daily history for HV + HVP.
+            start, end = parse_range(f"-{hv_lookback + hv_window + 20}d..now")
+            history_raw = api_history.get_history(
+                client,
+                under,
+                frequency_type="daily",
+                frequency=1,
+                start=start,
+                end=end,
+            )
+
+            closes = [
+                c["close"] for c in (history_raw.get("candles") or [])
+                if isinstance(c.get("close"), (int, float))
+            ]
+            hv_today = realized_vol(closes, window=hv_window)
+            hv_series = rolling_realized_vol(closes, window=hv_window)
+            if hv_series and len(hv_series) > hv_lookback:
+                hv_series = hv_series[-hv_lookback:]
+            hvp_value = (
+                percentile_rank(hv_series, hv_today)
+                if hv_today is not None and hv_series
+                else None
+            )
+
+            # IVP: record today's ATM IV, then rank against the accumulated series.
+            # A storage failure is surfaced to stderr but never blocks the main
+            # render — at worst IVP falls back to "insufficient history" next run.
+            #
+            # First-run-per-symbol also attempts a BS backfill so IVP can be
+            # meaningful immediately. The backfill costs one extra history call
+            # on the current ATM contract; underlying history is already in hand
+            # from the HV calculation.
+            ivp_series_tagged: list[tuple[float, str]] = []
+            storage_error: str | None = None
+            ivr_ivp: dict = {
+                "ivr": None, "ivp": None, "n_days": 0,
+                "source": "insufficient", "backfilled": False, "low_history": True,
+            }
+            # What gets recorded as "today's observation" must match the reference
+            # contract the backfill uses; otherwise the IVP series mixes tenors.
+            snapshot_contract = ivp_ref if (ivp_ref and ivp_ref.get("iv") is not None) else atm
+            # Compute the 30-day constant-maturity ATM IV from today's chain for
+            # the tier-1 IVR/IVP path.
+            atm_curve = pick_atm_curve(expiries, spot)
+            interp_30d = interp_iv_in_variance(atm_curve, 30)
+            try:
+                with vol_history.connect() as conn:
+                    if (
+                        not no_record
+                        and snapshot_contract
+                        and snapshot_contract.get("iv") is not None
+                    ):
+                        vol_history.record_snapshot(
+                            conn,
+                            symbol=under,
+                            spot=spot,
+                            atm_iv=snapshot_contract["iv"],
+                            atm_strike=snapshot_contract["strike"],
+                            atm_expiry=snapshot_contract["expiry"],
+                            atm_dte=snapshot_contract["dte"],
+                            source=SOURCE_OBSERVED,
+                        )
+                    # Auto-backfill: populate synthetic history once per symbol.
+                    # Trigger when no synthetics exist yet AND the user hasn't
+                    # accumulated enough real observations to support a
+                    # percentile on their own. This works both for brand-new
+                    # symbols and for users who have a handful of legacy
+                    # observed rows from pre-backfill runs.
+                    counts = vol_history.count_by_source(conn, symbol=under)
+                    if (
+                        not no_record
+                        and atm
+                        and atm.get("iv") is not None
+                        and counts[SOURCE_SYNTHETIC] == 0
+                        and counts[SOURCE_OBSERVED] < _IVP_MIN_SAMPLE
+                    ):
+                        n_synth = _backfill_synthetic_iv(
+                            conn,
+                            client=client,
+                            symbol=under,
+                            atm=atm,
+                            expiries=expiries,
+                            underlying_closes=closes,
+                            underlying_candles=history_raw.get("candles") or [],
+                            progress=self._out.progress,
+                        )
+                        # Only mention the backfill to human readers — the sink
+                        # is a no-op in JSON/MD / --snapshot-only modes, so the
+                        # one-line notice never fights with piping into
+                        # `jq` / `sed` etc.
+                        if n_synth:
+                            self._out.info(
+                                f"vol: backfilled {n_synth} synthetic IV days "
+                                f"for {under} from option + underlying history."
+                            )
+                    ivp_series_tagged = vol_history.read_recent_per_day_with_source(
+                        conn, symbol=under, lookback_days=ivp_lookback
+                    )
+                    # 3-tier IVR/IVP: prefer atm_iv_30d series; fall back to
+                    # legacy atm_iv; tier-3 delegates backfill to the same
+                    # function used above (no-op if already ran this invocation).
+                    ivr_ivp = compute_iv_rank_and_percentile(
+                        conn,
+                        symbol=under,
+                        today_iv_30d=interp_30d,
+                        today_atm_iv=atm["iv"] if atm and atm.get("iv") is not None else None,
+                        lookback=ivp_lookback,
+                        backfill_callable=None,  # backfill already handled above
+                    )
+            except sqlite3.Error as e:
+                storage_error = str(e)
+
+        ivp = _compute_ivp_state(
+            series_tagged=ivp_series_tagged,
+            today_iv=(
+                snapshot_contract["iv"]
+                if snapshot_contract and snapshot_contract.get("iv") is not None
+                else None
+            ),
+            lookback=ivp_lookback,
         )
 
-        underlying = (chain_raw or {}).get("underlying") or {}
-        spot = underlying.get("last")
-        if spot is None:
-            raise NoVolData(f"No spot price in chain response for {under}.")
+        if snapshot_only:
+            # Cron-friendly mode: accumulate silently, don't render.
+            if storage_error:
+                raise VolStorageError(f"vol storage error: {storage_error}")
+            return None
 
-        expiries, flat_contracts = _flatten_chain(chain_raw)
-
-        atm = pick_atm_contract(expiries, spot)
-        pc = aggregate_pc(flat_contracts)
-
-        # IVP is computed against a long-dated reference contract whose price
-        # history can be backfilled across a full year. Mixing that series
-        # with today's near-term IV gives nonsense percentiles (near-term is
-        # structurally lower than LEAPS). We pick the LEAPS now so we can
-        # surface its current IV next to the near-term one and record *that*
-        # value as today's snapshot — keeping display, storage, and
-        # percentile all term-consistent.
-        ivp_ref = _pick_backfill_contract(expiries, atm["strike"]) if atm else None
-
-        # Call 2 — 1-year daily history for HV + HVP.
-        start, end = parse_range(f"-{hv_lookback + hv_window + 20}d..now")
-        history_raw = api_history.get_history(
-            client,
-            under,
-            frequency_type="daily",
-            frequency=1,
-            start=start,
-            end=end,
-        )
-
-        closes = [
-            c["close"] for c in (history_raw.get("candles") or [])
-            if isinstance(c.get("close"), (int, float))
-        ]
-        hv_today = realized_vol(closes, window=hv_window)
-        hv_series = rolling_realized_vol(closes, window=hv_window)
-        if hv_series and len(hv_series) > hv_lookback:
-            hv_series = hv_series[-hv_lookback:]
-        hvp_value = (
-            percentile_rank(hv_series, hv_today)
-            if hv_today is not None and hv_series
-            else None
-        )
-
-        # IVP: record today's ATM IV, then rank against the accumulated series.
-        # A storage failure is surfaced to stderr but never blocks the main
-        # render — at worst IVP falls back to "insufficient history" next run.
-        #
-        # First-run-per-symbol also attempts a BS backfill so IVP can be
-        # meaningful immediately. The backfill costs one extra history call
-        # on the current ATM contract; underlying history is already in hand
-        # from the HV calculation.
-        ivp_series_tagged: list[tuple[float, str]] = []
-        storage_error: str | None = None
-        ivr_ivp: dict = {
-            "ivr": None, "ivp": None, "n_days": 0,
-            "source": "insufficient", "backfilled": False, "low_history": True,
+        envelope = {
+            "symbol": under,
+            "spot": spot,
+            "iv": {
+                "value": atm["iv"] if atm else None,
+                "expiry": atm["expiry"] if atm else None,
+                "dte": atm["dte"] if atm else None,
+                "strike": atm["strike"] if atm else None,
+            },
+            # Long-dated IV the IVP percentile is actually computed against.
+            # Surfaced here so users can see why IVP sits where it does.
+            "iv_ref": {
+                "value": ivp_ref["iv"] if ivp_ref and ivp_ref.get("iv") is not None else None,
+                "expiry": ivp_ref["expiry"] if ivp_ref else None,
+                "dte": ivp_ref["dte"] if ivp_ref else None,
+                "strike": ivp_ref["strike"] if ivp_ref else None,
+            } if ivp_ref else None,
+            "hv": {"window": hv_window, "value": hv_today},
+            "hvp": {
+                "lookback": hv_lookback,
+                "value": hvp_value,
+                "sample_size": len(hv_series),
+            },
+            "pc": pc,
+            "ivp": ivp,
+            "ivr_ivp": ivr_ivp,
         }
-        # What gets recorded as "today's observation" must match the reference
-        # contract the backfill uses; otherwise the IVP series mixes tenors.
-        snapshot_contract = ivp_ref if (ivp_ref and ivp_ref.get("iv") is not None) else atm
-        # Compute the 30-day constant-maturity ATM IV from today's chain for
-        # the tier-1 IVR/IVP path.
-        atm_curve = pick_atm_curve(expiries, spot)
-        interp_30d = interp_iv_in_variance(atm_curve, 30)
-        try:
-            with vol_history.connect() as conn:
-                if (
-                    not no_record
-                    and snapshot_contract
-                    and snapshot_contract.get("iv") is not None
-                ):
-                    vol_history.record_snapshot(
-                        conn,
-                        symbol=under,
-                        spot=spot,
-                        atm_iv=snapshot_contract["iv"],
-                        atm_strike=snapshot_contract["strike"],
-                        atm_expiry=snapshot_contract["expiry"],
-                        atm_dte=snapshot_contract["dte"],
-                        source=SOURCE_OBSERVED,
-                    )
-                # Auto-backfill: populate synthetic history once per symbol.
-                # Trigger when no synthetics exist yet AND the user hasn't
-                # accumulated enough real observations to support a
-                # percentile on their own. This works both for brand-new
-                # symbols and for users who have a handful of legacy
-                # observed rows from pre-backfill runs.
-                counts = vol_history.count_by_source(conn, symbol=under)
-                if (
-                    not no_record
-                    and atm
-                    and atm.get("iv") is not None
-                    and counts[SOURCE_SYNTHETIC] == 0
-                    and counts[SOURCE_OBSERVED] < _IVP_MIN_SAMPLE
-                ):
-                    n_synth = _backfill_synthetic_iv(
-                        conn,
-                        client=client,
-                        symbol=under,
-                        atm=atm,
-                        expiries=expiries,
-                        underlying_closes=closes,
-                        underlying_candles=history_raw.get("candles") or [],
-                        progress=progress,
-                    )
-                    # Only mention the backfill to human readers — in JSON/MD
-                    # modes or --snapshot-only the extra stderr line would
-                    # fight with piping into `jq` / `sed` etc.
-                    if n_synth and on_backfill_notice is not None:
-                        on_backfill_notice(n_synth)
-                ivp_series_tagged = vol_history.read_recent_per_day_with_source(
-                    conn, symbol=under, lookback_days=ivp_lookback
-                )
-                # 3-tier IVR/IVP: prefer atm_iv_30d series; fall back to
-                # legacy atm_iv; tier-3 delegates backfill to the same
-                # function used above (no-op if already ran this invocation).
-                ivr_ivp = compute_iv_rank_and_percentile(
-                    conn,
-                    symbol=under,
-                    today_iv_30d=interp_30d,
-                    today_atm_iv=atm["iv"] if atm and atm.get("iv") is not None else None,
-                    lookback=ivp_lookback,
-                    backfill_callable=None,  # backfill already handled above
-                )
-        except sqlite3.Error as e:
-            storage_error = str(e)
 
-    ivp = _compute_ivp_state(
-        series_tagged=ivp_series_tagged,
-        today_iv=(
-            snapshot_contract["iv"]
-            if snapshot_contract and snapshot_contract.get("iv") is not None
-            else None
-        ),
-        lookback=ivp_lookback,
-    )
-
-    if snapshot_only:
-        # Cron-friendly mode: accumulate silently, don't render.
-        if storage_error:
-            raise VolStorageError(f"vol storage error: {storage_error}")
-        return None
-
-    envelope = {
-        "symbol": under,
-        "spot": spot,
-        "iv": {
-            "value": atm["iv"] if atm else None,
-            "expiry": atm["expiry"] if atm else None,
-            "dte": atm["dte"] if atm else None,
-            "strike": atm["strike"] if atm else None,
-        },
-        # Long-dated IV the IVP percentile is actually computed against.
-        # Surfaced here so users can see why IVP sits where it does.
-        "iv_ref": {
-            "value": ivp_ref["iv"] if ivp_ref and ivp_ref.get("iv") is not None else None,
-            "expiry": ivp_ref["expiry"] if ivp_ref else None,
-            "dte": ivp_ref["dte"] if ivp_ref else None,
-            "strike": ivp_ref["strike"] if ivp_ref else None,
-        } if ivp_ref else None,
-        "hv": {"window": hv_window, "value": hv_today},
-        "hvp": {
-            "lookback": hv_lookback,
-            "value": hvp_value,
-            "sample_size": len(hv_series),
-        },
-        "pc": pc,
-        "ivp": ivp,
-        "ivr_ivp": ivr_ivp,
-    }
-
-    return VolResult(envelope=envelope, storage_error=storage_error)
+        return VolResult(envelope=envelope, storage_error=storage_error)
 
 
 def _compute_ivp_state(

@@ -6,7 +6,7 @@ from schwab_cli.commands._error import cli_errors
 from schwab_cli.history_spec import RangeSpecError, parse_range
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.transactions import render_transactions_result
-from schwab_cli.service import transactions as service_transactions
+from schwab_cli.service.transactions import TransactionsService
 
 
 @cli_errors
@@ -32,7 +32,7 @@ def run(
         code = 2 if getattr(e, "kind", "invalid") == "invalid" else 1
         raise typer.Exit(code=code)
 
-    result = service_transactions.get_transactions(
+    result = TransactionsService().get_transactions(
         account,
         start=start,
         end=end,

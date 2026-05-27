@@ -8,7 +8,7 @@ import pytest
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.dividends import get_dividends
+from schwab_cli.service.dividends import DividendsService
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
 
@@ -51,7 +51,7 @@ _PAYLOAD = {
 
 def test_get_dividends_wraps_payload_and_symbols(configured_home):
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=_PAYLOAD):
-        result = get_dividends(["AAPL"])
+        result = DividendsService().get_dividends(["AAPL"])
 
     assert result.symbols == ("AAPL",)
     assert result.payload == _PAYLOAD
@@ -60,14 +60,14 @@ def test_get_dividends_wraps_payload_and_symbols(configured_home):
 def test_get_dividends_normalizes_class_share_symbols(configured_home):
     payload = {"BRK/B": {"symbol": "BRK/B", "quote": {"lastPrice": 450.0}}}
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=payload):
-        result = get_dividends(["brk.b"])
+        result = DividendsService().get_dividends(["brk.b"])
 
     assert result.symbols == ("BRK/B",)
 
 
 def test_get_dividends_preserves_input_order(configured_home):
     with patch("schwab_cli.api.client.SchwabClient.get", return_value={}):
-        result = get_dividends(["KO", "AAPL", "MSFT"])
+        result = DividendsService().get_dividends(["KO", "AAPL", "MSFT"])
 
     assert result.symbols == ("KO", "AAPL", "MSFT")
 
@@ -76,7 +76,7 @@ def test_get_dividends_no_config_raises_not_configured(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     with pytest.raises(NotConfigured):
-        get_dividends(["AAPL"])
+        DividendsService().get_dividends(["AAPL"])
 
 
 def test_get_dividends_no_session_raises_not_authenticated(monkeypatch, tmp_path):
@@ -90,4 +90,4 @@ def test_get_dividends_no_session_raises_not_authenticated(monkeypatch, tmp_path
         )
     )
     with pytest.raises(NotAuthenticated):
-        get_dividends(["AAPL"])
+        DividendsService().get_dividends(["AAPL"])

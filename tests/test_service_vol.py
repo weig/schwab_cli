@@ -17,7 +17,7 @@ from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
 from schwab_cli.service.types import VolResult
-from schwab_cli.service.vol import get_vol
+from schwab_cli.service.vol import VolService
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
 
@@ -111,7 +111,7 @@ def test_normal_render_returns_volresult(env):
         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
         patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
     ):
-        result = get_vol("NVDA", no_record=True)
+        result = VolService().get_vol("NVDA", no_record=True)
 
     assert isinstance(result, VolResult)
     env_dict = result.envelope
@@ -131,7 +131,7 @@ def test_normal_render_flags_propagate(env):
         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
         patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
     ):
-        result = get_vol(
+        result = VolService().get_vol(
             "NVDA", hv_window=10, ivp_lookback=100, no_record=True
         )
     assert result.envelope["hv"]["window"] == 10
@@ -147,7 +147,7 @@ def test_snapshot_only_returns_none_and_records(env):
         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
         patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
     ):
-        result = get_vol("NVDA", snapshot_only=True)
+        result = VolService().get_vol("NVDA", snapshot_only=True)
 
     assert result is None
     assert _store_count("source='observed'") >= 1
@@ -162,7 +162,7 @@ def test_no_record_does_not_write(env):
         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
         patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
     ):
-        result = get_vol("NVDA", no_record=True)
+        result = VolService().get_vol("NVDA", no_record=True)
 
     assert result is not None
     assert _store_count() == 0
@@ -181,7 +181,7 @@ def test_no_record_skips_backfill(env):
         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
         patch("schwab_cli.service.vol._backfill_synthetic_iv", side_effect=_spy),
     ):
-        get_vol("NVDA", no_record=True)
+        VolService().get_vol("NVDA", no_record=True)
 
     assert calls["n"] == 0
 
@@ -194,7 +194,7 @@ def test_not_configured(monkeypatch, tmp_path):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path / "storage"))
     with pytest.raises(NotConfigured):
-        get_vol("NVDA", no_record=True)
+        VolService().get_vol("NVDA", no_record=True)
 
 
 def test_not_authenticated(monkeypatch, tmp_path):
@@ -206,7 +206,7 @@ def test_not_authenticated(monkeypatch, tmp_path):
         redirect_uri="https://127.0.0.1:8443",
     ))
     with pytest.raises(NotAuthenticated):
-        get_vol("NVDA", no_record=True)
+        VolService().get_vol("NVDA", no_record=True)
 
 
 # ---- API error propagation ---------------------------------------------
@@ -217,7 +217,7 @@ def test_api_error_on_chain_propagates(env):
         "schwab_cli.api.chains.get_chain", side_effect=ApiError("503 down")
     ):
         with pytest.raises(ApiError):
-            get_vol("NVDA", no_record=True)
+            VolService().get_vol("NVDA", no_record=True)
 
 
 def test_session_expired_on_history_propagates(env):
@@ -229,4 +229,4 @@ def test_session_expired_on_history_propagates(env):
         ),
     ):
         with pytest.raises(SessionExpired):
-            get_vol("NVDA", no_record=True)
+            VolService().get_vol("NVDA", no_record=True)

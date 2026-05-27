@@ -27,7 +27,7 @@ import pytest
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.transactions import get_transactions
+from schwab_cli.service.transactions import TransactionsService
 from schwab_cli.service.types import TransactionsResult
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
@@ -93,7 +93,7 @@ def _prep_auth(monkeypatch, tmp_path) -> None:
 
 
 def _call(account=None, *, type_filter="ALL", refresh=False):
-    return get_transactions(
+    return TransactionsService().get_transactions(
         account,
         start=_START,
         end=_END,

@@ -9,7 +9,7 @@ import pytest
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.chains import get_chain_envelope
+from schwab_cli.service.chains import ChainsService
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
 
@@ -66,7 +66,7 @@ def test_get_chain_envelope_returns_shaped_envelope(configured_home):
         "schwab_cli.service.chains.api_chains.get_chain",
         return_value=_RAW_CHAIN,
     ) as mock_get_chain:
-        envelope = get_chain_envelope("AMZN", expiry=expiry, strike_count=10)
+        envelope = ChainsService().get_chain_envelope("AMZN", expiry=expiry, strike_count=10)
 
     # Service reaches Layer-1 via the module attribute with the args the
     # MCP tool used to pass inline.
@@ -92,7 +92,7 @@ def test_get_chain_envelope_no_config_raises_not_configured(monkeypatch, tmp_pat
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     with pytest.raises(NotConfigured):
-        get_chain_envelope("AMZN", expiry=date(2026, 5, 1))
+        ChainsService().get_chain_envelope("AMZN", expiry=date(2026, 5, 1))
 
 
 def test_get_chain_envelope_no_session_raises_not_authenticated(
@@ -110,4 +110,4 @@ def test_get_chain_envelope_no_session_raises_not_authenticated(
         )
     )
     with pytest.raises(NotAuthenticated):
-        get_chain_envelope("AMZN", expiry=date(2026, 5, 1))
+        ChainsService().get_chain_envelope("AMZN", expiry=date(2026, 5, 1))

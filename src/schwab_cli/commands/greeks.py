@@ -17,7 +17,7 @@ import typer
 from schwab_cli.commands._error import cli_errors
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.greeks import render_greeks
-from schwab_cli.service.greeks import get_greeks
+from schwab_cli.service.greeks import GreeksService
 from schwab_cli.ticker import TickerError, resolve as resolve_ticker
 
 
@@ -50,7 +50,7 @@ def run(ticker_raw: str, *, as_json: bool, as_md: bool) -> None:
 
     # ContractNotFound (a ServiceError carrying a complete message, exit 1) and
     # the auth / API errors are routed through the @cli_errors decorator.
-    result = get_greeks(
+    result = GreeksService().get_greeks(
         ticker.underlying,
         strike=opt.strike,
         expiry=expiry_date,

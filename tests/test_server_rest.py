@@ -54,9 +54,9 @@ class TestQuoteHappyPath:
     def test_quote_returns_service_payload(self, monkeypatch):
         fake_payload = {"AAPL": {"quote": {"lastPrice": 123.45}}}
         monkeypatch.setattr(
-            rest_module.service_quotes,
+            rest_module.QuoteService,
             "get_quote_payload",
-            lambda symbols, **k: fake_payload,
+            lambda self, symbols, **k: fake_payload,
         )
         resp = _client().get("/quote/AAPL")
         assert resp.status_code == 200
@@ -65,12 +65,12 @@ class TestQuoteHappyPath:
     def test_symbol_is_upcased_before_service(self, monkeypatch):
         seen: list = []
 
-        def _capture(symbols, **k):
+        def _capture(self, symbols, **k):
             seen.append(symbols)
             return {}
 
         monkeypatch.setattr(
-            rest_module.service_quotes, "get_quote_payload", _capture
+            rest_module.QuoteService, "get_quote_payload", _capture
         )
         resp = _client().get("/quote/aapl")
         assert resp.status_code == 200
@@ -84,11 +84,11 @@ class TestQuoteHappyPath:
 
 class TestQuoteErrors:
     def _raise(self, monkeypatch, exc):
-        def _boom(symbols, **k):
+        def _boom(self, symbols, **k):
             raise exc
 
         monkeypatch.setattr(
-            rest_module.service_quotes, "get_quote_payload", _boom
+            rest_module.QuoteService, "get_quote_payload", _boom
         )
 
     def test_not_authenticated_returns_503(self, monkeypatch):
@@ -138,10 +138,10 @@ class TestRestRoutes:
         """The /quote handler must go through the SERVICE layer.
 
         Guards against a regression where the route reaches into
-        ``schwab_cli.api`` directly. The handler closure references
-        ``service_quotes.get_quote_payload`` — assert that symbol is
-        bound at module level to the service module.
+        ``schwab_cli.api`` directly. The handler instantiates
+        ``QuoteService`` and calls ``get_quote_payload`` — assert that the
+        class is bound at module level to the service class.
         """
-        import schwab_cli.service.quotes as svc
+        from schwab_cli.service.quotes import QuoteService
 
-        assert rest_module.service_quotes is svc
+        assert rest_module.QuoteService is QuoteService

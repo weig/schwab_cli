@@ -50,7 +50,7 @@ def test_get_quote_returns_json_payload():
     server = _make_server()
     fake_quotes = {"NVDA": {"symbol": "NVDA", "lastPrice": 250.1}}
     with patch(
-        "schwab_cli.service.quotes.get_quote_payload",
+        "schwab_cli.service.quotes.QuoteService.get_quote_payload",
         return_value=fake_quotes,
     ):
         result = _call(server._tool_get_quote({"symbols": ["NVDA"]}))
@@ -68,7 +68,7 @@ def test_get_quote_upcases_symbols():
         return {}
 
     with patch(
-        "schwab_cli.service.quotes.get_quote_payload",
+        "schwab_cli.service.quotes.QuoteService.get_quote_payload",
         side_effect=fake_quotes,
     ):
         _call(server._tool_get_quote({"symbols": ["nvda", "aapl"]}))
@@ -80,7 +80,7 @@ def test_get_quote_auth_error_returns_text_not_raise():
 
     server = _make_server()
     with patch(
-        "schwab_cli.service.quotes.get_quote_payload",
+        "schwab_cli.service.quotes.QuoteService.get_quote_payload",
         side_effect=NotAuthenticated("no session"),
     ):
         result = _call(server._tool_get_quote({"symbols": ["NVDA"]}))
@@ -115,7 +115,7 @@ def test_get_chain_happy_path():
         "contracts": [],
     }
     with patch(
-        "schwab_cli.service.chains.get_chain_envelope",
+        "schwab_cli.service.chains.ChainsService.get_chain_envelope",
         return_value=fake_envelope,
     ):
         result = _call(server._tool_get_chain({
@@ -133,7 +133,7 @@ def test_get_chain_auth_error_returns_text_not_raise():
 
     server = _make_server()
     with patch(
-        "schwab_cli.service.chains.get_chain_envelope",
+        "schwab_cli.service.chains.ChainsService.get_chain_envelope",
         side_effect=SessionExpired("expired"),
     ):
         result = _call(server._tool_get_chain({

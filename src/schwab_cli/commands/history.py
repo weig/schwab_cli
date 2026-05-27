@@ -11,7 +11,7 @@ from schwab_cli.history_spec import (
 )
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.history import render_history
-from schwab_cli.service.history import get_history
+from schwab_cli.service.history import HistoryService
 from schwab_cli.ticker import TickerError, resolve as resolve_ticker
 
 
@@ -59,7 +59,7 @@ def run(
 
     # NoCandles (a ServiceError carrying a complete message, exit 1) and the
     # auth / API errors are routed through the @cli_errors decorator.
-    result = get_history(
+    result = HistoryService().get_history(
         schwab_symbol,
         frequency_type=interval.frequency_type,
         frequency=interval.frequency,

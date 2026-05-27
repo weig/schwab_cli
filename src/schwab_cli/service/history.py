@@ -5,17 +5,14 @@ from zoneinfo import ZoneInfo
 
 _NY = ZoneInfo("America/New_York")
 
-from schwab_cli import config as config_module
 from schwab_cli.api import history as api_history
-from schwab_cli.api.client import SchwabClient
 from schwab_cli.output.history import shape_envelope
 from schwab_cli.service import ServiceError
-from schwab_cli.service import auth as service_auth
-from schwab_cli.service.auth import NotConfigured
+from schwab_cli.service.base import BaseService
 from schwab_cli.service.types import HistoryResult
 from schwab_cli.storage import ohlcv_history, vol_history
 
-__all__ = ["NoCandles", "get_history", "cache_api_response"]
+__all__ = ["NoCandles", "HistoryService", "cache_api_response"]
 
 
 class NoCandles(ServiceError):
@@ -103,67 +100,65 @@ def cache_api_response(symbol: str, response: dict) -> None:
         pass  # opportunistic — never break the user's command
 
 
-def get_history(
-    symbol: str,
-    *,
-    frequency_type: str,
-    frequency: int,
-    label: str,
-    start: datetime,
-    end: datetime,
-    range_str: str,
-) -> HistoryResult:
-    """Owns the cache + auth + API orchestration for the ``history`` command.
+class HistoryService(BaseService):
+    """Layer-2 service for the ``history`` command."""
 
-    For daily intervals, tries the opportunistic OHLCV cache first; a full
-    cache HIT returns without ever loading config/session or building the
-    HTTP client. On a cache miss (or non-daily interval), loads config and
-    session, fetches from Schwab, and opportunistically backfills the cache
-    for daily intervals.
+    def get_history(
+        self,
+        symbol: str,
+        *,
+        frequency_type: str,
+        frequency: int,
+        label: str,
+        start: datetime,
+        end: datetime,
+        range_str: str,
+    ) -> HistoryResult:
+        """Owns the cache + auth + API orchestration for the ``history`` command.
 
-    Raises :class:`schwab_cli.service.auth.NotConfigured` when no config is
-    on disk, the auth exceptions from :mod:`schwab_cli.service.auth` when the
-    session is missing/expired, and :class:`NoCandles` when the shaped
-    envelope has no candles. ``(ApiError, SessionExpired)`` from the API call
-    propagate unchanged.
-    """
-    # Cache-first read for daily intervals — regardless of whether
-    # the symbol is in the ohlcv subscription group. The cache is
-    # opportunistically populated by every API fallback below, so
-    # frequent `history` queries naturally build up a local store.
-    # Non-daily intervals (1min/5min/1wk/1mo) skip the cache entirely
-    # — ``ohlcv_daily`` only stores daily candles.
-    raw: dict | None = None
-    is_daily = frequency_type == "daily"
-    if is_daily:
-        raw = _try_cache_response(symbol, start=start, end=end)
+        For daily intervals, tries the opportunistic OHLCV cache first; a full
+        cache HIT returns without ever loading config/session or building the
+        HTTP client. On a cache miss (or non-daily interval), loads config and
+        session, fetches from Schwab, and opportunistically backfills the cache
+        for daily intervals.
 
-    if raw is None:
-        cfg = config_module.load()
-        if cfg is None:
-            raise NotConfigured
-
-        session = service_auth.get_session(cfg)
-
-        with SchwabClient(cfg, session) as client:
-            raw = api_history.get_history(
-                client,
-                symbol,
-                frequency_type=frequency_type,
-                frequency=frequency,
-                start=start,
-                end=end,
-            )
-        # Opportunistic backfill: every daily-interval API response
-        # seeds the cache. Subsequent queries within this range
-        # (including for un-subscribed symbols) skip the network.
+        Raises :class:`schwab_cli.service.auth.NotConfigured` when no config is
+        on disk, the auth exceptions from :mod:`schwab_cli.service.auth` when the
+        session is missing/expired, and :class:`NoCandles` when the shaped
+        envelope has no candles. ``(ApiError, SessionExpired)`` from the API call
+        propagate unchanged.
+        """
+        # Cache-first read for daily intervals — regardless of whether
+        # the symbol is in the ohlcv subscription group. The cache is
+        # opportunistically populated by every API fallback below, so
+        # frequent `history` queries naturally build up a local store.
+        # Non-daily intervals (1min/5min/1wk/1mo) skip the cache entirely
+        # — ``ohlcv_daily`` only stores daily candles.
+        raw: dict | None = None
+        is_daily = frequency_type == "daily"
         if is_daily:
-            cache_api_response(symbol, raw)
+            raw = _try_cache_response(symbol, start=start, end=end)
 
-    envelope = shape_envelope(raw, interval=label)
-    if not envelope["candles"]:
-        raise NoCandles(
-            f"No candles found for {symbol} in {range_str} at {label}."
-        )
+        if raw is None:
+            with self._authed_client() as client:
+                raw = api_history.get_history(
+                    client,
+                    symbol,
+                    frequency_type=frequency_type,
+                    frequency=frequency,
+                    start=start,
+                    end=end,
+                )
+            # Opportunistic backfill: every daily-interval API response
+            # seeds the cache. Subsequent queries within this range
+            # (including for un-subscribed symbols) skip the network.
+            if is_daily:
+                cache_api_response(symbol, raw)
 
-    return HistoryResult(envelope=envelope)
+        envelope = shape_envelope(raw, interval=label)
+        if not envelope["candles"]:
+            raise NoCandles(
+                f"No candles found for {symbol} in {range_str} at {label}."
+            )
+
+        return HistoryResult(envelope=envelope)

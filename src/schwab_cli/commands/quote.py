@@ -5,7 +5,7 @@ import typer
 from schwab_cli.commands._error import cli_errors
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.quotes import render_quote_result
-from schwab_cli.service.quotes import get_quote
+from schwab_cli.service.quotes import QuoteService
 
 
 @cli_errors
@@ -16,6 +16,6 @@ def run(symbols: list[str], *, as_json: bool, as_md: bool) -> None:
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    result = get_quote(symbols)
+    result = QuoteService().get_quote(symbols)
 
     typer.echo(render_quote_result(result, fmt))

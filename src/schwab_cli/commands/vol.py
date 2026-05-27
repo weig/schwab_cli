@@ -14,9 +14,10 @@ from __future__ import annotations
 import typer
 
 from schwab_cli.commands._error import cli_errors
+from schwab_cli.commands._output import null_sink, vol_cli_sink
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.vol import render_vol
-from schwab_cli.service.vol import VolStorageError, get_vol
+from schwab_cli.service.vol import VolService, VolStorageError
 from schwab_cli.ticker import TickerError, resolve as resolve_ticker
 
 
@@ -53,35 +54,23 @@ def run(
 
     # Per-day backfill progress lines stream to stdout in human mode only —
     # keeps JSON / MD / snapshot-only output clean for piping. The one-line
-    # backfill notice goes to stderr, also human-mode only.
+    # backfill notice goes to stderr, also human-mode only. The CliSink
+    # reproduces the exact CYAN text + stream of the old callbacks; the
+    # NullSink swallows everything in machine-facing modes.
     human = not (as_json or as_md or snapshot_only)
-    progress = (
-        (lambda line: typer.secho(line, fg=typer.colors.CYAN)) if human else None
-    )
-
-    def _on_backfill_notice(n_synth: int) -> None:
-        typer.secho(
-            f"vol: backfilled {n_synth} synthetic IV days "
-            f"for {ticker.underlying} from option + underlying history.",
-            fg=typer.colors.CYAN,
-            err=True,
-        )
-
-    on_backfill_notice = _on_backfill_notice if human else None
+    out = vol_cli_sink() if human else null_sink()
 
     # VolStorageError is the one service error that prints in YELLOW (not the
     # canonical RED), so it stays local; NoVolData / auth / API errors carry the
     # canonical RED + exit-1 mapping and are routed through @cli_errors.
     try:
-        result = get_vol(
+        result = VolService(out=out).get_vol(
             ticker.underlying,
             hv_window=hv_window,
             hv_lookback=hv_lookback,
             ivp_lookback=ivp_lookback,
             no_record=no_record,
             snapshot_only=snapshot_only,
-            progress=progress,
-            on_backfill_notice=on_backfill_notice,
         )
     except VolStorageError as e:
         typer.secho(str(e), fg=typer.colors.YELLOW, err=True)

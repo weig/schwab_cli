@@ -8,7 +8,7 @@ import pytest
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.fundamentals import get_fundamentals
+from schwab_cli.service.fundamentals import FundamentalsService
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
 
@@ -47,7 +47,7 @@ _PAYLOAD = {
 
 def test_get_fundamentals_wraps_payload_and_symbols(configured_home):
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=_PAYLOAD):
-        result = get_fundamentals(["AAPL"])
+        result = FundamentalsService().get_fundamentals(["AAPL"])
 
     assert result.symbols == ("AAPL",)
     assert result.payload == _PAYLOAD
@@ -56,7 +56,7 @@ def test_get_fundamentals_wraps_payload_and_symbols(configured_home):
 def test_get_fundamentals_normalizes_class_share_symbols(configured_home):
     payload = {"BRK/B": {"symbol": "BRK/B", "quote": {"lastPrice": 450.0}}}
     with patch("schwab_cli.api.client.SchwabClient.get", return_value=payload):
-        result = get_fundamentals(["brk.b"])
+        result = FundamentalsService().get_fundamentals(["brk.b"])
 
     # Renderer keys off the normalized canonical form Schwab returns.
     assert result.symbols == ("BRK/B",)
@@ -64,7 +64,7 @@ def test_get_fundamentals_normalizes_class_share_symbols(configured_home):
 
 def test_get_fundamentals_preserves_input_order(configured_home):
     with patch("schwab_cli.api.client.SchwabClient.get", return_value={}):
-        result = get_fundamentals(["MSFT", "AAPL", "NVDA"])
+        result = FundamentalsService().get_fundamentals(["MSFT", "AAPL", "NVDA"])
 
     assert result.symbols == ("MSFT", "AAPL", "NVDA")
 
@@ -73,7 +73,7 @@ def test_get_fundamentals_no_config_raises_not_configured(monkeypatch, tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     with pytest.raises(NotConfigured):
-        get_fundamentals(["AAPL"])
+        FundamentalsService().get_fundamentals(["AAPL"])
 
 
 def test_get_fundamentals_no_session_raises_not_authenticated(monkeypatch, tmp_path):
@@ -87,4 +87,4 @@ def test_get_fundamentals_no_session_raises_not_authenticated(monkeypatch, tmp_p
         )
     )
     with pytest.raises(NotAuthenticated):
-        get_fundamentals(["AAPL"])
+        FundamentalsService().get_fundamentals(["AAPL"])

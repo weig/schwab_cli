@@ -2,13 +2,10 @@ from __future__ import annotations
 
 from datetime import date
 
-from schwab_cli import config as config_module
 from schwab_cli.api.chains import get_chain
-from schwab_cli.api.client import SchwabClient
 from schwab_cli.output.chains import shape_envelope
 from schwab_cli.service import ServiceError
-from schwab_cli.service import auth as service_auth
-from schwab_cli.service.auth import NotConfigured
+from schwab_cli.service.base import BaseService
 from schwab_cli.service.types import GreeksResult
 
 
@@ -58,62 +55,60 @@ def _pick_contract(contracts: list[dict], strike: float, side: str) -> dict | No
     return None
 
 
-def get_greeks(
-    underlying: str,
-    *,
-    strike: float,
-    expiry: date,
-    side: str,
-) -> GreeksResult:
-    """Owns auth + business logic for the ``greeks`` command.
+class GreeksService(BaseService):
+    """Layer-2 service for the ``greeks`` command."""
 
-    Loads config and session, fetches the option chain filtered to the
-    single strike + expiry + side, shapes it, picks the matching contract,
-    and builds the display envelope. ``side`` is ``"C"`` or ``"P"``.
+    def get_greeks(
+        self,
+        underlying: str,
+        *,
+        strike: float,
+        expiry: date,
+        side: str,
+    ) -> GreeksResult:
+        """Owns auth + business logic for the ``greeks`` command.
 
-    Raises :class:`schwab_cli.service.auth.NotConfigured` when no config is
-    on disk, the auth exceptions from :mod:`schwab_cli.service.auth` when the
-    session is missing/expired, and :class:`ContractNotFound` when no contract
-    matches the requested strike + side.
-    """
-    contract_type = "CALL" if side == "C" else "PUT"
+        Loads config and session, fetches the option chain filtered to the
+        single strike + expiry + side, shapes it, picks the matching contract,
+        and builds the display envelope. ``side`` is ``"C"`` or ``"P"``.
 
-    cfg = config_module.load()
-    if cfg is None:
-        raise NotConfigured
+        Raises :class:`schwab_cli.service.auth.NotConfigured` when no config is
+        on disk, the auth exceptions from :mod:`schwab_cli.service.auth` when the
+        session is missing/expired, and :class:`ContractNotFound` when no contract
+        matches the requested strike + side.
+        """
+        contract_type = "CALL" if side == "C" else "PUT"
 
-    session = service_auth.get_session(cfg)
+        with self._authed_client() as client:
+            # Schwab's chain endpoint prefers `strikeCount` over `strike` when
+            # both are passed, returning strikes around ATM rather than the
+            # one we asked for. Omit `strike_count` entirely so `strike` wins
+            # — we just want this single strike back.
+            raw = get_chain(
+                client,
+                underlying,
+                contract_type=contract_type,
+                strike=strike,
+                strike_count=None,
+                from_date=expiry,
+                to_date=expiry,
+            )
 
-    with SchwabClient(cfg, session) as client:
-        # Schwab's chain endpoint prefers `strikeCount` over `strike` when
-        # both are passed, returning strikes around ATM rather than the
-        # one we asked for. Omit `strike_count` entirely so `strike` wins
-        # — we just want this single strike back.
-        raw = get_chain(
-            client,
-            underlying,
-            contract_type=contract_type,
-            strike=strike,
-            strike_count=None,
-            from_date=expiry,
-            to_date=expiry,
-        )
+        chain = shape_envelope(raw)
+        match = _pick_contract(chain.get("contracts") or [], strike, side)
+        if match is None:
+            raise ContractNotFound(
+                underlying=underlying,
+                expiry=expiry,
+                strike=strike,
+                contract_type=contract_type,
+            )
 
-    chain = shape_envelope(raw)
-    match = _pick_contract(chain.get("contracts") or [], strike, side)
-    if match is None:
-        raise ContractNotFound(
-            underlying=underlying,
-            expiry=expiry,
-            strike=strike,
-            contract_type=contract_type,
-        )
-
-    envelope = {
-        "underlyingSymbol": underlying,
-        "expiry": expiry.isoformat(),
-        "dte": chain.get("dte"),
-        "underlying": chain.get("underlying") or {},
-        "contract": match,
-    }
-    return GreeksResult(envelope=envelope)
+        envelope = {
+            "underlyingSymbol": underlying,
+            "expiry": expiry.isoformat(),
+            "dte": chain.get("dte"),
+            "underlying": chain.get("underlying") or {},
+            "contract": match,
+        }
+        return GreeksResult(envelope=envelope)

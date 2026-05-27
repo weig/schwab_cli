@@ -5,7 +5,7 @@ import typer
 from schwab_cli.commands._error import cli_errors
 from schwab_cli.output.dividends import render_dividends_result
 from schwab_cli.output.format import FormatError, pick_format
-from schwab_cli.service.dividends import get_dividends
+from schwab_cli.service.dividends import DividendsService
 
 
 @cli_errors
@@ -23,7 +23,7 @@ def run(
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    result = get_dividends(symbols)
+    result = DividendsService().get_dividends(symbols)
 
     upcoming_window = within_days if upcoming else None
     typer.echo(

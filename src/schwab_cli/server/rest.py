@@ -10,7 +10,7 @@ demonstrate that a Starlette route can reach the service layer cleanly.
 
 from __future__ import annotations
 
-from schwab_cli.service import quotes as service_quotes
+from schwab_cli.service.quotes import QuoteService
 from schwab_cli.service.auth import (
     ApiError,
     NotAuthenticated,
@@ -30,7 +30,7 @@ async def _quote(request):
         # `with SchwabClient(...)`. Calling it from an async handler is
         # fine for a PoC — it is a brief blocking REST call. A real
         # service would offload this to a thread pool.
-        payload = service_quotes.get_quote_payload([symbol.upper()])
+        payload = QuoteService().get_quote_payload([symbol.upper()])
     except (NotConfigured, NotAuthenticated) as e:
         return _json_response({"error": _err(e)}, status_code=503)
     except (ApiError, SessionExpired) as e:
