@@ -478,20 +478,6 @@ def watch_show(doc: bool = doc_option()) -> None:
 @mcp_app.callback(invoke_without_command=True)
 def mcp_root(
     ctx: typer.Context,
-    sse: bool = typer.Option(
-        False, "--sse",
-        hidden=True,
-        help=(
-            "Deprecated no-op. The daemon is Streamable-HTTP-only; this "
-            "flag is accepted for back-compat with the installed launchd "
-            "plist (which bakes in `mcp --sse`) and has no effect."
-        ),
-    ),
-    stdio: bool = typer.Option(
-        False, "--stdio",
-        hidden=True,
-        help="Deprecated no-op; stdio transport is no longer supported.",
-    ),
     host: str = typer.Option(
         "127.0.0.1", "--host",
         help="HTTP bind host. Loopback-only by default.",
@@ -520,9 +506,6 @@ def mcp_root(
     doc: bool = doc_option(),
 ) -> None:
     """When no subcommand, run the daemon (Streamable HTTP only)."""
-    # `sse` / `stdio` are accepted but ignored — the daemon is HTTP-only.
-    # They exist so the installed launchd plist's `mcp --sse` keeps working.
-    del sse, stdio
     if ctx.invoked_subcommand is not None:
         return
     mcp_cmd.run(

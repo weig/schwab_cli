@@ -82,38 +82,6 @@ def test_autologin_failure_returns_none():
     assert result is None
 
 
-def test_sse_flag_still_launches_http_daemon():
-    """The legacy launchd plist bakes in ``mcp --sse``. After dropping
-    stdio, ``--sse`` must remain an accepted no-op that still starts the
-    (only) Streamable HTTP transport."""
-    runner = CliRunner()
-
-    fresh = Session(
-        access_token="at", refresh_token="rt",
-        expires_at=9_000_000_000,
-        refresh_token_expires_at=9_000_000_000,
-    )
-
-    captured: dict[str, object] = {}
-
-    class _FakeServer:
-        def __init__(self, *a, **k):
-            pass
-
-        async def run_http(self, host, port):
-            captured["host"] = host
-            captured["port"] = port
-
-    with patch("schwab_cli.commands.mcp.config_module.load", return_value=object()), \
-         patch("schwab_cli.commands.mcp.load_session", return_value=fresh), \
-         patch("schwab_cli.commands.mcp.SchwabClient"), \
-         patch("schwab_cli.commands.mcp.SchwabMcpServer", _FakeServer):
-        result = runner.invoke(app, ["mcp", "--sse", "--no-log-file"])
-
-    assert result.exit_code == 0, result.output
-    # run_http was reached (not stdio) and bound the default address.
-    assert captured == {"host": "127.0.0.1", "port": 7234}
-
 
 def test_autologin_session_load_failure_returns_none():
     """Subprocess reports success but session.json wasn't updated
