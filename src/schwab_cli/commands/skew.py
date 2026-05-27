@@ -12,53 +12,26 @@ Modes, selected by flag:
 * **L3** ``--cross``: ``schwab_cli skew --cross YYMMDD SYM1 SYM2 …`` —
   cross-ticker skew at a shared expiry.
 
-The analytics layer (:mod:`schwab_cli.analytics.skew`) is pure — this
-module only handles argument parsing, API orchestration, and format
-dispatch. All per-mode errors (invalid YYMMDD, bad symbols, no
-contracts) exit with code 2 for user errors, code 1 for runtime /
-network failures.
+This module is a thin Layer-3 shim: it owns argument parsing /
+validation and exit-code mapping, then dispatches to the Layer-2
+:mod:`schwab_cli.service.skew` (which owns auth + fetch + compute) and
+renders via :mod:`schwab_cli.output.skew`. All per-mode argument errors
+exit with code 2; auth / runtime / network failures exit with code 1.
 """
 
 from __future__ import annotations
 
-from datetime import date, timedelta
-from typing import Any
+from datetime import date
 
 import typer
 
-from schwab_cli import config as config_module
-from schwab_cli.analytics.skew import (
-    compare_across_tickers,
-    compute_skew,
-    compute_term_structure,
-)
-from schwab_cli.api.chains import get_chain
-from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
+from schwab_cli.api.client import ApiError, SessionExpired
 from schwab_cli.option_spec import OptionSpecError, parse_option_spec
-from schwab_cli.output.chains import shape_envelope
 from schwab_cli.output.format import Format, FormatError, pick_format
 from schwab_cli.output.skew import render_cross, render_skew, render_term
-from schwab_cli.session import load as load_session
-
-
-def _client() -> SchwabClient:
-    cfg = config_module.load()
-    if cfg is None:
-        typer.secho(
-            "No config found. Run `schwab_cli setup` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    session = load_session()
-    if session is None:
-        typer.secho(
-            "No session found. Run `schwab_cli auth` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    return SchwabClient(cfg, session)
+from schwab_cli.service import skew as service_skew
+from schwab_cli.service.auth import NotAuthenticated, NotConfigured
+from schwab_cli.service.skew import DiscoveryError, NoSkewData
 
 
 def _parse_yymmdd(s: str) -> date:
@@ -74,82 +47,24 @@ def _parse_yymmdd(s: str) -> date:
         raise typer.Exit(code=code)
 
 
-def _fetch_single_chain(
-    client: SchwabClient,
-    symbol: str,
-    expiry: date,
-    strikes: int,
-) -> dict[str, Any]:
-    """Fetch the chain for one (symbol, expiry) and shape it into the
-    envelope :func:`compute_skew` consumes. Schwab-API failures propagate
-    as :class:`typer.Exit`; callers that want to downgrade to a warning
-    (e.g. in L2/L3 where one failure shouldn't sink the whole report)
-    should catch upstream and swallow instead."""
-    try:
-        raw = get_chain(
-            client,
-            symbol.upper(),
-            contract_type="ALL",
-            strike_count=strikes,
-            from_date=expiry,
-            to_date=expiry,
-        )
-    except (ApiError, SessionExpired) as e:
-        msg = str(e) if str(e) else type(e).__name__
-        typer.secho(
-            f"chain fetch failed for {symbol} {expiry.isoformat()}: {msg}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    envelope = shape_envelope(raw)
-    if not envelope.get("contracts"):
-        typer.secho(
-            f"No contracts for {symbol.upper()} on {expiry.isoformat()}. "
-            "Verify the expiry exists and has trading activity.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    return envelope
+def _fail(message: str, *, code: int) -> None:
+    """Print ``message`` to stderr in red and exit with ``code``."""
+    typer.secho(message, fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=code)
 
 
-def _fetch_for_report(
-    client: SchwabClient,
-    symbol: str,
-    expiry: date,
-    strikes: int,
-) -> dict[str, Any] | None:
-    """Like :func:`_fetch_single_chain` but converts failures into a
-    stderr warning + ``None``. Used by L2 / L3 where we want to render
-    whatever chains succeeded instead of bailing on the first error.
-    """
-    try:
-        raw = get_chain(
-            client,
-            symbol.upper(),
-            contract_type="ALL",
-            strike_count=strikes,
-            from_date=expiry,
-            to_date=expiry,
-        )
-    except (ApiError, SessionExpired) as e:
-        msg = str(e) if str(e) else type(e).__name__
-        typer.secho(
-            f"[warn] skip {symbol.upper()} {expiry.isoformat()}: {msg}",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-        return None
-    envelope = shape_envelope(raw)
-    if not envelope.get("contracts"):
-        typer.secho(
-            f"[warn] no contracts for {symbol.upper()} {expiry.isoformat()}",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-        return None
-    return envelope
+def _warn(message: str) -> None:
+    """Print a non-fatal partial-failure skip notice to stderr in yellow."""
+    typer.secho(message, fg=typer.colors.YELLOW, err=True)
+
+
+def _handle_auth_errors(e: Exception) -> None:
+    """Map auth / service errors to the legacy stderr messages + exit codes."""
+    if isinstance(e, NotConfigured):
+        _fail("No config found. Run `schwab_cli setup` first.", code=1)
+    if isinstance(e, NotAuthenticated):
+        _fail("No session found. Run `schwab_cli auth` first.", code=1)
+    raise e  # pragma: no cover - defensive; caller handles the rest
 
 
 # ---- mode: L1 (single chain) ------------------------------------------
@@ -163,10 +78,19 @@ def _run_l1(
     fmt: Format,
 ) -> None:
     expiry = _parse_yymmdd(expiry_str)
-    client = _client()
-    envelope = _fetch_single_chain(client, symbol, expiry, strikes)
-    metrics = compute_skew(envelope)
-    typer.echo(render_skew(metrics, fmt=fmt), nl=False)
+    try:
+        result = service_skew.get_skew_l1(symbol, expiry, strikes=strikes)
+    except (NotConfigured, NotAuthenticated) as e:
+        _handle_auth_errors(e)
+    except NoSkewData as e:
+        _fail(str(e), code=1)
+    except (ApiError, SessionExpired) as e:
+        msg = str(e) if str(e) else type(e).__name__
+        _fail(
+            f"chain fetch failed for {symbol} {expiry.isoformat()}: {msg}",
+            code=1,
+        )
+    typer.echo(render_skew(result.metrics, fmt=fmt), nl=False)
 
 
 # ---- mode: L2 --term (explicit expiry list) ---------------------------
@@ -180,68 +104,18 @@ def _run_term(
     fmt: Format,
 ) -> None:
     expiries = [_parse_yymmdd(s) for s in expiry_strs]
-    client = _client()
-    envelopes: list[dict[str, Any]] = []
-    for exp in expiries:
-        env = _fetch_for_report(client, symbol, exp, strikes)
-        if env is not None:
-            envelopes.append(env)
-    if not envelopes:
-        typer.secho(
-            f"No usable chains for {symbol.upper()} across {len(expiries)} expiries.",
-            fg=typer.colors.RED,
-            err=True,
+    try:
+        result = service_skew.get_skew_term(
+            symbol, expiries, strikes=strikes, on_skip=_warn
         )
-        raise typer.Exit(code=1)
-    metrics = compute_term_structure(envelopes)
-    typer.echo(render_term(metrics, fmt=fmt, symbol=symbol.upper()), nl=False)
+    except (NotConfigured, NotAuthenticated) as e:
+        _handle_auth_errors(e)
+    except NoSkewData as e:
+        _fail(str(e), code=1)
+    typer.echo(render_term(result.metrics, fmt=fmt, symbol=result.symbol), nl=False)
 
 
 # ---- mode: L2 --dtes (target DTEs → pick closest expiries) ------------
-
-
-def _discover_expiries(
-    client: SchwabClient,
-    symbol: str,
-    *,
-    max_dte: int,
-) -> list[tuple[date, int]]:
-    """Return ``(expiry_date, dte)`` pairs available for ``symbol`` up
-    to ``max_dte`` days out. Cheap discovery fetch — ``strike_count=2``
-    is the minimum Schwab allows while still populating the
-    ``callExpDateMap`` keys we need. Failures bubble up as
-    :class:`typer.Exit`.
-    """
-    today = date.today()
-    try:
-        raw = get_chain(
-            client,
-            symbol.upper(),
-            contract_type="ALL",
-            strike_count=2,
-            from_date=today,
-            to_date=today + timedelta(days=max_dte + 30),
-        )
-    except (ApiError, SessionExpired) as e:
-        msg = str(e) if str(e) else type(e).__name__
-        typer.secho(
-            f"chain discovery failed for {symbol.upper()}: {msg}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    found: set[tuple[date, int]] = set()
-    for map_key in ("callExpDateMap", "putExpDateMap"):
-        for exp_key in (raw.get(map_key) or {}).keys():
-            # Schwab encodes these as "YYYY-MM-DD:DTE".
-            exp_part, _, dte_part = exp_key.partition(":")
-            try:
-                exp_date = date.fromisoformat(exp_part)
-                dte = int(dte_part)
-            except (ValueError, TypeError):
-                continue
-            found.add((exp_date, dte))
-    return sorted(found, key=lambda pair: pair[1])
 
 
 def _run_dtes(
@@ -251,43 +125,18 @@ def _run_dtes(
     strikes: int,
     fmt: Format,
 ) -> None:
-    client = _client()
-    available = _discover_expiries(client, symbol, max_dte=max(target_dtes))
-    if not available:
-        typer.secho(
-            f"No expiries discoverable for {symbol.upper()} within {max(target_dtes)} DTE.",
-            fg=typer.colors.RED,
-            err=True,
+    try:
+        result = service_skew.get_skew_dtes(
+            symbol, target_dtes, strikes=strikes, on_skip=_warn
         )
-        raise typer.Exit(code=1)
-
-    # For each target DTE, pick the closest available expiry. De-dup
-    # so that --dtes 30 35 doesn't fetch the same chain twice when the
-    # two targets collapse onto the same weekly.
-    picked: list[tuple[date, int]] = []
-    seen: set[date] = set()
-    for target in target_dtes:
-        exp, dte = min(available, key=lambda pair: abs(pair[1] - target))
-        if exp in seen:
-            continue
-        seen.add(exp)
-        picked.append((exp, dte))
-
-    envelopes: list[dict[str, Any]] = []
-    for exp, _dte in picked:
-        env = _fetch_for_report(client, symbol, exp, strikes)
-        if env is not None:
-            envelopes.append(env)
-    if not envelopes:
-        typer.secho(
-            f"No usable chains for {symbol.upper()} at target DTEs {target_dtes}.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    metrics = compute_term_structure(envelopes)
-    typer.echo(render_term(metrics, fmt=fmt, symbol=symbol.upper()), nl=False)
+    except (NotConfigured, NotAuthenticated) as e:
+        _handle_auth_errors(e)
+    except NoSkewData as e:
+        _fail(str(e), code=1)
+    except (ApiError, SessionExpired) as e:
+        msg = str(e) if str(e) else type(e).__name__
+        _fail(f"chain discovery failed for {symbol.upper()}: {msg}", code=1)
+    typer.echo(render_term(result.metrics, fmt=fmt, symbol=result.symbol), nl=False)
 
 
 # ---- mode: L3 --cross -------------------------------------------------
@@ -301,21 +150,15 @@ def _run_cross(
     fmt: Format,
 ) -> None:
     expiry = _parse_yymmdd(expiry_str)
-    client = _client()
-    envelopes: list[dict[str, Any]] = []
-    for sym in symbols:
-        env = _fetch_for_report(client, sym, expiry, strikes)
-        if env is not None:
-            envelopes.append(env)
-    if not envelopes:
-        typer.secho(
-            f"No usable chains across {len(symbols)} symbols at {expiry.isoformat()}.",
-            fg=typer.colors.RED,
-            err=True,
+    try:
+        result = service_skew.get_skew_cross(
+            expiry, symbols, strikes=strikes, on_skip=_warn
         )
-        raise typer.Exit(code=1)
-    metrics = compare_across_tickers(envelopes)
-    typer.echo(render_cross(metrics, fmt=fmt), nl=False)
+    except (NotConfigured, NotAuthenticated) as e:
+        _handle_auth_errors(e)
+    except NoSkewData as e:
+        _fail(str(e), code=1)
+    typer.echo(render_cross(result.metrics, fmt=fmt), nl=False)
 
 
 # ---- mode: L3 --cross + --dtes (cross-ticker at target DTE) -----------
@@ -332,34 +175,26 @@ def _run_cross_dtes(
     calendar date. Each symbol independently picks its closest-available
     expiry — they often won't line up exactly (weekly vs monthly listing
     cycles), which is why the rendered ``DTE`` column is per-row rather
-    than a shared header. Cost is 2N API calls (discovery + fetch per
-    symbol); for the common case of 3-4 symbols this is acceptable.
+    than a shared header.
     """
-    client = _client()
-    envelopes: list[dict[str, Any]] = []
-    for sym in symbols:
-        available = _discover_expiries(client, sym, max_dte=target_dte + 30)
-        if not available:
-            typer.secho(
-                f"[warn] no expiries discoverable for {sym.upper()} within "
-                f"{target_dte + 30} DTE",
-                fg=typer.colors.YELLOW,
-                err=True,
-            )
-            continue
-        exp, _dte = min(available, key=lambda pair: abs(pair[1] - target_dte))
-        env = _fetch_for_report(client, sym, exp, strikes)
-        if env is not None:
-            envelopes.append(env)
-    if not envelopes:
-        typer.secho(
-            f"No usable chains across {len(symbols)} symbols at ~{target_dte} DTE.",
-            fg=typer.colors.RED,
-            err=True,
+    try:
+        result = service_skew.get_skew_cross_dtes(
+            target_dte, symbols, strikes=strikes, on_skip=_warn
         )
-        raise typer.Exit(code=1)
-    metrics = compare_across_tickers(envelopes)
-    typer.echo(render_cross(metrics, fmt=fmt), nl=False)
+    except (NotConfigured, NotAuthenticated) as e:
+        _handle_auth_errors(e)
+    except NoSkewData as e:
+        _fail(str(e), code=1)
+    except DiscoveryError as e:
+        # Discovery failure is fatal in this mode (one symbol's discovery
+        # call sinks the run), matching the pre-migration behavior. The
+        # typed error carries the symbol so the message names it.
+        _fail(str(e), code=1)
+    except (ApiError, SessionExpired) as e:
+        # Reached only via the up-front token mint (get_session) when the
+        # refresh token is dead; surface its actionable message.
+        _fail(str(e) if str(e) else type(e).__name__, code=1)
+    typer.echo(render_cross(result.metrics, fmt=fmt), nl=False)
 
 
 # ---- entry point ------------------------------------------------------

@@ -4,12 +4,10 @@ These tests pin the CURRENT observable behaviour of every mode so that the
 upcoming service-layer migration can be proven behaviour-preserving without
 altering production code.
 
-Stable seam used (must survive the refactor):
-    ``schwab_cli.commands.skew.get_chain``
-
-After migration this patch-target string will be re-pointed to
-``schwab_cli.api.chains.get_chain`` — only that string changes; ALL golden
-assertions here must remain green without modification.
+Stable seam (post service-layer migration):
+    ``schwab_cli.api.chains.get_chain`` — the Layer-1 fetch the service
+    calls via module attribute. Patching the definition site intercepts
+    every mode's fetch while exercising the full auth + render stack.
 
 Modes covered:
     L1  — ``skew SYMBOL YYMMDD``                  (default, single chain)
@@ -45,7 +43,7 @@ runner = CliRunner()
 # Seam constant — update ONLY this string when the migration re-points the
 # import to the service layer.
 # ---------------------------------------------------------------------------
-_GET_CHAIN = "schwab_cli.commands.skew.get_chain"
+_GET_CHAIN = "schwab_cli.api.chains.get_chain"
 
 # ---------------------------------------------------------------------------
 # Helpers
