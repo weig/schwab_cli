@@ -69,6 +69,23 @@ Benefits:
 Cost: you manage the lifecycle (tmux, launchd, systemd, or just a
 terminal tab). See "Service management" below.
 
+### Standalone `schwab mcp` vs. integrated `schwab server --enable-mcp`
+
+There are two ways to run the MCP server:
+
+- **`schwab mcp`** (this doc) — the *standalone* daemon. It runs its
+  own auth monitor, so it both serves MCP **and** keeps the session
+  fresh on its own.
+- **`schwab server --enable-mcp`** — the *integrated* option. Here the
+  long-lived [auth-maintenance loop](server.md) is the single proactive
+  refresh-token renewer and the MCP server runs with its auth monitor
+  **disabled** (no competing rotation). Prefer this when you also want
+  the maintenance daemon running (e.g. to keep every other
+  `schwab_cli` command on the box logged in).
+
+Both speak the same Streamable HTTP transport on the same `/mcp`
+endpoint; pick one renewer, not both.
+
 ## Schwab streamer constraint
 
 Schwab allows **one concurrent streamer session per account**. If

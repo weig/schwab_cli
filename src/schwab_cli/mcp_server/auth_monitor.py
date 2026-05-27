@@ -1,6 +1,6 @@
 """Proactive refresh-token rotation monitor.
 
-Runs as a background asyncio task inside the SSE daemon. Wakes up
+Runs as a background asyncio task inside the HTTP daemon. Wakes up
 near ``refresh_token_expires_at - threshold`` and spawns
 ``schwab_cli auth --force`` (with ``HEADLESS=1``) to rotate the
 7-day refresh token before it dies. Notifier + logbook get
@@ -67,7 +67,7 @@ class AuthMonitor:
     Hooks:
 
     * ``on_rotation_success`` — async callback fired after disk
-      reload succeeds. The SSE daemon uses this to reconnect the
+      reload succeeds. The HTTP daemon uses this to reconnect the
       Schwab streamer with the new access token.
     """
 
