@@ -1,7 +1,7 @@
 """`mcp` command — MCP server runner + admin subcommands.
 
-Bare ``schwab_cli mcp`` starts the daemon in stdio (default) or SSE
-mode. Subcommands live under the ``mcp`` typer group:
+Bare ``schwab_cli mcp`` starts the daemon in stdio (default) or
+Streamable HTTP mode. Subcommands live under the ``mcp`` typer group:
 
 * ``mcp status`` — HTTP client for ``/admin/status``.
 * ``mcp log [-f]`` — read / tail the structured log file.
@@ -50,8 +50,8 @@ def run(
 ) -> None:
     """Entry point from :mod:`schwab_cli.cli` for the bare `mcp` call.
 
-    In stdio mode: runs until stdin EOF. In SSE mode: runs until
-    SIGINT or the admin shutdown endpoint is called.
+    In stdio mode: runs until stdin EOF. In Streamable HTTP mode: runs
+    until SIGINT or the admin shutdown endpoint is called.
 
     Startup sequence (before the server runs):
 
@@ -121,7 +121,7 @@ def run(
     logbook.info(
         "daemon.start",
         pid=os.getpid(),
-        transport="stdio" if stdio else "sse",
+        transport="stdio" if stdio else "http",
         bind=f"{host}:{port}" if not stdio else None,
         log_file=str(resolved_log_file) if resolved_log_file else None,
     )
@@ -129,7 +129,7 @@ def run(
         if stdio:
             asyncio.run(server.run_stdio())
         else:
-            asyncio.run(server.run_sse(host, port))
+            asyncio.run(server.run_http(host, port))
     except KeyboardInterrupt:
         logbook.info("daemon.stop", reason="SIGINT")
     except Exception as e:
@@ -317,7 +317,7 @@ def run_restart(
     *, url: str | None, token: str | None,
     stdio: bool, host: str, port: int,
 ) -> None:
-    """Bounce the SSE daemon.
+    """Bounce the Streamable HTTP daemon.
 
     Two paths:
 
@@ -513,7 +513,7 @@ def run_install_service(
     *, host: str, port: int, log_file: str | None,
     admin_token: str | None, plist_path: str | None, yes: bool,
 ) -> None:
-    """Install the launchd LaunchAgent plist for the SSE daemon.
+    """Install the launchd LaunchAgent plist for the Streamable HTTP daemon.
 
     After writing, runs ``launchctl load`` to start immediately and
     register for start-at-login. User must have GUI access because
@@ -703,10 +703,10 @@ def run_install(
             "args": ["mcp", "--stdio"],
         }
     else:
-        sse_url = url.rstrip("/")
-        if not sse_url.endswith("/sse"):
-            sse_url = sse_url + "/sse"
-        entry = {"type": "sse", "url": sse_url}
+        http_url = url.rstrip("/")
+        if not http_url.endswith("/mcp"):
+            http_url = http_url + "/mcp"
+        entry = {"type": "http", "url": http_url}
         if token:
             entry["headers"] = {"Authorization": f"Bearer {token}"}
 

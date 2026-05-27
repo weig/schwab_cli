@@ -89,8 +89,8 @@ see heartbeats flow in the background during quiet periods.
 Schwab allows **one streamer session per account**. Two
 `schwab_cli stream --direct` processes running simultaneously will
 clobber each other's connections (each new `ADMIN LOGIN` disconnects
-the prior). Use SSE mode of `schwab_cli mcp` + `--mcp` (when it
-ships) for true concurrent multi-tool streaming.
+the prior). Use Streamable HTTP mode of `schwab_cli mcp` + `--mcp`
+(when it ships) for true concurrent multi-tool streaming.
 
 ## Exit codes
 

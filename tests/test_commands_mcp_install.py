@@ -11,7 +11,7 @@ from schwab_cli.cli import app
 runner = CliRunner()
 
 
-def test_install_creates_new_settings_sse(tmp_path):
+def test_install_creates_new_settings_http(tmp_path):
     settings = tmp_path / "settings.json"
     result = runner.invoke(
         app,
@@ -21,8 +21,8 @@ def test_install_creates_new_settings_sse(tmp_path):
     assert result.exit_code == 0, result.output
     data = json.loads(settings.read_text())
     entry = data["mcpServers"]["schwab"]
-    assert entry["type"] == "sse"
-    assert entry["url"].endswith("/sse")
+    assert entry["type"] == "http"
+    assert entry["url"].endswith("/mcp")
 
 
 def test_install_stdio_emits_spawn_form(tmp_path):

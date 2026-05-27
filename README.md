@@ -216,7 +216,7 @@ schwab mcp logout          # forget the session (force re-auth on next call)
 Available MCP tools out of the box: `get_quote`, `get_chain`,
 `stream_quote`, `dataset_status`, `dataset_history`, `dataset_iv_rank`,
 `server_status`. See [doc/mcp.md](doc/mcp.md) for the full list,
-stdio vs SSE transport, and Claude Code integration.
+stdio vs Streamable HTTP transport, and Claude Code integration.
 
 ---
 
