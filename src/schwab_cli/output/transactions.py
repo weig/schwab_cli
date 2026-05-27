@@ -3,12 +3,15 @@ from __future__ import annotations
 import json as _json
 import math
 from io import StringIO
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.table import Table
 
 from schwab_cli.output.format import Format
+
+if TYPE_CHECKING:
+    from schwab_cli.service.types import TransactionsResult
 
 
 def _finite(v: Any) -> float | None:
@@ -295,3 +298,20 @@ def render_transactions(
             rows, show_account=show_account, cache_stats=cache_stats,
         )
     raise NotImplementedError(f"format {fmt} not yet implemented")
+
+
+def render_transactions_result(result: TransactionsResult, *, fmt: Format) -> str:
+    """Thin adapter: unwrap a :class:`TransactionsResult` and delegate to
+    :func:`render_transactions` with identical args.
+
+    Keeps output byte-identical to the pre-migration command — the result
+    carries the shaped rows, the Account-column-visibility signal, and the
+    cache statistics, which map one-to-one onto ``render_transactions``'
+    parameters.
+    """
+    return render_transactions(
+        list(result.rows),
+        fmt=fmt,
+        show_account=result.show_account,
+        cache_stats=dict(result.cache_stats),
+    )

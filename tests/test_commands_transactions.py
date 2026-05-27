@@ -49,7 +49,7 @@ _SAMPLE = [
 def test_transactions_default_human(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         return_value=_SAMPLE,
     ):
         result = runner.invoke(app, ["transactions"])
@@ -66,7 +66,7 @@ def test_transactions_default_range_is_7_days(monkeypatch, tmp_path):
         return _SAMPLE
 
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         side_effect=fake,
     ):
         result = runner.invoke(app, ["transactions"])
@@ -78,7 +78,7 @@ def test_transactions_default_range_is_7_days(monkeypatch, tmp_path):
 def test_transactions_json_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         return_value=_SAMPLE,
     ):
         result = runner.invoke(app, ["transactions", "--json"])
@@ -91,7 +91,7 @@ def test_transactions_json_output(monkeypatch, tmp_path):
 def test_transactions_md_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         return_value=_SAMPLE,
     ):
         result = runner.invoke(app, ["transactions", "--md"])
@@ -108,7 +108,7 @@ def test_transactions_custom_range(monkeypatch, tmp_path):
         return _SAMPLE
 
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         side_effect=fake,
     ):
         result = runner.invoke(app, [
@@ -129,7 +129,7 @@ def test_transactions_type_all_filters_locally(monkeypatch, tmp_path):
         return _SAMPLE
 
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         side_effect=fake,
     ):
         result = runner.invoke(app, ["transactions", "--type=ALL"])
@@ -149,7 +149,7 @@ def test_transactions_specific_account_via_flag(monkeypatch, tmp_path):
         return _SAMPLE
 
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         side_effect=fake,
     ):
         result = runner.invoke(app, ["transactions", "--account", "0756"])
@@ -160,7 +160,7 @@ def test_transactions_specific_account_via_flag(monkeypatch, tmp_path):
 def test_transactions_empty_is_ok(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         return_value=[],
     ):
         result = runner.invoke(app, ["transactions"])
@@ -214,7 +214,7 @@ def test_transactions_no_session_exit_1(monkeypatch, tmp_path):
 def test_transactions_session_expired_exit_1(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["transactions"])
@@ -225,7 +225,7 @@ def test_transactions_session_expired_exit_1(monkeypatch, tmp_path):
 def test_transactions_api_error_exit_1(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         side_effect=ApiError("503 Service Unavailable"),
     ):
         result = runner.invoke(app, ["transactions"])

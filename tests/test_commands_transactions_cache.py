@@ -33,9 +33,9 @@ def test_command_routes_via_cache_not_direct_api(monkeypatch, tmp_path):
     ``get_all_transactions``."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached", return_value=[],
+        "schwab_cli.api.transactions_cache.fetch_cached", return_value=[],
     ) as cached, patch(
-        "schwab_cli.commands.transactions.get_all_transactions",
+        "schwab_cli.api.transactions.get_all_transactions",
     ) as raw:
         runner.invoke(app, ["transactions", "-r", "-7d..now"])
     assert cached.called
@@ -62,7 +62,7 @@ def test_type_filter_applied_locally_not_via_api(monkeypatch, tmp_path):
                             "amount": 0.5}]},
     ]
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         return_value=sample,
     ) as cached:
         result = runner.invoke(
@@ -77,7 +77,7 @@ def test_type_filter_applied_locally_not_via_api(monkeypatch, tmp_path):
 def test_refresh_flag_passed_through(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached", return_value=[],
+        "schwab_cli.api.transactions_cache.fetch_cached", return_value=[],
     ) as cached:
         runner.invoke(app, ["transactions", "-r", "-7d..now", "--refresh"])
     _, kwargs = cached.call_args
@@ -87,7 +87,7 @@ def test_refresh_flag_passed_through(monkeypatch, tmp_path):
 def test_no_refresh_flag_default_false(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached", return_value=[],
+        "schwab_cli.api.transactions_cache.fetch_cached", return_value=[],
     ) as cached:
         runner.invoke(app, ["transactions", "-r", "-7d..now"])
     _, kwargs = cached.call_args
@@ -98,7 +98,7 @@ def test_account_flag_passes_account_to_cache(monkeypatch, tmp_path):
     """``--account 0756`` filters the cache fetch to that one account."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached", return_value=[],
+        "schwab_cli.api.transactions_cache.fetch_cached", return_value=[],
     ) as cached:
         runner.invoke(
             app, ["transactions", "--account", "0756", "-r", "-7d..now"],
@@ -112,7 +112,7 @@ def test_account_short_flag_works(monkeypatch, tmp_path):
     """``-a 0756`` is the short form of ``--account``."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached", return_value=[],
+        "schwab_cli.api.transactions_cache.fetch_cached", return_value=[],
     ) as cached:
         runner.invoke(app, ["transactions", "-a", "0756", "-r", "-7d..now"])
     args, _ = cached.call_args
@@ -123,7 +123,7 @@ def test_no_account_passes_none_for_all_accounts(monkeypatch, tmp_path):
     """Omitting ``--account`` queries all accounts (account_number=None)."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached", return_value=[],
+        "schwab_cli.api.transactions_cache.fetch_cached", return_value=[],
     ) as cached:
         runner.invoke(app, ["transactions", "-r", "-7d..now"])
     args, _ = cached.call_args
@@ -144,7 +144,7 @@ def test_account_flag_hides_account_column_in_human_output(
                            "positionEffect": "OPENING"}],
     }]
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         return_value=sample,
     ):
         result = runner.invoke(
@@ -169,7 +169,7 @@ def test_no_account_keeps_account_column_in_human_output(
                            "positionEffect": "OPENING"}],
     }]
     with patch(
-        "schwab_cli.commands.transactions.fetch_cached",
+        "schwab_cli.api.transactions_cache.fetch_cached",
         return_value=sample,
     ):
         result = runner.invoke(app, ["transactions", "-r", "-7d..now"])
