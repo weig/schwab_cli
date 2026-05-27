@@ -45,6 +45,36 @@ class GreeksResult:
 
 
 @dataclass(frozen=True)
+class VolResult:
+    """Volatility-context view (IV / HV / HVP / IVP / P/C).
+
+    Wraps the display envelope dict that ``output.vol.render_vol`` consumes
+    verbatim, keeping rendered HUMAN/JSON/MD output byte-identical to the
+    pre-migration command. The envelope shape is::
+
+        {
+            "symbol": str,
+            "spot": float,
+            "iv": dict,
+            "iv_ref": dict | None,
+            "hv": dict,
+            "hvp": dict,
+            "pc": dict,
+            "ivp": dict,
+            "ivr_ivp": dict,
+        }
+
+    ``storage_error`` carries a non-fatal SQLite error string (or ``None``)
+    so the command can surface the "IVP may be stale" warning while still
+    rendering. Typed as a read-only ``Mapping`` to signal callers must not
+    mutate the envelope.
+    """
+
+    envelope: Mapping[str, Any]
+    storage_error: str | None = None
+
+
+@dataclass(frozen=True)
 class AccountsResult:
     """List-of-accounts view.
 
