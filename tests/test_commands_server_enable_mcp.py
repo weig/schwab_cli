@@ -102,8 +102,9 @@ def _patch_happy_path(monkeypatch):
                 {"auth_monitor_enabled": auth_monitor_enabled}
             )
 
-        async def run_http(self, host, port):
+        async def run_http(self, host, port, *, extra_routes=None):
             rec["run_http_args"].append((host, port))
+            rec.setdefault("run_http_extra_routes", []).append(extra_routes)
 
     monkeypatch.setattr(
         "schwab_cli.mcp_server.app.SchwabMcpServer", _FakeServer
@@ -355,3 +356,200 @@ class TestSessionHandoff:
         notifier = rec["run_loop_kwargs"][0]["notifier"]
         notifier(self._tick("renew_failed"))  # must not raise / must not reload
         assert client._session is sentinel
+
+
+# ---------------------------------------------------------------------------
+# --enable-mcp --enable-rest — REST routes mounted on the MCP server's port
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(Session is None, reason="Session not importable")
+class TestEnableMcpWithRest:
+    def test_extra_routes_passed_to_run_http(self, monkeypatch):
+        rec = _patch_happy_path(monkeypatch)
+        server_cmd.run(enable_mcp=True, enable_rest=True, interval_s=60)
+        extra = rec["run_http_extra_routes"]
+        assert len(extra) == 1
+        assert extra[0]  # non-empty list of Route objects
+        paths = {r.path for r in extra[0]}
+        assert paths == {"/health", "/quote/{symbol}"}
+
+    def test_no_rest_means_no_extra_routes(self, monkeypatch):
+        rec = _patch_happy_path(monkeypatch)
+        server_cmd.run(enable_mcp=True, enable_rest=False, interval_s=60)
+        assert rec["run_http_extra_routes"] == [None]
+
+
+# ---------------------------------------------------------------------------
+# --enable-rest (standalone, no --enable-mcp) — uvicorn + maintenance thread
+# ---------------------------------------------------------------------------
+
+class TestEnableRestStandalone:
+    def _patch(self, monkeypatch):
+        """Patch cfg+session present, maintenance.run_loop, uvicorn,
+        asyncio.run — fully hermetic (no reliance on a real ~/.config)."""
+        monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
+        # Future-dated session so the startup refresh-expiry check skips
+        # auto-login; and cheap logbook/notifier so no disk/network.
+        monkeypatch.setattr(
+            "schwab_cli.session.load", lambda: _future_session()
+        )
+        monkeypatch.setattr(
+            "schwab_cli.mcp_server.logbook.LogBook", lambda *a, **k: MagicMock()
+        )
+        monkeypatch.setattr(
+            "schwab_cli.notify.Notifier.from_file",
+            classmethod(lambda cls, **k: MagicMock()),
+        )
+        rec: dict = {"run_loop_kwargs": [], "served": False, "threads": []}
+
+        real_thread = server_cmd.threading.Thread
+
+        def _record_thread(*args, **kwargs):
+            rec["run_loop_kwargs"].append(kwargs.get("kwargs", {}))
+            t = real_thread(*args, **kwargs)
+            rec["threads"].append(t)
+            return t
+
+        monkeypatch.setattr(server_cmd.threading, "Thread", _record_thread)
+        monkeypatch.setattr(
+            "schwab_cli.server.maintenance.run_loop", lambda *a, **k: None
+        )
+
+        # build_rest_app must not pull in a real Schwab client.
+        monkeypatch.setattr(
+            "schwab_cli.server.rest.build_rest_app",
+            lambda: MagicMock(name="rest_app"),
+        )
+
+        # Fake uvicorn so .serve() records and returns without binding.
+        fake_uvicorn = MagicMock()
+
+        class _FakeServer:
+            def __init__(self, config):
+                rec["config"] = config
+
+            async def serve(self):
+                rec["served"] = True
+
+        fake_uvicorn.Server = _FakeServer
+        fake_uvicorn.Config = lambda *a, **k: {"args": a, "kwargs": k}
+        monkeypatch.setitem(
+            __import__("sys").modules, "uvicorn", fake_uvicorn
+        )
+
+        def _fake_asyncio_run(coro):
+            try:
+                coro.send(None)
+            except StopIteration:
+                pass
+            return None
+
+        monkeypatch.setattr(server_cmd.asyncio, "run", _fake_asyncio_run)
+        return rec
+
+    def test_starts_maintenance_thread_and_serves(self, monkeypatch):
+        rec = self._patch(monkeypatch)
+        result = server_cmd.run(
+            enable_rest=True, rest_host="127.0.0.1", rest_port=8000,
+            interval_s=90,
+        )
+        assert result == 0
+        assert rec["served"] is True
+        assert len(rec["threads"]) == 1
+        kwargs = rec["run_loop_kwargs"][0]
+        assert callable(kwargs["stop"])
+        assert callable(kwargs["sleep"])
+        assert kwargs["interval_s"] == 90
+
+    def test_maintenance_thread_is_daemon_and_stop_set(self, monkeypatch):
+        rec = self._patch(monkeypatch)
+        server_cmd.run(enable_rest=True, interval_s=60)
+        thread = rec["threads"][0]
+        assert thread.daemon is True
+        assert not thread.is_alive()
+        assert rec["run_loop_kwargs"][0]["stop"]() is True
+
+    def test_rest_host_port_passed_to_uvicorn_config(self, monkeypatch):
+        rec = self._patch(monkeypatch)
+        server_cmd.run(
+            enable_rest=True, rest_host="0.0.0.0", rest_port=9100,
+            interval_s=60,
+        )
+        cfg = rec["config"]
+        assert cfg["kwargs"]["host"] == "0.0.0.0"
+        assert cfg["kwargs"]["port"] == 9100
+
+    def test_no_config_exits_1(self, monkeypatch, capsys):
+        monkeypatch.setattr("schwab_cli.config.load", lambda: None)
+        with pytest.raises(SystemExit) as exc:
+            server_cmd.run(enable_rest=True, interval_s=60)
+        assert exc.value.code == 1
+        assert "No config" in "".join(capsys.readouterr())
+
+
+# ---------------------------------------------------------------------------
+# CLI wiring — `schwab server --enable-rest`
+# ---------------------------------------------------------------------------
+
+class TestCLIEnableRestWiring:
+    def test_cli_enable_rest_passes_through(self, monkeypatch):
+        try:
+            from schwab_cli.cli import app
+        except ImportError:
+            pytest.skip("cli not available")
+        from typer.testing import CliRunner
+
+        calls: list = []
+        monkeypatch.setattr(
+            "schwab_cli.commands.server.run",
+            lambda **k: calls.append(k) or 0,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["server", "--enable-rest", "--rest-host", "1.2.3.4",
+             "--rest-port", "8123"],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 1
+        assert calls[0]["enable_rest"] is True
+        assert calls[0]["rest_host"] == "1.2.3.4"
+        assert calls[0]["rest_port"] == 8123
+
+    def test_cli_bare_server_disables_rest(self, monkeypatch):
+        try:
+            from schwab_cli.cli import app
+        except ImportError:
+            pytest.skip("cli not available")
+        from typer.testing import CliRunner
+
+        calls: list = []
+        monkeypatch.setattr(
+            "schwab_cli.commands.server.run",
+            lambda **k: calls.append(k) or 0,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["server"])
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 1
+        assert calls[0]["enable_rest"] is False
+
+    def test_enable_rest_help_works(self, monkeypatch):
+        try:
+            from schwab_cli.cli import app
+        except ImportError:
+            pytest.skip("cli not available")
+        from typer.testing import CliRunner
+
+        monkeypatch.setenv("COLUMNS", "240")
+        runner = CliRunner()
+        result = runner.invoke(app, ["server", "--help"])
+        assert result.exit_code == 0
+        import re
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        compact = clean.replace("\n", " ").replace(" ", "")
+        assert "--enable-rest" in compact
+        assert "--rest-host" in compact
+        assert "--rest-port" in compact
