@@ -25,6 +25,7 @@ from schwab_cli.auth_handlers import (
     AuthResult,
     CodeRelayHandler,
     ErrorResult,
+    StaleCallbackError,
     UserInputHandler,
 )
 
@@ -210,6 +211,47 @@ def test_relay_returns_error_result_on_oauth_error(monkeypatch):
     }
 
 
+def test_relay_skips_stale_state_then_returns_matching(monkeypatch):
+    """The bug fix: a 200 carrying a STALE state (leftover callback from
+    a prior attempt — e.g. a browser profile that replayed an old
+    ?code=) must NOT abort the flow. The handler discards it and keeps
+    polling; the relay deletes-on-read, so the next poll returns OUR
+    matching callback."""
+    seq = [
+        _FakeResponse(200, "code=OLD&state=STALE"),  # leftover, mismatched
+        _FakeResponse(200, "code=MINE&state=S"),      # our real callback
+    ]
+
+    def side(url, **kw):
+        return seq.pop(0)
+
+    calls = _patch_httpx_get(monkeypatch, side)
+    h = CodeRelayHandler("https://relay/wait")
+    r = h.wait_for_response(expected_state="S")
+    assert r == {"kind": "code", "code": "MINE", "state": "S"}
+    # Proves it polled twice: discarded the stale one, fetched again.
+    assert len(calls) == 2
+
+
+def test_relay_skips_repeated_stale_until_deadline(monkeypatch):
+    """If the relay only ever serves stale callbacks, the handler keeps
+    discarding until the deadline rather than accepting a mismatch."""
+    _patch_httpx_get(
+        monkeypatch,
+        lambda url, **kw: _FakeResponse(200, "code=OLD&state=STALE"),
+    )
+    h = CodeRelayHandler("https://relay/wait", deadline_seconds=0.2)
+    with pytest.raises(AuthHandlerError, match="did not return a code"):
+        h.wait_for_response(expected_state="S")
+
+
+def test_stale_callback_error_is_authhandlererror():
+    """Paste path relies on StaleCallbackError still being an
+    AuthHandlerError so a pasted stale URL is surfaced to the user
+    (not silently swallowed). Subclass relationship is the contract."""
+    assert issubclass(StaleCallbackError, AuthHandlerError)
+
+
 def test_relay_retries_on_408(monkeypatch):
     seq = [_FakeResponse(408), _FakeResponse(408), _FakeResponse(200, "code=Z&state=S")]
 
@@ -252,13 +294,18 @@ def test_relay_raises_on_unexpected_status(monkeypatch):
         h.wait_for_response(expected_state="S")
 
 
-def test_relay_raises_on_state_mismatch(monkeypatch):
+def test_relay_never_accepts_mismatched_state(monkeypatch):
+    """CSRF contract: a mismatched state is NEVER accepted. Behaviour
+    changed from "raise immediately" to "discard + keep polling" (so a
+    stale leftover doesn't abort a valid flow) — but acceptance is still
+    impossible. With only-mismatched responses, it times out rather than
+    ever returning the wrong-state code."""
     _patch_httpx_get(
         monkeypatch,
         lambda url, **kw: _FakeResponse(200, "code=X&state=WRONG"),
     )
-    h = CodeRelayHandler("https://relay/wait")
-    with pytest.raises(AuthHandlerError, match="state"):
+    h = CodeRelayHandler("https://relay/wait", deadline_seconds=0.2)
+    with pytest.raises(AuthHandlerError):
         h.wait_for_response(expected_state="EXPECTED")
 
 
