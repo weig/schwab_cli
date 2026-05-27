@@ -78,6 +78,19 @@ class AuthHandlerError(Exception):
     :class:`ErrorResult` values via the race."""
 
 
+class StaleCallbackError(AuthHandlerError):
+    """A callback whose ``state`` doesn't match the one we generated for
+    this attempt — i.e. a leftover from a prior auth flow.
+
+    Subclasses :class:`AuthHandlerError` so the paste path (which has no
+    way to know whether a mismatch is stale vs. hostile) keeps treating
+    it as a hard error and tells the user. The relay path, by contrast,
+    catches this specifically and keeps polling: the relay deletes on
+    read, so a stale entry is drained and our real callback arrives on a
+    later poll. CSRF protection is unchanged — a mismatched state is
+    never *accepted*, only (in the relay case) skipped."""
+
+
 class AuthHandler(Protocol):
     """Structural type for handlers consumed by the auth-flow race.
 
@@ -186,7 +199,7 @@ def _from_querystring(
         # RFC 6749 §4.1.2.1 says providers SHOULD echo state in error
         # responses, but some skip it — accept missing rather than reject.
         if state is not None and state != expected_state:
-            raise AuthHandlerError(
+            raise StaleCallbackError(
                 "OAuth state mismatch on error response — possible CSRF or "
                 "stale callback. Restart the auth flow."
             )
@@ -203,7 +216,7 @@ def _from_querystring(
             "URL or querystring from the redirect page."
         )
     if state is not None and state != expected_state:
-        raise AuthHandlerError(
+        raise StaleCallbackError(
             "OAuth state mismatch — possible CSRF or stale callback. "
             "Restart the auth flow."
         )
@@ -276,9 +289,18 @@ class CodeRelayHandler:
                 ) from e
 
             if resp.status_code == 200:
-                return _from_querystring(
-                    resp.text, expected_state=expected_state,
-                )
+                try:
+                    return _from_querystring(
+                        resp.text, expected_state=expected_state,
+                    )
+                except StaleCallbackError:
+                    # Relay served a callback from a prior attempt (e.g.
+                    # a browser profile that restored the old callback
+                    # tab and replayed its ?code=). The relay deletes on
+                    # read, so that stale entry is now gone — keep
+                    # polling for OUR callback instead of aborting the
+                    # whole flow. The deadline still bounds the loop.
+                    continue
             if resp.status_code == 408:
                 continue
             if resp.status_code == 403:
