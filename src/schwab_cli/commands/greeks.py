@@ -14,18 +14,14 @@ from datetime import date
 
 import typer
 
+from schwab_cli.commands._error import cli_errors
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.greeks import render_greeks
-from schwab_cli.service.auth import (
-    ApiError,
-    NotAuthenticated,
-    NotConfigured,
-    SessionExpired,
-)
-from schwab_cli.service.greeks import ContractNotFound, get_greeks
+from schwab_cli.service.greeks import get_greeks
 from schwab_cli.ticker import TickerError, resolve as resolve_ticker
 
 
+@cli_errors
 def run(ticker_raw: str, *, as_json: bool, as_md: bool) -> None:
     try:
         fmt = pick_format(as_json, as_md)
@@ -52,33 +48,13 @@ def run(ticker_raw: str, *, as_json: bool, as_md: bool) -> None:
     assert opt is not None  # narrowed by the check above
     expiry_date = date(int(opt.date[:4]), int(opt.date[4:6]), int(opt.date[6:8]))
 
-    try:
-        result = get_greeks(
-            ticker.underlying,
-            strike=opt.strike,
-            expiry=expiry_date,
-            side=opt.type,
-        )
-    except NotConfigured:
-        typer.secho(
-            "No config found. Run `schwab_cli setup` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    except NotAuthenticated:
-        typer.secho(
-            "No session found. Run `schwab_cli auth` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    except ContractNotFound as e:
-        typer.secho(str(e), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except (ApiError, SessionExpired) as e:
-        msg = str(e) if str(e) else type(e).__name__
-        typer.secho(msg, fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    # ContractNotFound (a ServiceError carrying a complete message, exit 1) and
+    # the auth / API errors are routed through the @cli_errors decorator.
+    result = get_greeks(
+        ticker.underlying,
+        strike=opt.strike,
+        expiry=expiry_date,
+        side=opt.type,
+    )
 
     typer.echo(render_greeks(result.envelope, fmt=fmt))

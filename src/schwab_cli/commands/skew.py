@@ -26,12 +26,11 @@ from datetime import date
 import typer
 
 from schwab_cli.api.client import ApiError, SessionExpired
+from schwab_cli.commands._error import cli_errors
 from schwab_cli.option_spec import OptionSpecError, parse_option_spec
 from schwab_cli.output.format import Format, FormatError, pick_format
 from schwab_cli.output.skew import render_cross, render_skew, render_term
 from schwab_cli.service import skew as service_skew
-from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.skew import DiscoveryError, NoSkewData
 
 
 def _parse_yymmdd(s: str) -> date:
@@ -58,13 +57,10 @@ def _warn(message: str) -> None:
     typer.secho(message, fg=typer.colors.YELLOW, err=True)
 
 
-def _handle_auth_errors(e: Exception) -> None:
-    """Map auth / service errors to the legacy stderr messages + exit codes."""
-    if isinstance(e, NotConfigured):
-        _fail("No config found. Run `schwab_cli setup` first.", code=1)
-    if isinstance(e, NotAuthenticated):
-        _fail("No session found. Run `schwab_cli auth` first.", code=1)
-    raise e  # pragma: no cover - defensive; caller handles the rest
+# Auth errors (NotConfigured / NotAuthenticated) and the bare-message service
+# errors (NoSkewData with `str(e)`, DiscoveryError) are routed through the
+# @cli_errors decorator on `run`. Only the ApiError / SessionExpired cases that
+# need a *custom* wrapping message (naming the symbol / expiry) stay local.
 
 
 # ---- mode: L1 (single chain) ------------------------------------------
@@ -80,10 +76,6 @@ def _run_l1(
     expiry = _parse_yymmdd(expiry_str)
     try:
         result = service_skew.get_skew_l1(symbol, expiry, strikes=strikes)
-    except (NotConfigured, NotAuthenticated) as e:
-        _handle_auth_errors(e)
-    except NoSkewData as e:
-        _fail(str(e), code=1)
     except (ApiError, SessionExpired) as e:
         msg = str(e) if str(e) else type(e).__name__
         _fail(
@@ -104,14 +96,9 @@ def _run_term(
     fmt: Format,
 ) -> None:
     expiries = [_parse_yymmdd(s) for s in expiry_strs]
-    try:
-        result = service_skew.get_skew_term(
-            symbol, expiries, strikes=strikes, on_skip=_warn
-        )
-    except (NotConfigured, NotAuthenticated) as e:
-        _handle_auth_errors(e)
-    except NoSkewData as e:
-        _fail(str(e), code=1)
+    result = service_skew.get_skew_term(
+        symbol, expiries, strikes=strikes, on_skip=_warn
+    )
     typer.echo(render_term(result.metrics, fmt=fmt, symbol=result.symbol), nl=False)
 
 
@@ -129,10 +116,6 @@ def _run_dtes(
         result = service_skew.get_skew_dtes(
             symbol, target_dtes, strikes=strikes, on_skip=_warn
         )
-    except (NotConfigured, NotAuthenticated) as e:
-        _handle_auth_errors(e)
-    except NoSkewData as e:
-        _fail(str(e), code=1)
     except (ApiError, SessionExpired) as e:
         msg = str(e) if str(e) else type(e).__name__
         _fail(f"chain discovery failed for {symbol.upper()}: {msg}", code=1)
@@ -150,14 +133,9 @@ def _run_cross(
     fmt: Format,
 ) -> None:
     expiry = _parse_yymmdd(expiry_str)
-    try:
-        result = service_skew.get_skew_cross(
-            expiry, symbols, strikes=strikes, on_skip=_warn
-        )
-    except (NotConfigured, NotAuthenticated) as e:
-        _handle_auth_errors(e)
-    except NoSkewData as e:
-        _fail(str(e), code=1)
+    result = service_skew.get_skew_cross(
+        expiry, symbols, strikes=strikes, on_skip=_warn
+    )
     typer.echo(render_cross(result.metrics, fmt=fmt), nl=False)
 
 
@@ -177,29 +155,20 @@ def _run_cross_dtes(
     cycles), which is why the rendered ``DTE`` column is per-row rather
     than a shared header.
     """
-    try:
-        result = service_skew.get_skew_cross_dtes(
-            target_dte, symbols, strikes=strikes, on_skip=_warn
-        )
-    except (NotConfigured, NotAuthenticated) as e:
-        _handle_auth_errors(e)
-    except NoSkewData as e:
-        _fail(str(e), code=1)
-    except DiscoveryError as e:
-        # Discovery failure is fatal in this mode (one symbol's discovery
-        # call sinks the run), matching the pre-migration behavior. The
-        # typed error carries the symbol so the message names it.
-        _fail(str(e), code=1)
-    except (ApiError, SessionExpired) as e:
-        # Reached only via the up-front token mint (get_session) when the
-        # refresh token is dead; surface its actionable message.
-        _fail(str(e) if str(e) else type(e).__name__, code=1)
+    # NoSkewData, DiscoveryError (both ServiceError, bare `str(e)` + exit 1) and
+    # the up-front token-mint ApiError / SessionExpired all map to the canonical
+    # `str(e) or type(e).__name__` + exit 1 — identical to @cli_errors — so they
+    # are routed through the decorator on `run` rather than handled locally.
+    result = service_skew.get_skew_cross_dtes(
+        target_dte, symbols, strikes=strikes, on_skip=_warn
+    )
     typer.echo(render_cross(result.metrics, fmt=fmt), nl=False)
 
 
 # ---- entry point ------------------------------------------------------
 
 
+@cli_errors
 def run(
     args: list[str],
     *,

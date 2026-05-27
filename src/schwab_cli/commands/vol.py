@@ -13,18 +13,14 @@ from __future__ import annotations
 
 import typer
 
+from schwab_cli.commands._error import cli_errors
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.vol import render_vol
-from schwab_cli.service.auth import (
-    ApiError,
-    NotAuthenticated,
-    NotConfigured,
-    SessionExpired,
-)
-from schwab_cli.service.vol import NoVolData, VolStorageError, get_vol
+from schwab_cli.service.vol import VolStorageError, get_vol
 from schwab_cli.ticker import TickerError, resolve as resolve_ticker
 
 
+@cli_errors
 def run(
     symbol: str,
     *,
@@ -73,6 +69,9 @@ def run(
 
     on_backfill_notice = _on_backfill_notice if human else None
 
+    # VolStorageError is the one service error that prints in YELLOW (not the
+    # canonical RED), so it stays local; NoVolData / auth / API errors carry the
+    # canonical RED + exit-1 mapping and are routed through @cli_errors.
     try:
         result = get_vol(
             ticker.underlying,
@@ -84,28 +83,8 @@ def run(
             progress=progress,
             on_backfill_notice=on_backfill_notice,
         )
-    except NotConfigured:
-        typer.secho(
-            "No config found. Run `schwab_cli setup` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    except NotAuthenticated:
-        typer.secho(
-            "No session found. Run `schwab_cli auth` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
     except VolStorageError as e:
         typer.secho(str(e), fg=typer.colors.YELLOW, err=True)
-        raise typer.Exit(code=1)
-    except NoVolData as e:
-        typer.secho(str(e), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except (ApiError, SessionExpired) as e:
-        typer.secho(str(e) or type(e).__name__, fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     if result is None:

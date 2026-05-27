@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import typer
 
+from schwab_cli.commands._error import cli_errors
 from schwab_cli.history_spec import RangeSpecError, parse_range
 from schwab_cli.output.format import FormatError, pick_format
 from schwab_cli.output.transactions import render_transactions_result
 from schwab_cli.service import transactions as service_transactions
-from schwab_cli.service.auth import (
-    ApiError,
-    NotAuthenticated,
-    NotConfigured,
-    SessionExpired,
-)
 
 
+@cli_errors
 def run(
     account: str | None,
     *,
@@ -36,31 +32,12 @@ def run(
         code = 2 if getattr(e, "kind", "invalid") == "invalid" else 1
         raise typer.Exit(code=code)
 
-    try:
-        result = service_transactions.get_transactions(
-            account,
-            start=start,
-            end=end,
-            type_filter=type_filter,
-            refresh=refresh,
-        )
-    except NotConfigured:
-        typer.secho(
-            "No config found. Run `schwab_cli setup` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    except NotAuthenticated:
-        typer.secho(
-            "No session found. Run `schwab_cli auth` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    except (ApiError, SessionExpired) as e:
-        msg = str(e) if str(e) else type(e).__name__
-        typer.secho(msg, fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    result = service_transactions.get_transactions(
+        account,
+        start=start,
+        end=end,
+        type_filter=type_filter,
+        refresh=refresh,
+    )
 
     typer.echo(render_transactions_result(result, fmt=fmt))
