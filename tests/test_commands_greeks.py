@@ -13,6 +13,7 @@ response and verify:
 """
 
 import json
+import time
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -34,11 +35,13 @@ def _prep(monkeypatch, tmp_path):
         client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
     ))
+    # Future-dated session so the service-layer auth path does not attempt a
+    # real oauth.refresh — it only mints when the access token looks expired.
     save_session(Session(
         access_token="atok",
         refresh_token="rtok",
-        expires_at=1_000_000,
-        refresh_token_expires_at=2_000_000,
+        expires_at=int(time.time()) + 3600,
+        refresh_token_expires_at=int(time.time()) + 7 * 24 * 3600,
     ))
 
 
@@ -77,7 +80,7 @@ _CHAIN_RESP = {
 
 def test_greeks_happy_human(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.greeks.get_chain", return_value=_CHAIN_RESP):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=_CHAIN_RESP):
         result = runner.invoke(app, ["greeks", "NVDA260501C202.5"])
     assert result.exit_code == 0, result.output
     # Human rendering surfaces the canonical symbol, the strike, IV, and the
@@ -91,7 +94,7 @@ def test_greeks_happy_human(monkeypatch, tmp_path):
 
 def test_greeks_json_output_is_parseable(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.greeks.get_chain", return_value=_CHAIN_RESP):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=_CHAIN_RESP):
         result = runner.invoke(app, ["greeks", "NVDA260501C202.5", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -107,7 +110,7 @@ def test_greeks_json_output_is_parseable(monkeypatch, tmp_path):
 
 def test_greeks_md_output_has_table_sections(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.greeks.get_chain", return_value=_CHAIN_RESP):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=_CHAIN_RESP):
         result = runner.invoke(app, ["greeks", "NVDA260501C202.5", "--md"])
     assert result.exit_code == 0, result.output
     assert "## Quote" in result.output
@@ -126,20 +129,20 @@ def test_greeks_omits_strike_count_so_schwab_honors_strike(monkeypatch, tmp_path
     _prep(monkeypatch, tmp_path)
     captured: dict = {}
 
-    def fake_get_chain(client, symbol, **kwargs):
-        captured.update(kwargs)
+    def fake_get(path, *, params=None):
+        captured.update(params or {})
         return _CHAIN_RESP
 
-    with patch("schwab_cli.commands.greeks.get_chain", side_effect=fake_get_chain):
+    with patch("schwab_cli.api.client.SchwabClient.get", side_effect=fake_get):
         result = runner.invoke(app, ["greeks", "AMZN270115C00230000"])
     # Regardless of whether the mocked response has the strike, the key
-    # invariant is: strike_count was not sent.
-    assert captured.get("strike_count") is None, (
-        f"strike_count must be None so Schwab doesn't override `strike` "
-        f"with an ATM-window lookup; got {captured.get('strike_count')!r}"
+    # invariant is: strikeCount was not sent.
+    assert "strikeCount" not in captured, (
+        f"strikeCount must not be sent so Schwab doesn't override `strike` "
+        f"with an ATM-window lookup; got {captured.get('strikeCount')!r}"
     )
     # And `strike` must be the exact number we asked for.
-    assert captured.get("strike") == 230.0
+    assert captured.get("strike") == "230.0"
 
 
 def test_greeks_all_ticker_forms_same_api_call(monkeypatch, tmp_path):
@@ -147,8 +150,8 @@ def test_greeks_all_ticker_forms_same_api_call(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     captured: list[dict] = []
 
-    def fake_get_chain(client, symbol, **kwargs):
-        captured.append({"symbol": symbol, **kwargs})
+    def fake_get(path, *, params=None):
+        captured.append(dict(params or {}))
         return _CHAIN_RESP
 
     forms = [
@@ -156,7 +159,7 @@ def test_greeks_all_ticker_forms_same_api_call(monkeypatch, tmp_path):
         "NVDA  260501C00202500",
         "NVDA260501C00202500",
     ]
-    with patch("schwab_cli.commands.greeks.get_chain", side_effect=fake_get_chain):
+    with patch("schwab_cli.api.client.SchwabClient.get", side_effect=fake_get):
         for form in forms:
             result = runner.invoke(app, ["greeks", form, "--json"])
             assert result.exit_code == 0, f"{form}: {result.output}"
@@ -168,11 +171,11 @@ def test_greeks_all_ticker_forms_same_api_call(monkeypatch, tmp_path):
         assert c == first, f"drift: {first} vs {c}"
     # And the shape should be the expected one for this contract.
     assert first["symbol"] == "NVDA"
-    assert first["contract_type"] == "CALL"
-    assert first["strike"] == 202.5
-    assert first["strike_count"] is None  # must NOT be sent (see regression test)
-    assert first["from_date"].isoformat() == "2026-05-01"
-    assert first["to_date"].isoformat() == "2026-05-01"
+    assert first["contractType"] == "CALL"
+    assert first["strike"] == "202.5"
+    assert "strikeCount" not in first  # must NOT be sent (see regression test)
+    assert first["fromDate"] == "2026-05-01"
+    assert first["toDate"] == "2026-05-01"
 
 
 def test_greeks_rejects_stock_ticker(monkeypatch, tmp_path):
@@ -203,7 +206,7 @@ def test_greeks_missing_strike_returns_exit_1(monkeypatch, tmp_path):
         },
         "putExpDateMap": {},
     }
-    with patch("schwab_cli.commands.greeks.get_chain", return_value=resp):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=resp):
         result = runner.invoke(app, ["greeks", "NVDA260501C202.5"])
     assert result.exit_code == 1
     assert "No CALL contract" in result.output
@@ -230,7 +233,7 @@ def test_greeks_put_side_selects_put_variant(monkeypatch, tmp_path):
             "2026-05-01:9": {"202.5": [put_row]},
         },
     }
-    with patch("schwab_cli.commands.greeks.get_chain", return_value=resp):
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=resp):
         result = runner.invoke(app, ["greeks", "NVDA260501P202.5", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
