@@ -8,7 +8,7 @@ import pytest
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
 from schwab_cli.service.auth import NotAuthenticated, NotConfigured
-from schwab_cli.service.quotes import get_quote
+from schwab_cli.service.quotes import get_quote, get_quote_payload
 from schwab_cli.session import Session
 from schwab_cli.session import save as save_session
 
@@ -98,3 +98,22 @@ def test_get_quote_no_session_raises_not_authenticated(monkeypatch, tmp_path):
     )
     with pytest.raises(NotAuthenticated):
         get_quote(["AAPL"])
+
+
+# ---- get_quote_payload (MCP seam) -------------------------------------
+
+
+def test_get_quote_payload_returns_raw_payload(configured_home):
+    # Unlike get_quote, the payload variant returns the raw Schwab dict
+    # unchanged — no QuoteResult mapping.
+    with patch("schwab_cli.api.client.SchwabClient.get", return_value=_PAYLOAD):
+        payload = get_quote_payload(["AAPL"])
+    assert payload == _PAYLOAD
+    assert payload["AAPL"]["quote"]["lastPrice"] == 232.14
+
+
+def test_get_quote_payload_no_config_raises_not_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    with pytest.raises(NotConfigured):
+        get_quote_payload(["AAPL"])

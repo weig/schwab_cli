@@ -34,6 +34,30 @@ def _row_for(symbol: str, payload: dict, invalid: set[str]) -> QuoteRow:
     )
 
 
+def get_quote_payload(symbols: list[str], *, fields: str | None = None) -> dict:
+    """Owns auth + fetch for the MCP ``get_quote`` tool.
+
+    Loads config and session, builds the HTTP client, fetches quotes for
+    the given symbols, and returns the RAW Schwab payload dict unchanged.
+    Unlike :func:`get_quote`, this performs no mapping into a
+    :class:`QuoteResult` — the MCP tool serializes the raw payload as-is
+    so its output stays byte-identical to the pre-refactor daemon path.
+
+    The caller owns symbol normalization (the MCP tool upcases). We do NOT
+    apply ``to_schwab_form`` here — the pre-refactor daemon path didn't
+    either, and adding it would change the MCP output for class-share
+    tickers. (Contrast :func:`get_quote`, which normalizes for the CLI.)
+    """
+    cfg = config_module.load()
+    if cfg is None:
+        raise NotConfigured
+
+    session = service_auth.get_session(cfg)
+
+    with SchwabClient(cfg, session) as client:
+        return api_quotes.get_quotes(client, symbols, fields=fields)
+
+
 def get_quote(symbols: list[str], *, fields: str | None = None) -> QuoteResult:
     """Owns auth + business logic for the ``quote`` command.
 
