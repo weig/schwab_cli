@@ -10,6 +10,8 @@ token alive). Subcommands manage the macOS launchd LaunchAgent:
 
 from __future__ import annotations
 
+import asyncio
+import os
 import shutil
 import signal
 import subprocess
@@ -33,13 +35,39 @@ from schwab_cli.server.maintenance import DEFAULT_INTERVAL_S
 # ---- bare `server` runner --------------------------------------------
 
 
-def run(*, interval_s: int = DEFAULT_INTERVAL_S) -> int | None:
+def run(
+    *,
+    interval_s: int = DEFAULT_INTERVAL_S,
+    enable_mcp: bool = False,
+    mcp_host: str = "127.0.0.1",
+    mcp_port: int = 7234,
+    log_file: str | None = None,
+    no_log_file: bool = False,
+    no_auto_login: bool = False,
+) -> int | None:
     """Entry point for the bare ``schwab server`` call.
 
-    Loads config, installs SIGTERM/SIGINT handlers that flip a stop flag,
-    then drives :func:`maintenance.run_loop` until stopped. Returns 0 on
-    graceful exit.
+    Without ``--enable-mcp`` (the Phase 2 default) this loads config,
+    installs SIGTERM/SIGINT handlers that flip a stop flag, then drives
+    :func:`maintenance.run_loop` until stopped. Returns 0 on graceful
+    exit.
+
+    With ``enable_mcp=True`` it ALSO composes the Streamable HTTP MCP
+    server on top of the maintenance loop: the maintenance loop runs in
+    a daemon thread as the single proactive refresh-token renewer, and
+    the MCP server runs on the main thread with
+    ``auth_monitor_enabled=False`` so there is no competing rotation.
     """
+    if enable_mcp:
+        return _run_with_mcp(
+            interval_s=interval_s,
+            mcp_host=mcp_host,
+            mcp_port=mcp_port,
+            log_file=log_file,
+            no_log_file=no_log_file,
+            no_auto_login=no_auto_login,
+        )
+
     cfg = config_module.load()
     if cfg is None:
         typer.secho(
@@ -82,6 +110,173 @@ def run(*, interval_s: int = DEFAULT_INTERVAL_S) -> int | None:
         now=lambda: int(time.time()),
         notifier=notifier,
     )
+    typer.secho("server: stopped.", fg=typer.colors.CYAN, err=True)
+    return 0
+
+
+def _run_with_mcp(
+    *,
+    interval_s: int,
+    mcp_host: str,
+    mcp_port: int,
+    log_file: str | None,
+    no_log_file: bool,
+    no_auto_login: bool,
+) -> int | None:
+    """``schwab server --enable-mcp`` — maintenance loop + MCP HTTP server.
+
+    Mirrors :func:`schwab_cli.commands.mcp.run`'s startup (cfg + session
+    presence, logbook + notifier, refresh-expiry startup auto-login),
+    then runs the maintenance loop in a daemon thread (the single
+    refresh-token renewer) and the Streamable HTTP MCP server on the
+    main thread with ``auth_monitor_enabled=False``. uvicorn owns
+    SIGINT/SIGTERM, so we install NO signal handlers here.
+    """
+    from schwab_cli.api.client import SchwabClient
+    from schwab_cli.commands.mcp import (
+        _attempt_startup_autologin,
+        _resolve_log_file,
+    )
+    from schwab_cli.mcp_server.app import SchwabMcpServer
+    from schwab_cli.mcp_server.logbook import LogBook
+    from schwab_cli.session import load as load_session
+
+    cfg = config_module.load()
+    if cfg is None:
+        typer.secho(
+            "No config found. Run `schwab_cli setup` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise SystemExit(1)
+    session = load_session()
+    if session is None:
+        typer.secho(
+            "No session found. Run `schwab_cli auth` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise SystemExit(1)
+
+    # Logbook + notifier built before the refresh-expiry check so the
+    # startup auto-login path has both available.
+    resolved_log_file = _resolve_log_file(log_file, no_log_file)
+    logbook = LogBook(log_file=resolved_log_file)
+    from schwab_cli.notify import Notifier
+    notifier = Notifier.from_file(logbook=logbook)
+
+    now = int(time.time())
+    if session.refresh_token_expires_at <= now:
+        if no_auto_login:
+            typer.secho(
+                "Refresh token expired and --no-auto-login is set. "
+                "Run `schwab_cli auth --force` to re-authenticate, "
+                "then restart the server.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise SystemExit(1)
+        logbook.warning(
+            "daemon.startup_refresh_expired",
+            attempting_autologin=True,
+        )
+        fresh = _attempt_startup_autologin(logbook, notifier)
+        if fresh is None:
+            typer.secho(
+                "Startup auto-login failed. Check the log for details, "
+                "then run `schwab_cli auth --force` manually before "
+                "restarting.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise SystemExit(1)
+        session = fresh
+        logbook.info("daemon.startup_refresh_recovered")
+
+    # The MCP server runs with auth_monitor_enabled=False: the
+    # maintenance loop is the single proactive renewer, so the MCP
+    # server must not run a competing rotation.
+    client = SchwabClient(cfg, session)
+    server = SchwabMcpServer(
+        client, logbook,
+        notifier=notifier,
+        auth_monitor_enabled=False,
+    )
+
+    # Maintenance notifier: forwards tick events through the SAME notifier
+    # the MCP server uses (no second notification.json load) AND hands the
+    # freshly-renewed session to the persistent client's in-memory state.
+    # Without this handoff, after the loop rotates the refresh token the
+    # client would keep its boot-time refresh token in memory and fail its
+    # next 401 refresh against a token Schwab already invalidated — even
+    # though session.json on disk is valid. Mirrors the auth_monitor's
+    # `_on_rotation_success` handoff (which is disabled here).
+    _event_for = {
+        "renewed": "scheduler.proactive_auth_succeeded",
+        "renew_failed": "scheduler.proactive_auth_failed",
+        "token_ensured": "scheduler.proactive_auth_skipped",
+        "token_failed": "scheduler.proactive_auth_failed",
+    }
+
+    def _maint_notify(tick) -> None:
+        if tick.action in ("renewed", "token_ensured"):
+            fresh = load_session()
+            if fresh is not None:
+                # Atomic attribute rebind — the same in-memory handoff
+                # `_on_rotation_success` performs on `_client._session`.
+                client._session = fresh
+                logbook.info("daemon.session_handoff", action=tick.action)
+        event = _event_for.get(tick.action)
+        if event is not None:
+            try:
+                notifier.emit(event, detail=tick.detail)
+            except Exception:  # noqa: BLE001 — never break a tick
+                pass
+
+    # The maintenance loop owns ongoing refresh-token renewal — start it
+    # in a daemon thread.
+    stop_event = threading.Event()
+    maint = threading.Thread(
+        target=maintenance.run_loop,
+        args=(cfg,),
+        kwargs=dict(
+            stop=stop_event.is_set,
+            sleep=stop_event.wait,
+            now=lambda: int(time.time()),
+            interval_s=interval_s,
+            notifier=_maint_notify,
+        ),
+        daemon=True,
+        name="schwab-server-maintenance",
+    )
+    maint.start()
+
+    logbook.info(
+        "daemon.start",
+        pid=os.getpid(),
+        transport="http",
+        bind=f"{mcp_host}:{mcp_port}",
+        maintenance=True,
+        interval_s=interval_s,
+        log_file=str(resolved_log_file) if resolved_log_file else None,
+    )
+    typer.secho(
+        f"server: starting MCP HTTP server on {mcp_host}:{mcp_port} "
+        f"+ auth-maintenance loop (interval {interval_s}s)",
+        fg=typer.colors.CYAN, err=True,
+    )
+    crashed = False
+    try:
+        asyncio.run(server.run_http(mcp_host, mcp_port))
+    except KeyboardInterrupt:
+        logbook.info("daemon.stop", reason="SIGINT")
+    except Exception as e:
+        crashed = True
+        logbook.error("daemon.crash", error=f"{type(e).__name__}: {e}")
+        raise
+    finally:
+        stop_event.set()
+        maint.join(timeout=5)
+        if maint.is_alive():
+            logbook.warning("daemon.maintenance_stop_timeout")
+        elif not crashed:
+            logbook.info("daemon.stop", reason="maintenance_stopped")
     typer.secho("server: stopped.", fg=typer.colors.CYAN, err=True)
     return 0
 

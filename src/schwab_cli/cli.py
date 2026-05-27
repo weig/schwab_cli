@@ -662,8 +662,11 @@ server_app = typer.Typer(
     help=(
         "Run and manage the auth-maintenance server. Bare `server` "
         "runs a long-lived loop that keeps the OAuth refresh token "
-        "alive; use subcommands to install / uninstall / check the "
-        "launchd LaunchAgent."
+        "alive. Add `--enable-mcp` to ALSO run the Streamable HTTP MCP "
+        "server on top of that always-running maintenance loop (the "
+        "loop is the single proactive token renewer; the MCP server "
+        "runs with auth monitoring disabled). Use subcommands to "
+        "install / uninstall / check the launchd LaunchAgent."
     ),
     no_args_is_help=False,
     invoke_without_command=True,
@@ -678,11 +681,57 @@ def server_root(
         8.0, "--interval-hours",
         help="Hours between maintenance ticks. Default: 8.",
     ),
+    enable_mcp: bool = typer.Option(
+        False, "--enable-mcp",
+        help=(
+            "Also run the Streamable HTTP MCP server on top of the "
+            "always-running maintenance loop. The loop remains the "
+            "single proactive refresh-token renewer; the MCP server "
+            "runs with auth monitoring disabled to avoid competing "
+            "rotation."
+        ),
+    ),
+    mcp_host: str = typer.Option(
+        "127.0.0.1", "--mcp-host",
+        help="MCP HTTP bind host (only used with --enable-mcp). "
+        "Loopback-only by default.",
+    ),
+    mcp_port: int = typer.Option(
+        7234, "--mcp-port",
+        help="MCP HTTP bind port (only used with --enable-mcp).",
+    ),
+    log_file: str = typer.Option(
+        None, "--log-file",
+        help="Path to the MCP structured log file (only used with "
+        "--enable-mcp). Default: ~/.config/schwab_cli/mcp.log.",
+    ),
+    no_log_file: bool = typer.Option(
+        False, "--no-log-file",
+        help="Disable the MCP disk log; events still go to stderr "
+        "(only used with --enable-mcp).",
+    ),
+    no_auto_login: bool = typer.Option(
+        False, "--no-auto-login",
+        help=(
+            "Disable browser auto-login at MCP startup (only used with "
+            "--enable-mcp). If the refresh token has expired at "
+            "startup, exit 1 instead of spawning `schwab_cli auth "
+            "--force`."
+        ),
+    ),
 ) -> None:
-    """Bare `schwab server` → run the auth-maintenance loop."""
+    """Bare `schwab server` → maintenance loop; `--enable-mcp` adds MCP."""
     if ctx.invoked_subcommand is not None:
         return
-    server_cmd.run(interval_s=int(interval_hours * 3600))
+    server_cmd.run(
+        interval_s=int(interval_hours * 3600),
+        enable_mcp=enable_mcp,
+        mcp_host=mcp_host,
+        mcp_port=mcp_port,
+        log_file=log_file,
+        no_log_file=no_log_file,
+        no_auto_login=no_auto_login,
+    )
 
 
 @server_app.command("install", help="Install + load the launchd LaunchAgent.")
