@@ -18,6 +18,7 @@ from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import order as order_cmd
 from schwab_cli.commands import profile as profile_cmd
 from schwab_cli.commands import quote as quote_cmd
+from schwab_cli.commands import server as server_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import skew as skew_cmd
 from schwab_cli.commands import strategy as strategy_cmd
@@ -645,6 +646,67 @@ def mcp_install(
         stdio=stdio, url=url, token=token, settings=settings,
         yes=yes, force=force,
     )
+
+
+# ---- server sub-app ---------------------------------------------------
+
+server_app = typer.Typer(
+    help=(
+        "Run and manage the auth-maintenance server. Bare `server` "
+        "runs a long-lived loop that keeps the OAuth refresh token "
+        "alive; use subcommands to install / uninstall / check the "
+        "launchd LaunchAgent."
+    ),
+    no_args_is_help=False,
+    invoke_without_command=True,
+)
+app.add_typer(server_app, name="server")
+
+
+@server_app.callback(invoke_without_command=True)
+def server_root(
+    ctx: typer.Context,
+    interval_hours: float = typer.Option(
+        8.0, "--interval-hours",
+        help="Hours between maintenance ticks. Default: 8.",
+    ),
+) -> None:
+    """Bare `schwab server` → run the auth-maintenance loop."""
+    if ctx.invoked_subcommand is not None:
+        return
+    server_cmd.run(interval_s=int(interval_hours * 3600))
+
+
+@server_app.command("install", help="Install + load the launchd LaunchAgent.")
+def server_install(
+    plist_path: str = typer.Option(
+        None, "--plist-path",
+        help="Override plist path (default: ~/Library/LaunchAgents/"
+        "com.schwab-cli.server.plist).",
+    ),
+    log_file: str = typer.Option(
+        None, "--log-file",
+        help="Capture stdout+stderr to this file.",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
+) -> None:
+    server_cmd.run_install(plist_path=plist_path, log_file=log_file, yes=yes)
+
+
+@server_app.command("uninstall", help="Unload and remove the launchd plist.")
+def server_uninstall(
+    plist_path: str = typer.Option(
+        None, "--plist-path",
+        help="Override plist path.",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
+) -> None:
+    server_cmd.run_uninstall(plist_path=plist_path, yes=yes)
+
+
+@server_app.command("status", help="Report whether the server job is loaded.")
+def server_status() -> None:
+    server_cmd.run_status()
 
 
 @app.command(
