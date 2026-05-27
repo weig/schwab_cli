@@ -42,3 +42,42 @@ class GreeksResult:
     """
 
     envelope: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class AccountsResult:
+    """List-of-accounts view.
+
+    Wraps the raw Schwab account payloads (one ``Mapping`` per account)
+    that ``output.accounts.render_accounts`` consumes verbatim, keeping the
+    rendered HUMAN/JSON/MD output byte-identical to the pre-migration
+    command. Typed as a read-only ``tuple`` of ``Mapping`` to signal callers
+    must not mutate it.
+    """
+
+    accounts: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class AccountResult:
+    """Single-account view.
+
+    Wraps the raw Schwab account payload that
+    ``output.accounts.render_account`` consumes verbatim. Typed as a
+    read-only ``Mapping`` to signal callers must not mutate it.
+    """
+
+    account: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class PositionsResult:
+    """Flat list of position rows view.
+
+    Wraps the raw position-row dicts (each carrying the synthetic
+    ``_account`` key) that ``output.accounts.render_positions`` consumes
+    verbatim. Typed as a read-only ``tuple`` of ``Mapping`` to signal
+    callers must not mutate it.
+    """
+
+    positions: tuple[Mapping[str, Any], ...]

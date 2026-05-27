@@ -4,21 +4,17 @@ These tests pin the CURRENT observable behaviour of all three commands end-to-en
 so that the upcoming service-layer migration can be proven behaviour-preserving
 without altering production code.
 
-Seam used: the Layer-1 api function names as they are bound in
-``schwab_cli.commands.accounts`` --
-  ``schwab_cli.commands.accounts.list_accounts``
-  ``schwab_cli.commands.accounts.get_account``
-  ``schwab_cli.commands.accounts.get_positions``
+Seam used: the Layer-1 api functions at their DEFINITION site --
+  ``schwab_cli.api.accounts.list_accounts``
+  ``schwab_cli.api.accounts.get_account``
+  ``schwab_cli.api.accounts.get_positions``
 
-``commands/accounts.py`` imports these from ``schwab_cli.api.accounts`` with a
-``from ... import`` statement, so the binding lives in the commands namespace.
-To intercept the calls while still exercising the full command stack (format
-flag handling, rendering) we must patch where the name is used, not where it
-is defined.
-
-After the service-layer migration, the commands will call a service shim that
-itself calls the Layer-1 api functions.  At that point this file's patch
-targets will be updated to ``schwab_cli.api.accounts.*``.
+The service shim (``service/accounts.py``) calls these via module-attribute
+access (``from schwab_cli.api import accounts as api_accounts`` then
+``api_accounts.list_accounts(client)``), so patching the definition site
+intercepts the call while still exercising the full stack (auth, format-flag
+handling, rendering). This is the stable seam across the service-layer
+migration.
 
 Golden values were captured by running the current code and recording its output
 verbatim.  Do NOT alter golden constants without first verifying that the
@@ -228,7 +224,7 @@ def test_accounts_human_exit_code(monkeypatch, tmp_path):
     """Happy-path HUMAN output must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts"])
     assert result.exit_code == 0, result.output
@@ -238,7 +234,7 @@ def test_accounts_human_contains_accounts_title(monkeypatch, tmp_path):
     """HUMAN output must contain the 'Accounts' table title."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts"])
     assert "Accounts" in result.output
@@ -248,7 +244,7 @@ def test_accounts_human_contains_masked_account_numbers(monkeypatch, tmp_path):
     """HUMAN output must show masked account numbers (last 4 digits)."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts"])
     assert "5678" in result.output
@@ -259,7 +255,7 @@ def test_accounts_human_contains_account_types(monkeypatch, tmp_path):
     """HUMAN output must show account types (MARGIN, CASH)."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts"])
     assert "MARGIN" in result.output
@@ -270,7 +266,7 @@ def test_accounts_human_contains_column_headers(monkeypatch, tmp_path):
     """HUMAN output must show all expected column headers."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts"])
     for header in ("Net Liq", "BP (Stock)", "BP (Option)", "Cash", "Maint Req", "Positions"):
@@ -281,7 +277,7 @@ def test_accounts_human_contains_liquidation_value(monkeypatch, tmp_path):
     """HUMAN output must show formatted liquidation values."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts"])
     assert "12,345.67" in result.output
@@ -292,7 +288,7 @@ def test_accounts_human_does_not_expose_full_account_number(monkeypatch, tmp_pat
     """HUMAN output must NOT contain full account numbers (security mask)."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts"])
     # The full 8-digit numbers must not appear in HUMAN table
@@ -307,7 +303,7 @@ def test_accounts_json_exit_code(monkeypatch, tmp_path):
     """JSON output must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--json"])
     assert result.exit_code == 0, result.output
@@ -317,7 +313,7 @@ def test_accounts_json_is_list(monkeypatch, tmp_path):
     """JSON output must be a list."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--json"])
     data = json.loads(result.stdout)
@@ -329,7 +325,7 @@ def test_accounts_json_row_keys(monkeypatch, tmp_path):
     """JSON rows must contain exactly the golden set of keys."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--json"])
     data = json.loads(result.stdout)
@@ -341,7 +337,7 @@ def test_accounts_json_margin_row_values(monkeypatch, tmp_path):
     """JSON MARGIN row must contain exact golden field values."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--json"])
     data = json.loads(result.stdout)
@@ -360,7 +356,7 @@ def test_accounts_json_cash_row_null_fields(monkeypatch, tmp_path):
     """JSON CASH row must have null for absent buying-power / maintenance fields."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--json"])
     data = json.loads(result.stdout)
@@ -380,7 +376,7 @@ def test_accounts_md_exit_code(monkeypatch, tmp_path):
     """MD output must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--md"])
     assert result.exit_code == 0, result.output
@@ -390,7 +386,7 @@ def test_accounts_md_exact_header_line(monkeypatch, tmp_path):
     """MD output must contain the exact golden header line."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--md"])
     assert _GOLDEN_ACCOUNTS_MD_HEADER in result.stdout
@@ -400,7 +396,7 @@ def test_accounts_md_exact_separator_line(monkeypatch, tmp_path):
     """MD output must contain the exact golden separator line."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--md"])
     assert _GOLDEN_ACCOUNTS_MD_SEP in result.stdout
@@ -410,7 +406,7 @@ def test_accounts_md_exact_margin_row(monkeypatch, tmp_path):
     """MD output must contain the exact golden MARGIN account data row."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--md"])
     assert _GOLDEN_ACCOUNTS_MD_MARGIN_ROW in result.stdout
@@ -420,7 +416,7 @@ def test_accounts_md_exact_cash_row(monkeypatch, tmp_path):
     """MD output must contain the exact golden CASH account data row (with em-dashes)."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--md"])
     assert _GOLDEN_ACCOUNTS_MD_CASH_ROW in result.stdout
@@ -430,7 +426,7 @@ def test_accounts_md_no_ansi_codes(monkeypatch, tmp_path):
     """MD output must not contain ANSI escape codes."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts", return_value=_ACCOUNTS
+        "schwab_cli.api.accounts.list_accounts", return_value=_ACCOUNTS
     ):
         result = runner.invoke(app, ["accounts", "--md"])
     assert "\x1b[" not in result.stdout
@@ -448,7 +444,7 @@ def test_account_human_exit_code(monkeypatch, tmp_path):
     """Happy-path HUMAN output for account show must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678"])
     assert result.exit_code == 0, result.output
@@ -458,7 +454,7 @@ def test_account_human_contains_account_title(monkeypatch, tmp_path):
     """HUMAN output must contain the account title with masked number."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678"])
     assert "...5678" in result.output
@@ -468,7 +464,7 @@ def test_account_human_contains_type(monkeypatch, tmp_path):
     """HUMAN output must show the account type."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678"])
     assert "MARGIN" in result.output
@@ -478,7 +474,7 @@ def test_account_human_contains_full_number_in_number_row(monkeypatch, tmp_path)
     """HUMAN output must show the full account number in the 'Number' field row."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678"])
     assert "12345678" in result.output
@@ -488,7 +484,7 @@ def test_account_human_contains_balance_fields(monkeypatch, tmp_path):
     """HUMAN output must show all balance field labels."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678"])
     for label in (
@@ -507,7 +503,7 @@ def test_account_human_contains_formatted_values(monkeypatch, tmp_path):
     """HUMAN output must show formatted monetary values."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678"])
     assert "12,345.67" in result.output
@@ -522,7 +518,7 @@ def test_account_json_exit_code(monkeypatch, tmp_path):
     """JSON output must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--json"])
     assert result.exit_code == 0, result.output
@@ -532,7 +528,7 @@ def test_account_json_top_level_keys(monkeypatch, tmp_path):
     """JSON output must have exactly these top-level keys."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--json"])
     data = json.loads(result.stdout)
@@ -549,7 +545,7 @@ def test_account_json_account_number(monkeypatch, tmp_path):
     """JSON output must have the full (unmasked) account number."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--json"])
     data = json.loads(result.stdout)
@@ -560,7 +556,7 @@ def test_account_json_type(monkeypatch, tmp_path):
     """JSON output ``type`` must equal 'MARGIN'."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--json"])
     data = json.loads(result.stdout)
@@ -571,7 +567,7 @@ def test_account_json_current_balances_values(monkeypatch, tmp_path):
     """JSON currentBalances must pass through raw values from the API payload."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--json"])
     data = json.loads(result.stdout)
@@ -588,7 +584,7 @@ def test_account_json_position_count(monkeypatch, tmp_path):
     """JSON positionCount must be 0 (no positions in canned payload)."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--json"])
     data = json.loads(result.stdout)
@@ -602,7 +598,7 @@ def test_account_md_exit_code(monkeypatch, tmp_path):
     """MD output must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--md"])
     assert result.exit_code == 0, result.output
@@ -612,7 +608,7 @@ def test_account_md_exact_heading(monkeypatch, tmp_path):
     """MD output must start with the exact golden H1 heading."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--md"])
     assert _GOLDEN_ACCOUNT_MD_HEADING in result.stdout
@@ -622,7 +618,7 @@ def test_account_md_exact_number_line(monkeypatch, tmp_path):
     """MD output must contain the exact Number line."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--md"])
     assert _GOLDEN_ACCOUNT_MD_NUMBER_LINE in result.stdout
@@ -632,7 +628,7 @@ def test_account_md_exact_type_line(monkeypatch, tmp_path):
     """MD output must contain the exact Type line."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--md"])
     assert _GOLDEN_ACCOUNT_MD_TYPE_LINE in result.stdout
@@ -642,7 +638,7 @@ def test_account_md_all_balance_lines(monkeypatch, tmp_path):
     """MD output must contain all exact golden balance lines."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--md"])
     for golden_line in (
@@ -661,7 +657,7 @@ def test_account_md_no_ansi_codes(monkeypatch, tmp_path):
     """MD output must not contain ANSI escape codes."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account", return_value=_SINGLE_ACCOUNT
+        "schwab_cli.api.accounts.get_account", return_value=_SINGLE_ACCOUNT
     ):
         result = runner.invoke(app, ["account", "12345678", "--md"])
     assert "\x1b[" not in result.stdout
@@ -679,7 +675,7 @@ def test_positions_human_exit_code(monkeypatch, tmp_path):
     """Happy-path HUMAN output for positions must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions"])
     assert result.exit_code == 0, result.output
@@ -689,7 +685,7 @@ def test_positions_human_contains_positions_title(monkeypatch, tmp_path):
     """HUMAN output must contain the 'Positions' table title."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions"])
     assert "Positions" in result.output
@@ -699,7 +695,7 @@ def test_positions_human_contains_symbols(monkeypatch, tmp_path):
     """HUMAN output must show both AAPL and MSFT symbols."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions"])
     assert "AAPL" in result.output
@@ -710,7 +706,7 @@ def test_positions_human_contains_avg_price(monkeypatch, tmp_path):
     """HUMAN output must show formatted average prices."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions"])
     assert "200.00" in result.output
@@ -721,7 +717,7 @@ def test_positions_human_contains_column_headers(monkeypatch, tmp_path):
     """HUMAN output must show all expected column headers."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions"])
     for header in ("Account", "Symbol", "Qty", "Avg Price", "Market Value", "Day P&L", "Total P&L"):
@@ -760,7 +756,7 @@ def test_positions_human_synthetic_account_key_surfaces(monkeypatch, tmp_path):
     """HUMAN output must show the masked account numbers from the _account key."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions"])
     assert "5678" in result.output
@@ -774,7 +770,7 @@ def test_positions_json_exit_code(monkeypatch, tmp_path):
     """JSON output for positions must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--json"])
     assert result.exit_code == 0, result.output
@@ -784,7 +780,7 @@ def test_positions_json_is_list(monkeypatch, tmp_path):
     """JSON output must be a list of two rows."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--json"])
     data = json.loads(result.stdout)
@@ -796,7 +792,7 @@ def test_positions_json_row_keys(monkeypatch, tmp_path):
     """JSON rows must contain exactly the golden set of keys."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--json"])
     data = json.loads(result.stdout)
@@ -808,7 +804,7 @@ def test_positions_json_aapl_row_values(monkeypatch, tmp_path):
     """JSON AAPL row must contain exact golden field values."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--json"])
     data = json.loads(result.stdout)
@@ -826,7 +822,7 @@ def test_positions_json_msft_row_values(monkeypatch, tmp_path):
     """JSON MSFT row must contain exact golden field values including negative P&L."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--json"])
     data = json.loads(result.stdout)
@@ -844,7 +840,7 @@ def test_positions_json_synthetic_account_key_in_account_field(monkeypatch, tmp_
     """JSON ``account`` field must equal the synthetic ``_account`` key from the API."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--json"])
     data = json.loads(result.stdout)
@@ -856,7 +852,7 @@ def test_positions_json_no_ansi_codes(monkeypatch, tmp_path):
     """JSON output must not contain ANSI escape codes."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--json"])
     assert "\x1b[" not in result.stdout
@@ -869,7 +865,7 @@ def test_positions_md_exit_code(monkeypatch, tmp_path):
     """MD output for positions must exit 0."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--md"])
     assert result.exit_code == 0, result.output
@@ -879,7 +875,7 @@ def test_positions_md_exact_header_line(monkeypatch, tmp_path):
     """MD output must contain the exact golden header line."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--md"])
     assert _GOLDEN_POSITIONS_MD_HEADER in result.stdout
@@ -889,7 +885,7 @@ def test_positions_md_exact_aapl_row(monkeypatch, tmp_path):
     """MD output must contain the exact golden AAPL data row."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--md"])
     assert _GOLDEN_POSITIONS_MD_AAPL_ROW in result.stdout
@@ -899,7 +895,7 @@ def test_positions_md_exact_msft_row(monkeypatch, tmp_path):
     """MD output must contain the exact golden MSFT data row (negative day P&L)."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--md"])
     assert _GOLDEN_POSITIONS_MD_MSFT_ROW in result.stdout
@@ -909,7 +905,7 @@ def test_positions_md_no_ansi_codes(monkeypatch, tmp_path):
     """MD output must not contain ANSI escape codes."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=_POSITION_ROWS
+        "schwab_cli.api.accounts.get_positions", return_value=_POSITION_ROWS
     ):
         result = runner.invoke(app, ["positions", "--md"])
     assert "\x1b[" not in result.stdout
@@ -928,7 +924,7 @@ def test_positions_filtered_passes_account_number_to_api(monkeypatch, tmp_path):
         return _POSITION_ROWS
 
     with patch(
-        "schwab_cli.commands.accounts.get_positions", side_effect=fake_get_positions
+        "schwab_cli.api.accounts.get_positions", side_effect=fake_get_positions
     ):
         result = runner.invoke(app, ["positions", "5678"])
     assert result.exit_code == 0, result.output
@@ -945,7 +941,7 @@ def test_positions_filtered_passes_none_when_no_account(monkeypatch, tmp_path):
         return _POSITION_ROWS
 
     with patch(
-        "schwab_cli.commands.accounts.get_positions", side_effect=fake_get_positions
+        "schwab_cli.api.accounts.get_positions", side_effect=fake_get_positions
     ):
         result = runner.invoke(app, ["positions"])
     assert result.exit_code == 0, result.output
@@ -958,7 +954,7 @@ def test_positions_filtered_json_contains_correct_rows(monkeypatch, tmp_path):
     single_row = [_POSITION_ROWS[0]]  # only AAPL
 
     with patch(
-        "schwab_cli.commands.accounts.get_positions", return_value=single_row
+        "schwab_cli.api.accounts.get_positions", return_value=single_row
     ):
         result = runner.invoke(app, ["positions", "5678", "--json"])
     assert result.exit_code == 0, result.output
@@ -1097,7 +1093,7 @@ def test_accounts_session_expired_exit_1(monkeypatch, tmp_path):
     """SessionExpired on list_accounts must exit 1."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts",
+        "schwab_cli.api.accounts.list_accounts",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["accounts"])
@@ -1108,7 +1104,7 @@ def test_accounts_session_expired_message(monkeypatch, tmp_path):
     """SessionExpired on list_accounts must surface the exception message."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts",
+        "schwab_cli.api.accounts.list_accounts",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["accounts"])
@@ -1119,7 +1115,7 @@ def test_account_session_expired_exit_1(monkeypatch, tmp_path):
     """SessionExpired on get_account must exit 1."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account",
+        "schwab_cli.api.accounts.get_account",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["account", "12345678"])
@@ -1130,7 +1126,7 @@ def test_account_session_expired_message(monkeypatch, tmp_path):
     """SessionExpired on get_account must surface the exception message."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account",
+        "schwab_cli.api.accounts.get_account",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["account", "12345678"])
@@ -1141,7 +1137,7 @@ def test_positions_session_expired_exit_1(monkeypatch, tmp_path):
     """SessionExpired on get_positions must exit 1."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions",
+        "schwab_cli.api.accounts.get_positions",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["positions"])
@@ -1152,7 +1148,7 @@ def test_positions_session_expired_message(monkeypatch, tmp_path):
     """SessionExpired on get_positions must surface the exception message."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions",
+        "schwab_cli.api.accounts.get_positions",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["positions"])
@@ -1166,7 +1162,7 @@ def test_accounts_api_error_exit_1(monkeypatch, tmp_path):
     """ApiError on list_accounts must exit 1."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts",
+        "schwab_cli.api.accounts.list_accounts",
         side_effect=ApiError("500 internal server error"),
     ):
         result = runner.invoke(app, ["accounts"])
@@ -1177,7 +1173,7 @@ def test_accounts_api_error_message(monkeypatch, tmp_path):
     """ApiError on list_accounts must surface the error message."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.list_accounts",
+        "schwab_cli.api.accounts.list_accounts",
         side_effect=ApiError("500 internal server error"),
     ):
         result = runner.invoke(app, ["accounts"])
@@ -1188,7 +1184,7 @@ def test_account_api_error_exit_1(monkeypatch, tmp_path):
     """ApiError on get_account must exit 1."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account",
+        "schwab_cli.api.accounts.get_account",
         side_effect=ApiError("Account '99' not found. Available: ...5678."),
     ):
         result = runner.invoke(app, ["account", "99"])
@@ -1199,7 +1195,7 @@ def test_account_api_error_message(monkeypatch, tmp_path):
     """ApiError on get_account must surface 'not found' in output."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_account",
+        "schwab_cli.api.accounts.get_account",
         side_effect=ApiError("Account '99' not found. Available: ...5678."),
     ):
         result = runner.invoke(app, ["account", "99"])
@@ -1210,7 +1206,7 @@ def test_positions_api_error_exit_1(monkeypatch, tmp_path):
     """ApiError on get_positions must exit 1."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions",
+        "schwab_cli.api.accounts.get_positions",
         side_effect=ApiError("503 Service Unavailable"),
     ):
         result = runner.invoke(app, ["positions"])
@@ -1221,7 +1217,7 @@ def test_positions_api_error_message(monkeypatch, tmp_path):
     """ApiError on get_positions must surface the error message in output."""
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.accounts.get_positions",
+        "schwab_cli.api.accounts.get_positions",
         side_effect=ApiError("503 Service Unavailable"),
     ):
         result = runner.invoke(app, ["positions"])
