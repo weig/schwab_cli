@@ -480,15 +480,19 @@ def mcp_root(
     ctx: typer.Context,
     stdio: bool = typer.Option(
         True, "--stdio/--sse",
-        help="Transport. --sse runs a long-lived daemon on --host / --port.",
+        help=(
+            "Transport. --sse runs a long-lived Streamable HTTP daemon "
+            "(serving /mcp) on --host / --port. The flag name is kept "
+            "for back-compat; the transport is now Streamable HTTP."
+        ),
     ),
     host: str = typer.Option(
         "127.0.0.1", "--host",
-        help="SSE bind host. Loopback-only by default.",
+        help="HTTP bind host. Loopback-only by default.",
     ),
     port: int = typer.Option(
         7234, "--port",
-        help="SSE bind port.",
+        help="HTTP bind port.",
     ),
     log_file: str = typer.Option(
         None, "--log-file",
@@ -523,7 +527,7 @@ def mcp_root(
 def mcp_status(
     url: str = typer.Option(
         None, "--url",
-        help="SSE URL of the running server (default: http://127.0.0.1:7234).",
+        help="Base URL of the running server (default: http://127.0.0.1:7234).",
     ),
     token: str = typer.Option(None, "--token", help="Bearer token if set at start."),
     as_json: bool = typer.Option(False, "--json", help="Raw JSON output."),
@@ -578,8 +582,8 @@ def mcp_restart(
 @mcp_app.command(
     "install-service",
     help=(
-        "Install a macOS launchd LaunchAgent so the SSE daemon "
-        "starts on login and restarts on exit."
+        "Install a macOS launchd LaunchAgent so the Streamable HTTP "
+        "daemon starts on login and restarts on exit."
     ),
 )
 def mcp_install_service(
@@ -625,15 +629,18 @@ def mcp_uninstall_service(
 def mcp_install(
     stdio: bool = typer.Option(
         False, "--stdio/--sse",
-        help="Which entry to install. Default is SSE if a daemon is implied.",
+        help=(
+            "Which entry to install. Default registers the Streamable "
+            "HTTP daemon (/mcp) if a daemon is implied."
+        ),
     ),
     url: str = typer.Option(
-        "http://127.0.0.1:7234/sse", "--url",
-        help="SSE URL (ignored for --stdio).",
+        "http://127.0.0.1:7234/mcp", "--url",
+        help="Streamable HTTP URL (ignored for --stdio).",
     ),
     token: str = typer.Option(
         None, "--token",
-        help="Bearer token to include in the entry (SSE only).",
+        help="Bearer token to include in the entry (HTTP only).",
     ),
     settings: str = typer.Option(
         None, "--claude-settings",
@@ -777,8 +784,8 @@ def stream(
         ),
     ),
     mcp_url: str = typer.Option(
-        "http://127.0.0.1:7234/sse", "--mcp-url",
-        help="SSE URL of the MCP daemon (only used with --mcp).",
+        "http://127.0.0.1:7234/mcp", "--mcp-url",
+        help="Streamable HTTP URL of the MCP daemon (only used with --mcp).",
     ),
     doc: bool = doc_option(),
 ) -> None:

@@ -57,7 +57,7 @@ See [setup](setup.md) and [auth](auth.md) for the detail on each.
 | [`vol`](vol.md) | Volatility context for a stock: IV, HV, HVP, P/C Ratio. |
 | [`skew`](skew.md) | Option skew / smile (25Δ RR, wing skew, butterfly, ATM slope) — L1 single chain, L2 term structure, L3 cross-ticker. |
 | [`strategy`](strategy.md) | Multi-leg option strategy probability + risk: POP, EV, breakevens, max P/L, plus a Schwab-copy-paste order ticket. |
-| [`mcp`](mcp.md) | Run `schwab_cli` as an MCP server so agents can call Schwab tools directly. Stdio + SSE transports; status / log / install / logout subcommands. |
+| [`mcp`](mcp.md) | Run `schwab_cli` as an MCP server so agents can call Schwab tools directly. Stdio + Streamable HTTP transports; status / log / install / logout subcommands. |
 | [`stream`](stream.md) | Watch live Schwab quotes in the terminal (direct-streamer path). Ctrl+C to stop. |
 | [`notify`](notify.md) | Configure Telegram notifications for daemon events (auth rotation, streamer crashes). |
 | [`transactions`](transactions.md) | Account activity (trades, dividends, journals) over a date range. |

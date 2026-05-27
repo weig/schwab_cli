@@ -8,7 +8,7 @@ Desktop, custom tools) can call Schwab operations as tools.
 | Feature | Status |
 | --- | --- |
 | Stdio transport | ✅ shipped |
-| SSE transport (long-lived daemon) | ✅ shipped |
+| Streamable HTTP transport (long-lived daemon, single `/mcp` endpoint) | ✅ shipped |
 | REST tools: `get_quote`, `get_chain`, `server_status` | ✅ shipped |
 | Streaming tool: `stream_quote` (refcounted, fan-out, progress notifications) | ✅ shipped |
 | Structured JSONL logbook (stderr + file) with session / subscribe / unsubscribe / streamer events | ✅ shipped |
@@ -46,12 +46,14 @@ The daemon reads JSON-RPC from stdin and writes to stdout. Claude
 Code spawns one stdio daemon per session. Zero service-management
 overhead — the agent starts and stops it.
 
-### SSE (long-lived daemon)
+### Streamable HTTP (long-lived daemon)
 
-Run once, many agents connect as clients to the same process:
+Run once, many agents connect as clients to the same process over a
+single `/mcp` endpoint (the `--sse` flag name is kept for back-compat
+but now drives the modern Streamable HTTP transport):
 
 ```bash
-schwab_cli mcp --sse                          # 127.0.0.1:7234
+schwab_cli mcp --sse                          # http://127.0.0.1:7234/mcp
 schwab_cli mcp --sse --host 0.0.0.0 --port 9000   # remote bind
 ```
 
@@ -72,22 +74,25 @@ terminal tab). See "Service management" below.
 Schwab allows **one concurrent streamer session per account**. If
 two `schwab_cli mcp` processes both try to stream, whichever logs in
 most recently kicks the other off. The tool warns you on start when
-it detects this pattern. Use one SSE daemon and let agents share it.
+it detects this pattern. Use one HTTP daemon and let agents share it.
 
 ## Registering with Claude Code
 
 Either write the entry manually or use the installer:
 
 ```bash
-# SSE-mode entry (recommended):
+# Streamable HTTP entry (recommended) — registers the /mcp URL:
 schwab_cli mcp install
 
 # Stdio variant:
 schwab_cli mcp install --stdio
 
-# With a shared-secret token for SSE:
+# With a shared-secret token for the HTTP daemon:
 schwab_cli mcp install --token "s3cr3t"
 ```
+
+The HTTP entry registers `{"type": "http", "url":
+"http://127.0.0.1:7234/mcp"}` in `~/.claude/settings.json`.
 
 The installer merges into `~/.claude/settings.json`, preserves other
 keys, and refuses to clobber an existing `schwab` entry without
@@ -146,7 +151,7 @@ confirm that.
 No arguments. Returns PID, uptime, token expiries, transport, and
 current subscription state.
 
-## Admin endpoints (SSE mode only)
+## Admin endpoints (HTTP mode only)
 
 | Path | Method | Purpose |
 | --- | --- | --- |
@@ -211,7 +216,7 @@ Daemons would need root + user-switching gymnastics.
 
 ## Proactive auto-login
 
-With the daemon running as a service (or in SSE mode generally), a
+With the daemon running as a service (or in HTTP mode generally), a
 background task monitors the refresh-token expiry and proactively
 rotates the 7-day token via `schwab_cli auth --force` at the 1h
 threshold. Headless Chromium + saved credentials make it silent
@@ -232,7 +237,7 @@ in the common case.
 
 Opt out with a future `--no-auto-login` flag (the code already
 scaffolds it); for now the monitor runs whenever the daemon is
-in SSE mode.
+in HTTP mode.
 
 ## Notifications
 
