@@ -5,9 +5,9 @@ end-to-end so that the upcoming service-layer migration can be proven
 behaviour-preserving without altering production code.
 
 Stable seams used (must survive the refactor):
-  - API path:   ``schwab_cli.commands.history.get_history`` (the name bound
-                in the commands module via ``from schwab_cli.api.history import
-                get_history``).  Patch here to control what the API returns.
+  - API path:   ``schwab_cli.api.history.get_history`` (the Layer-1 call,
+                invoked by the service via module attribute).  Patch here to
+                control what the API returns.
   - Cache path: ``schwab_cli.storage.vol_history.connect`` (context-manager),
                 ``schwab_cli.storage.ohlcv_history.gap``,
                 ``schwab_cli.storage.ohlcv_history.read_range``, and
@@ -220,7 +220,7 @@ class TestGoldenOutputApiPath:
     def test_human_exit_0(self, monkeypatch, tmp_path):
         """Happy-path HUMAN output must exit 0."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -228,7 +228,7 @@ class TestGoldenOutputApiPath:
 
     def test_human_contains_symbol(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -236,7 +236,7 @@ class TestGoldenOutputApiPath:
 
     def test_human_contains_interval(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -244,7 +244,7 @@ class TestGoldenOutputApiPath:
 
     def test_human_contains_date_range(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -252,7 +252,7 @@ class TestGoldenOutputApiPath:
 
     def test_human_contains_candle_count(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -260,7 +260,7 @@ class TestGoldenOutputApiPath:
 
     def test_human_contains_table_columns(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -269,7 +269,7 @@ class TestGoldenOutputApiPath:
 
     def test_human_contains_row_date(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -279,7 +279,7 @@ class TestGoldenOutputApiPath:
 
     def test_json_exit_0(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -288,7 +288,7 @@ class TestGoldenOutputApiPath:
 
     def test_json_top_level_keys(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -298,7 +298,7 @@ class TestGoldenOutputApiPath:
 
     def test_json_symbol(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -308,7 +308,7 @@ class TestGoldenOutputApiPath:
 
     def test_json_interval(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -319,7 +319,7 @@ class TestGoldenOutputApiPath:
     def test_json_from_to_timestamps(self, monkeypatch, tmp_path):
         """``from`` and ``to`` must be ISO-8601 NY-tz datetime strings."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -330,7 +330,7 @@ class TestGoldenOutputApiPath:
 
     def test_json_previous_close(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -340,7 +340,7 @@ class TestGoldenOutputApiPath:
 
     def test_json_candle_count(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -350,7 +350,7 @@ class TestGoldenOutputApiPath:
 
     def test_json_candle_keys(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -361,7 +361,7 @@ class TestGoldenOutputApiPath:
     def test_json_candle_0_ohlcv(self, monkeypatch, tmp_path):
         """candle[0] OHLCV values must exactly match the canned payload."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -378,7 +378,7 @@ class TestGoldenOutputApiPath:
     def test_json_candle_0_change_vs_previous_close(self, monkeypatch, tmp_path):
         """candle[0].change must be computed against previousClose."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -391,7 +391,7 @@ class TestGoldenOutputApiPath:
     def test_json_candle_1_change_vs_candle_0_close(self, monkeypatch, tmp_path):
         """candle[1].change must be computed against candle[0] close."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--json"],
@@ -406,7 +406,7 @@ class TestGoldenOutputApiPath:
 
     def test_md_exit_0(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--md"],
@@ -416,7 +416,7 @@ class TestGoldenOutputApiPath:
     def test_md_heading(self, monkeypatch, tmp_path):
         """MD output must contain the exact H1 heading (golden)."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--md"],
@@ -425,7 +425,7 @@ class TestGoldenOutputApiPath:
 
     def test_md_prev_close_and_candle_count(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--md"],
@@ -434,7 +434,7 @@ class TestGoldenOutputApiPath:
 
     def test_md_table_header(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--md"],
@@ -445,7 +445,7 @@ class TestGoldenOutputApiPath:
     def test_md_row_0_exact(self, monkeypatch, tmp_path):
         """MD first data row must match golden format exactly."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--md"],
@@ -455,7 +455,7 @@ class TestGoldenOutputApiPath:
     def test_md_row_1_exact(self, monkeypatch, tmp_path):
         """MD second data row must match golden format exactly."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--md"],
@@ -465,7 +465,7 @@ class TestGoldenOutputApiPath:
     def test_md_is_valid_markdown(self, monkeypatch, tmp_path):
         """MD output must start with a '#' heading and contain a pipe table."""
         _prep(monkeypatch, tmp_path)
-        with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+        with patch("schwab_cli.api.history.get_history", return_value=_RAW):
             result = runner.invoke(
                 app,
                 ["history", "AAPL", "--range=20240422..20240423", "--interval=1day", "--md"],
@@ -487,7 +487,7 @@ class TestCacheHit:
         """When the cache fully covers the range, ``get_history`` is NOT called."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history") as m_api,
+            patch("schwab_cli.api.history.get_history") as m_api,
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch("schwab_cli.storage.ohlcv_history.gap", return_value=None),
             patch(
@@ -512,7 +512,7 @@ class TestCacheHit:
         """Cache-sourced output must contain the expected candle dates."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history"),
+            patch("schwab_cli.api.history.get_history"),
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch("schwab_cli.storage.ohlcv_history.gap", return_value=None),
             patch(
@@ -538,7 +538,7 @@ class TestCacheHit:
     def test_cache_hit_json_candle_count(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history"),
+            patch("schwab_cli.api.history.get_history"),
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch("schwab_cli.storage.ohlcv_history.gap", return_value=None),
             patch(
@@ -563,7 +563,7 @@ class TestCacheHit:
         """Cache rows don't carry previousClose — envelope must have null."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history"),
+            patch("schwab_cli.api.history.get_history"),
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch("schwab_cli.storage.ohlcv_history.gap", return_value=None),
             patch(
@@ -595,7 +595,7 @@ class TestCacheHit:
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
         with (
-            patch("schwab_cli.commands.history.get_history") as m_api,
+            patch("schwab_cli.api.history.get_history") as m_api,
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch("schwab_cli.storage.ohlcv_history.gap", return_value=None),
             patch(
@@ -626,7 +626,7 @@ class TestCacheHit:
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
         with (
-            patch("schwab_cli.commands.history.get_history"),
+            patch("schwab_cli.api.history.get_history"),
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch("schwab_cli.storage.ohlcv_history.gap", return_value=None),
             patch(
@@ -662,7 +662,7 @@ class TestCacheMissApiBackfill:
         _prep(monkeypatch, tmp_path)
         with (
             patch(
-                "schwab_cli.commands.history.get_history", return_value=_RAW
+                "schwab_cli.api.history.get_history", return_value=_RAW
             ) as m_api,
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch(
@@ -688,7 +688,7 @@ class TestCacheMissApiBackfill:
         """After a daily API call, upsert_candles must be called (backfill)."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history", return_value=_RAW),
+            patch("schwab_cli.api.history.get_history", return_value=_RAW),
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch(
                 "schwab_cli.storage.ohlcv_history.gap",
@@ -713,7 +713,7 @@ class TestCacheMissApiBackfill:
         """upsert_candles must be called with the Schwab-canonical symbol."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history", return_value=_RAW),
+            patch("schwab_cli.api.history.get_history", return_value=_RAW),
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch(
                 "schwab_cli.storage.ohlcv_history.gap",
@@ -737,7 +737,7 @@ class TestCacheMissApiBackfill:
         """All API candles must be passed to upsert_candles."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history", return_value=_RAW),
+            patch("schwab_cli.api.history.get_history", return_value=_RAW),
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch(
                 "schwab_cli.storage.ohlcv_history.gap",
@@ -761,7 +761,7 @@ class TestCacheMissApiBackfill:
         """With empty HOME (no DB), cache path raises and falls through to API."""
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.history.get_history", return_value=_RAW
+            "schwab_cli.api.history.get_history", return_value=_RAW
         ) as m_api:
             result = runner.invoke(
                 app,
@@ -793,7 +793,7 @@ class TestNonDailySkipsCache:
     ):
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history", return_value=_RAW),
+            patch("schwab_cli.api.history.get_history", return_value=_RAW),
             patch("schwab_cli.storage.ohlcv_history.gap") as m_gap,
             patch("schwab_cli.storage.ohlcv_history.read_range") as m_read,
             patch("schwab_cli.storage.ohlcv_history.upsert_candles") as m_upsert,
@@ -816,7 +816,7 @@ class TestNonDailySkipsCache:
     def test_weekly_interval_skips_cache(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.history.get_history", return_value=_RAW),
+            patch("schwab_cli.api.history.get_history", return_value=_RAW),
             patch("schwab_cli.storage.ohlcv_history.gap") as m_gap,
             patch("schwab_cli.storage.ohlcv_history.upsert_candles") as m_upsert,
         ):
@@ -837,7 +837,7 @@ class TestNonDailySkipsCache:
     def test_non_daily_still_calls_api(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.history.get_history", return_value=_RAW
+            "schwab_cli.api.history.get_history", return_value=_RAW
         ) as m_api:
             result = runner.invoke(
                 app,
@@ -862,7 +862,7 @@ class TestEmptyCandles:
     def test_empty_candles_exit_1(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         empty = {"symbol": "AAPL", "empty": True, "candles": []}
-        with patch("schwab_cli.commands.history.get_history", return_value=empty):
+        with patch("schwab_cli.api.history.get_history", return_value=empty):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -872,7 +872,7 @@ class TestEmptyCandles:
         """The error message must include the symbol and 'No candles found'."""
         _prep(monkeypatch, tmp_path)
         empty = {"symbol": "AAPL", "empty": True, "candles": []}
-        with patch("schwab_cli.commands.history.get_history", return_value=empty):
+        with patch("schwab_cli.api.history.get_history", return_value=empty):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -886,7 +886,7 @@ class TestEmptyCandles:
         interval label."""
         _prep(monkeypatch, tmp_path)
         empty = {"symbol": "AAPL", "empty": True, "candles": []}
-        with patch("schwab_cli.commands.history.get_history", return_value=empty):
+        with patch("schwab_cli.api.history.get_history", return_value=empty):
             result = runner.invoke(
                 app, ["history", "AAPL", "--range=20240422..20240423", "--interval=1day"]
             )
@@ -1044,7 +1044,7 @@ class TestApiPathErrors:
     def test_session_expired_exit_1(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.history.get_history",
+            "schwab_cli.api.history.get_history",
             side_effect=SessionExpired("token expired"),
         ):
             result = runner.invoke(
@@ -1056,7 +1056,7 @@ class TestApiPathErrors:
     def test_session_expired_message(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.history.get_history",
+            "schwab_cli.api.history.get_history",
             side_effect=SessionExpired("token expired"),
         ):
             result = runner.invoke(
@@ -1068,7 +1068,7 @@ class TestApiPathErrors:
     def test_api_error_exit_1(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.history.get_history",
+            "schwab_cli.api.history.get_history",
             side_effect=ApiError("503 Service Unavailable"),
         ):
             result = runner.invoke(
@@ -1080,7 +1080,7 @@ class TestApiPathErrors:
     def test_api_error_message(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.history.get_history",
+            "schwab_cli.api.history.get_history",
             side_effect=ApiError("503 Service Unavailable"),
         ):
             result = runner.invoke(
@@ -1096,7 +1096,7 @@ class TestApiPathErrors:
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
         # Deliberately empty home — no config, no session.
         with (
-            patch("schwab_cli.commands.history.get_history") as m_api,
+            patch("schwab_cli.api.history.get_history") as m_api,
             patch("schwab_cli.storage.vol_history.connect", return_value=_FakeCM()),
             patch("schwab_cli.storage.ohlcv_history.gap", return_value=None),
             patch(

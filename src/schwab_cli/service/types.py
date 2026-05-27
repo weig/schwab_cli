@@ -81,3 +81,26 @@ class PositionsResult:
     """
 
     positions: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class HistoryResult:
+    """OHLCV price-history view.
+
+    Wraps the display envelope dict that ``output.history.render_history``
+    consumes verbatim, keeping rendered HUMAN/JSON/MD output byte-identical
+    to the pre-migration command. The envelope shape is::
+
+        {
+            "symbol": str,
+            "interval": str,
+            "from": str | None,        # ISO NY datetime
+            "to": str | None,          # ISO NY datetime
+            "previousClose": float | None,
+            "candles": list[dict],     # shaped OHLCV rows
+        }
+
+    Typed as a read-only ``Mapping`` to signal callers must not mutate it.
+    """
+
+    envelope: Mapping[str, Any]
