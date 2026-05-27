@@ -385,8 +385,21 @@ class TestEnableMcpWithRest:
 
 class TestEnableRestStandalone:
     def _patch(self, monkeypatch):
-        """Patch cfg present, maintenance.run_loop, uvicorn, asyncio.run."""
+        """Patch cfg+session present, maintenance.run_loop, uvicorn,
+        asyncio.run — fully hermetic (no reliance on a real ~/.config)."""
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
+        # Future-dated session so the startup refresh-expiry check skips
+        # auto-login; and cheap logbook/notifier so no disk/network.
+        monkeypatch.setattr(
+            "schwab_cli.session.load", lambda: _future_session()
+        )
+        monkeypatch.setattr(
+            "schwab_cli.mcp_server.logbook.LogBook", lambda *a, **k: MagicMock()
+        )
+        monkeypatch.setattr(
+            "schwab_cli.notify.Notifier.from_file",
+            classmethod(lambda cls, **k: MagicMock()),
+        )
         rec: dict = {"run_loop_kwargs": [], "served": False, "threads": []}
 
         real_thread = server_cmd.threading.Thread
