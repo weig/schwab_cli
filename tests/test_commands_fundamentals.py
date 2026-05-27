@@ -1,8 +1,9 @@
+import time
 from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from schwab_cli.api.client import ApiError, SessionExpired
+from schwab_cli.service.auth import ApiError, SessionExpired
 from schwab_cli.cli import app
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
@@ -20,9 +21,11 @@ def _prep(monkeypatch, tmp_path):
         client_id="cid", client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
     ))
+    now = int(time.time())
     save_session(Session(
         access_token="atok", refresh_token="rtok",
-        expires_at=1_000_000, refresh_token_expires_at=2_000_000,
+        expires_at=now + 3600,
+        refresh_token_expires_at=now + 7 * 24 * 3600,
     ))
 
 
@@ -47,7 +50,7 @@ _FUND = {
 def test_fundamentals_requests_fundamental_field(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.fundamentals.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_FUND,
     ) as mock:
         result = runner.invoke(app, ["fundamentals", "AAPL"])
@@ -60,7 +63,7 @@ def test_fundamentals_requests_fundamental_field(monkeypatch, tmp_path):
 def test_fundamentals_json_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.fundamentals.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_FUND,
     ):
         result = runner.invoke(app, ["fundamentals", "AAPL", "--json"])
@@ -73,7 +76,7 @@ def test_fundamentals_json_output(monkeypatch, tmp_path):
 def test_fundamentals_md_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.fundamentals.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_FUND,
     ):
         result = runner.invoke(app, ["fundamentals", "AAPL", "--md"])
@@ -92,7 +95,7 @@ def test_fundamentals_multi_symbol(monkeypatch, tmp_path):
         },
     }
     with patch(
-        "schwab_cli.commands.fundamentals.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=payload,
     ):
         result = runner.invoke(app, ["fundamentals", "AAPL", "MSFT"])
@@ -129,7 +132,7 @@ def test_fundamentals_no_session(monkeypatch, tmp_path):
 def test_fundamentals_session_expired(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.fundamentals.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["fundamentals", "AAPL"])
@@ -140,7 +143,7 @@ def test_fundamentals_session_expired(monkeypatch, tmp_path):
 def test_fundamentals_api_error(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.fundamentals.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         side_effect=ApiError("500 internal"),
     ):
         result = runner.invoke(app, ["fundamentals", "AAPL"])
@@ -163,7 +166,7 @@ def test_fundamentals_brk_b_class_share(monkeypatch, tmp_path):
     }
     for variant in ("BRK.B", "BRK-B", "BRK/B", "brk.b"):
         with patch(
-            "schwab_cli.commands.fundamentals.get_quotes",
+            "schwab_cli.api.quotes.get_quotes",
             return_value=payload,
         ):
             result = runner.invoke(app, ["fundamentals", variant, "--json"])

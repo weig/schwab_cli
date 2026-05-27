@@ -25,6 +25,7 @@ from rich.console import Console
 from rich.table import Table
 
 from schwab_cli.output.format import Format
+from schwab_cli.service.types import DividendsResult
 
 
 def _today() -> date:
@@ -151,6 +152,22 @@ def _apply_upcoming_filter(
         if 0 <= delta <= upcoming_within_days:
             kept.append(row)
     return kept
+
+
+def render_dividends_result(
+    result: DividendsResult,
+    fmt: Format,
+    *,
+    upcoming_within_days: int | None = None,
+) -> str:
+    """Render a :class:`DividendsResult` to text, byte-identical to the
+    legacy :func:`render_dividends` output for the same data."""
+    return render_dividends(
+        list(result.symbols),
+        dict(result.payload),
+        fmt,
+        upcoming_within_days=upcoming_within_days,
+    )
 
 
 def render_dividends(

@@ -1,9 +1,10 @@
+import time
 from datetime import date
 from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from schwab_cli.api.client import ApiError, SessionExpired
+from schwab_cli.service.auth import ApiError, SessionExpired
 from schwab_cli.cli import app
 from schwab_cli.config import Config
 from schwab_cli.config import save as save_config
@@ -21,9 +22,11 @@ def _prep(monkeypatch, tmp_path):
         client_id="cid", client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
     ))
+    now = int(time.time())
     save_session(Session(
         access_token="atok", refresh_token="rtok",
-        expires_at=1_000_000, refresh_token_expires_at=2_000_000,
+        expires_at=now + 3600,
+        refresh_token_expires_at=now + 7 * 24 * 3600,
     ))
 
 
@@ -59,7 +62,7 @@ _DIV = {
 def test_dividends_happy(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.dividends.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_DIV,
     ) as mock:
         result = runner.invoke(app, ["dividends", "AAPL"])
@@ -74,7 +77,7 @@ def test_dividends_happy(monkeypatch, tmp_path):
 def test_dividends_json(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.dividends.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_DIV,
     ):
         result = runner.invoke(app, ["dividends", "AAPL", "--json"])
@@ -90,7 +93,7 @@ def test_dividends_upcoming_window_filters(monkeypatch, tmp_path):
     from schwab_cli.output import dividends as div_out
     monkeypatch.setattr(div_out, "_today", lambda: date(2025, 7, 15))
     with patch(
-        "schwab_cli.commands.dividends.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_DIV,
     ):
         result = runner.invoke(
@@ -106,7 +109,7 @@ def test_dividends_upcoming_wider_window_keeps_both(monkeypatch, tmp_path):
     from schwab_cli.output import dividends as div_out
     monkeypatch.setattr(div_out, "_today", lambda: date(2025, 7, 15))
     with patch(
-        "schwab_cli.commands.dividends.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_DIV,
     ):
         result = runner.invoke(
@@ -120,7 +123,7 @@ def test_dividends_upcoming_wider_window_keeps_both(monkeypatch, tmp_path):
 def test_dividends_div_alias(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.dividends.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         return_value=_DIV,
     ):
         result = runner.invoke(app, ["div", "AAPL"])
@@ -150,7 +153,7 @@ def test_dividends_no_session(monkeypatch, tmp_path):
 def test_dividends_session_expired(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.dividends.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["dividends", "AAPL"])
@@ -161,7 +164,7 @@ def test_dividends_session_expired(monkeypatch, tmp_path):
 def test_dividends_api_error(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.dividends.get_quotes",
+        "schwab_cli.api.quotes.get_quotes",
         side_effect=ApiError("503 bad gateway"),
     ):
         result = runner.invoke(app, ["dividends", "AAPL"])
@@ -187,7 +190,7 @@ def test_dividends_brk_b_class_share(monkeypatch, tmp_path):
     }
     for variant in ("BRK.B", "BRK-B", "BRK/B", "brk.b"):
         with patch(
-            "schwab_cli.commands.dividends.get_quotes",
+            "schwab_cli.api.quotes.get_quotes",
             return_value=payload,
         ):
             result = runner.invoke(app, ["dividends", variant, "--json"])
