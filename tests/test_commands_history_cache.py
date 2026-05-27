@@ -3,13 +3,30 @@ ohlcv_daily before falling back to Schwab. For un-subscribed symbols
 or non-daily intervals, behavior is unchanged (live API call)."""
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
+import time
+from unittest.mock import patch
 
 import pytest
 
-from schwab_cli.storage import vol_history, ohlcv_history
-from schwab_cli.storage.groups import GROUP_OHLCV
 from schwab_cli.commands import history as history_cmd
+from schwab_cli.config import Config
+from schwab_cli.config import save as save_config
+from schwab_cli.session import Session
+from schwab_cli.session import save as save_session
+from schwab_cli.storage import ohlcv_history, vol_history
+from schwab_cli.storage.groups import GROUP_OHLCV
+
+
+def _prep_auth(monkeypatch, tmp_path) -> None:
+    """Config + future-dated session so the service-layer auth path
+    (``service.auth.get_session``) does not attempt an ``oauth.refresh``."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    save_config(Config(client_id="cid", client_secret="csec",
+                       redirect_uri="https://127.0.0.1:8443"))
+    save_session(Session(access_token="atok", refresh_token="rtok",
+                         expires_at=int(time.time()) + 3600,
+                         refresh_token_expires_at=int(time.time()) + 7 * 24 * 3600))
 
 
 def _seed_subscribed(conn, symbol: str) -> None:
@@ -38,9 +55,8 @@ def test_subscribed_daily_with_full_cache_does_not_call_api(
         ])
         conn.commit()
 
-    with patch("schwab_cli.commands.history.get_history") as m_api, \
-         patch("schwab_cli.commands.history._client") as m_client:
-        m_client.return_value = MagicMock()
+    # Cache HIT — the service must never call the Layer-1 API.
+    with patch("schwab_cli.api.history.get_history") as m_api:
         try:
             history_cmd.run(
                 symbol="AAPL",
@@ -48,8 +64,11 @@ def test_subscribed_daily_with_full_cache_does_not_call_api(
                 interval_str="1day",
                 as_json=True, as_md=False,
             )
-        except SystemExit:
-            pass  # typer.Exit from successful rendering
+        except SystemExit as exc:
+            # A cache hit renders successfully and returns normally; if it
+            # exits at all it must be a clean exit, never an error (which
+            # would make assert_not_called pass for the wrong reason).
+            assert exc.code in (0, None), f"cache-hit run failed: exit {exc.code}"
 
     m_api.assert_not_called()
 
@@ -59,6 +78,7 @@ def test_unsubscribed_falls_back_to_api(monkeypatch, tmp_path):
     monkeypatch.setattr(vol_history, "db_path", lambda: db)
     with vol_history.connect() as _:
         pass
+    _prep_auth(monkeypatch, tmp_path)
 
     fake_response = {
         "candles": [
@@ -67,10 +87,8 @@ def test_unsubscribed_falls_back_to_api(monkeypatch, tmp_path):
         ],
         "symbol": "UNKNOWN",
     }
-    with patch("schwab_cli.commands.history.get_history",
-               return_value=fake_response) as m_api, \
-         patch("schwab_cli.commands.history._client") as m_client:
-        m_client.return_value = MagicMock()
+    with patch("schwab_cli.api.history.get_history",
+               return_value=fake_response) as m_api:
         try:
             history_cmd.run(
                 symbol="UNKNOWN",

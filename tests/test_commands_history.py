@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -24,8 +25,8 @@ def _prep(monkeypatch, tmp_path):
     save_config(Config(client_id="cid", client_secret="csec",
                        redirect_uri="https://127.0.0.1:8443"))
     save_session(Session(access_token="atok", refresh_token="rtok",
-                         expires_at=1_000_000,
-                         refresh_token_expires_at=2_000_000))
+                         expires_at=int(time.time()) + 3600,
+                         refresh_token_expires_at=int(time.time()) + 7 * 24 * 3600))
 
 
 _RAW = {
@@ -53,7 +54,7 @@ _RAW = {
 
 def test_history_default_human(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+    with patch("schwab_cli.api.history.get_history", return_value=_RAW):
         result = runner.invoke(app, ["history", "NVDA"])
     assert result.exit_code == 0, result.output
     assert "NVDA" in result.output
@@ -62,7 +63,7 @@ def test_history_default_human(monkeypatch, tmp_path):
 
 def test_history_json(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+    with patch("schwab_cli.api.history.get_history", return_value=_RAW):
         result = runner.invoke(app, ["history", "NVDA", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.stdout)
@@ -72,7 +73,7 @@ def test_history_json(monkeypatch, tmp_path):
 
 def test_history_md(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.history.get_history", return_value=_RAW):
+    with patch("schwab_cli.api.history.get_history", return_value=_RAW):
         result = runner.invoke(app, ["history", "NVDA", "--md"])
     assert result.exit_code == 0, result.output
     assert "# NVDA" in result.stdout
@@ -86,7 +87,7 @@ def test_history_custom_range_and_interval(monkeypatch, tmp_path):
         captured.update(kwargs)
         return _RAW
 
-    with patch("schwab_cli.commands.history.get_history", side_effect=fake_get_history):
+    with patch("schwab_cli.api.history.get_history", side_effect=fake_get_history):
         result = runner.invoke(app, [
             "history", "NVDA",
             "--range=20240101..20240630", "--interval=1wk",
@@ -104,7 +105,7 @@ def test_history_symbol_uppercased(monkeypatch, tmp_path):
         captured["symbol"] = symbol
         return _RAW
 
-    with patch("schwab_cli.commands.history.get_history", side_effect=fake_get_history):
+    with patch("schwab_cli.api.history.get_history", side_effect=fake_get_history):
         result = runner.invoke(app, ["history", "nvda"])
     assert result.exit_code == 0, result.output
     assert captured["symbol"] == "NVDA"
@@ -174,7 +175,7 @@ def test_history_no_session_exit_1(monkeypatch, tmp_path):
 def test_history_session_expired_exit_1(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.history.get_history",
+        "schwab_cli.api.history.get_history",
         side_effect=SessionExpired("Session expired. Run `schwab_cli auth --force`."),
     ):
         result = runner.invoke(app, ["history", "NVDA"])
@@ -185,7 +186,7 @@ def test_history_session_expired_exit_1(monkeypatch, tmp_path):
 def test_history_api_error_exit_1(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     with patch(
-        "schwab_cli.commands.history.get_history",
+        "schwab_cli.api.history.get_history",
         side_effect=ApiError("503 Service Unavailable"),
     ):
         result = runner.invoke(app, ["history", "NVDA"])
@@ -196,7 +197,7 @@ def test_history_api_error_exit_1(monkeypatch, tmp_path):
 def test_history_empty_candles_exit_1(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     empty = {"symbol": "XYZZZ", "empty": True, "candles": []}
-    with patch("schwab_cli.commands.history.get_history", return_value=empty):
+    with patch("schwab_cli.api.history.get_history", return_value=empty):
         result = runner.invoke(app, ["history", "XYZZZ"])
     assert result.exit_code == 1
     assert "No candles" in result.output
