@@ -236,6 +236,29 @@ class TestRunOnceFailurePaths:
 
         assert tick.action == "token_failed"
 
+    def test_token_path_service_error_does_not_crash_loop(self, monkeypatch):
+        """get_session raising NotAuthenticated (a ServiceError, not
+        SessionExpired) must also be caught → 'token_failed', not a crash.
+        Regression for the daemon-resilience fix."""
+        from schwab_cli.service.auth import NotAuthenticated
+
+        good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
+
+        monkeypatch.setattr("schwab_cli.session.load", lambda: good_ttl)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "schwab_cli.service.auth.get_session",
+                lambda cfg: (_ for _ in ()).throw(NotAuthenticated()),
+            )
+            mp.setattr(
+                "schwab_cli.auth_flows.perform_full_auth",
+                lambda *a, **k: None,
+            )
+            # Must not raise:
+            tick = run_once(_CFG, now=lambda: _NOW)
+
+        assert tick.action == "token_failed"
+
 
 class TestMaintenanceTickDataclass:
     """Structural contract for MaintenanceTick."""
