@@ -478,13 +478,19 @@ def watch_show(doc: bool = doc_option()) -> None:
 @mcp_app.callback(invoke_without_command=True)
 def mcp_root(
     ctx: typer.Context,
-    stdio: bool = typer.Option(
-        True, "--stdio/--sse",
+    sse: bool = typer.Option(
+        False, "--sse",
+        hidden=True,
         help=(
-            "Transport. --sse runs a long-lived Streamable HTTP daemon "
-            "(serving /mcp) on --host / --port. The flag name is kept "
-            "for back-compat; the transport is now Streamable HTTP."
+            "Deprecated no-op. The daemon is Streamable-HTTP-only; this "
+            "flag is accepted for back-compat with the installed launchd "
+            "plist (which bakes in `mcp --sse`) and has no effect."
         ),
+    ),
+    stdio: bool = typer.Option(
+        False, "--stdio",
+        hidden=True,
+        help="Deprecated no-op; stdio transport is no longer supported.",
     ),
     host: str = typer.Option(
         "127.0.0.1", "--host",
@@ -513,11 +519,14 @@ def mcp_root(
     ),
     doc: bool = doc_option(),
 ) -> None:
-    """When no subcommand, run the daemon."""
+    """When no subcommand, run the daemon (Streamable HTTP only)."""
+    # `sse` / `stdio` are accepted but ignored — the daemon is HTTP-only.
+    # They exist so the installed launchd plist's `mcp --sse` keeps working.
+    del sse, stdio
     if ctx.invoked_subcommand is not None:
         return
     mcp_cmd.run(
-        stdio=stdio, host=host, port=port,
+        host=host, port=port,
         log_file=log_file, no_log_file=no_log_file,
         no_auto_login=no_auto_login,
     )
@@ -570,12 +579,11 @@ def mcp_logout(
 def mcp_restart(
     url: str = typer.Option(None, "--url"),
     token: str = typer.Option(None, "--token"),
-    stdio: bool = typer.Option(False, "--stdio/--sse"),
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(7234, "--port"),
 ) -> None:
     mcp_cmd.run_restart(
-        url=url, token=token, stdio=stdio, host=host, port=port,
+        url=url, token=token, host=host, port=port,
     )
 
 
@@ -627,20 +635,13 @@ def mcp_uninstall_service(
 
 @mcp_app.command("install", help="Register this MCP server in ~/.claude/settings.json.")
 def mcp_install(
-    stdio: bool = typer.Option(
-        False, "--stdio/--sse",
-        help=(
-            "Which entry to install. Default registers the Streamable "
-            "HTTP daemon (/mcp) if a daemon is implied."
-        ),
-    ),
     url: str = typer.Option(
         "http://127.0.0.1:7234/mcp", "--url",
-        help="Streamable HTTP URL (ignored for --stdio).",
+        help="Streamable HTTP URL of the daemon's /mcp endpoint.",
     ),
     token: str = typer.Option(
         None, "--token",
-        help="Bearer token to include in the entry (HTTP only).",
+        help="Bearer token to include in the entry.",
     ),
     settings: str = typer.Option(
         None, "--claude-settings",
@@ -650,7 +651,7 @@ def mcp_install(
     force: bool = typer.Option(False, "--force", help="Overwrite existing entry."),
 ) -> None:
     mcp_cmd.run_install(
-        stdio=stdio, url=url, token=token, settings=settings,
+        url=url, token=token, settings=settings,
         yes=yes, force=force,
     )
 

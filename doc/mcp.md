@@ -7,7 +7,6 @@ Desktop, custom tools) can call Schwab operations as tools.
 
 | Feature | Status |
 | --- | --- |
-| Stdio transport | ✅ shipped |
 | Streamable HTTP transport (long-lived daemon, single `/mcp` endpoint) | ✅ shipped |
 | REST tools: `get_quote`, `get_chain`, `server_status` | ✅ shipped |
 | Streaming tool: `stream_quote` (refcounted, fan-out, progress notifications) | ✅ shipped |
@@ -24,8 +23,8 @@ Desktop, custom tools) can call Schwab operations as tools.
 ## Usage
 
 ```
-# Start the daemon (default: stdio).
-schwab_cli mcp [--stdio | --sse] [--host 127.0.0.1] [--port 7234]
+# Start the daemon (Streamable HTTP — the only transport).
+schwab_cli mcp [--host 127.0.0.1] [--port 7234]
                [--log-file PATH | --no-log-file]
 
 # Subcommands operate on a running server.
@@ -33,29 +32,30 @@ schwab_cli mcp status   [--url URL] [--token T] [--json]
 schwab_cli mcp log      [-f] [--session S] [--symbol X] [--level warning]
                         [--json] [--tail N] [--log-file PATH]
 schwab_cli mcp logout   [--url URL] [--token T]
-schwab_cli mcp restart  [--url URL] [--token T] [--stdio|--sse]
-schwab_cli mcp install  [--stdio | --sse] [--url URL] [--token T]
+schwab_cli mcp restart  [--url URL] [--token T] [--host H] [--port P]
+schwab_cli mcp install  [--url URL] [--token T]
                         [--claude-settings PATH] [--yes] [--force]
 ```
 
-## Transport modes
-
-### Stdio (default)
-
-The daemon reads JSON-RPC from stdin and writes to stdout. Claude
-Code spawns one stdio daemon per session. Zero service-management
-overhead — the agent starts and stops it.
+## Transport mode
 
 ### Streamable HTTP (long-lived daemon)
 
+The daemon is HTTP-only. stdio cannot hold the long-lived
+authenticated session the daemon requires, so it is not supported.
+
 Run once, many agents connect as clients to the same process over a
-single `/mcp` endpoint (the `--sse` flag name is kept for back-compat
-but now drives the modern Streamable HTTP transport):
+single `/mcp` endpoint:
 
 ```bash
-schwab_cli mcp --sse                          # http://127.0.0.1:7234/mcp
-schwab_cli mcp --sse --host 0.0.0.0 --port 9000   # remote bind
+schwab_cli mcp                              # http://127.0.0.1:7234/mcp
+schwab_cli mcp --host 0.0.0.0 --port 9000   # remote bind
 ```
+
+> Back-compat: a bare `--sse` (and `--stdio`) flag is still accepted
+> as a hidden no-op so an already-installed launchd plist that bakes
+> in `mcp --sse` keeps launching the HTTP daemon. The flags have no
+> effect.
 
 Benefits:
 
@@ -81,11 +81,8 @@ it detects this pattern. Use one HTTP daemon and let agents share it.
 Either write the entry manually or use the installer:
 
 ```bash
-# Streamable HTTP entry (recommended) — registers the /mcp URL:
+# Streamable HTTP entry — registers the /mcp URL:
 schwab_cli mcp install
-
-# Stdio variant:
-schwab_cli mcp install --stdio
 
 # With a shared-secret token for the HTTP daemon:
 schwab_cli mcp install --token "s3cr3t"

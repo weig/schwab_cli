@@ -1,6 +1,6 @@
 """MCP server wiring for Schwab.
 
-Exposes a minimal set of tools over MCP (stdio transport). Wraps
+Exposes a minimal set of tools over MCP via Streamable HTTP. Wraps
 the existing REST API for synchronous queries; streaming tools are
 scaffolded here and wired through :class:`SubscriptionManager` but
 the actual Schwab-WebSocket → progress-notification bridge is
@@ -12,10 +12,11 @@ Tools currently live:
 * ``get_chain(symbol, expiry, strike_count)`` — REST chain.
 * ``server_status()`` — counts and subscription summary.
 
-The server instance is designed to be transport-agnostic; the
-Streamable HTTP mode (``run_http``) wires the same
+The daemon is HTTP-only: ``run_http`` wires the
 :class:`SchwabMcpServer` instance through the mcp SDK's
-``StreamableHTTPSessionManager`` (single ``/mcp`` endpoint).
+``StreamableHTTPSessionManager`` (single ``/mcp`` endpoint). The
+long-lived authenticated session this requires cannot be held over
+stdio, so stdio transport is not supported.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from typing import Any
 
 import anyio
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from schwab_cli import config as config_module
@@ -81,8 +81,8 @@ class SchwabMcpServer:
         self._transport = "idle"
         self._stream_counter = 0
         # Auth monitor — proactive refresh-token rotation. Shares
-        # the notifier already built above. Disabled by default in
-        # stdio mode (see run_stdio), only started in run_http.
+        # the notifier already built above. The daemon is HTTP-only,
+        # so the monitor always runs (started in run_http).
         self._auth_monitor_enabled = auth_monitor_enabled
         self._auth_monitor: AuthMonitor | None = None
         self._register_tools()
@@ -429,28 +429,6 @@ class SchwabMcpServer:
 
     # ---- lifecycle -----------------------------------------------------
 
-    async def run_stdio(self) -> None:
-        """Drive the server over stdio until the client disconnects."""
-        self._transport = "stdio"
-        self._logbook.info("server.start", transport="stdio")
-        # Stdio has exactly one session for the life of the process;
-        # mark it explicitly so the log ladder matches the HTTP path's shape.
-        self._logbook.info("session.connect", session="stdio_0", transport="stdio")
-        try:
-            async with stdio_server() as (read, write):
-                await self._server.run(
-                    read,
-                    write,
-                    self._server.create_initialization_options(),
-                )
-        finally:
-            # Clean up any subscriptions held by the stdio session.
-            await self._bridge.drop_session("stdio_0")
-            self._logbook.info(
-                "session.disconnect", session="stdio_0", transport="stdio",
-            )
-            self._logbook.info("server.stop", transport="stdio")
-
     async def run_http(self, host: str, port: int) -> None:
         """Drive the server over Streamable HTTP + HTTP admin endpoints
         on ``host:port`` until a shutdown is signalled.
@@ -462,9 +440,8 @@ class SchwabMcpServer:
         small set of ``/admin/*`` routes are mounted alongside it for
         status / shutdown control.
         """
-        # Deferred imports keep the stdio path free of Starlette cost
-        # and avoid pulling in uvicorn when tests only exercise tool
-        # handlers.
+        # Deferred imports avoid pulling in uvicorn/Starlette when tests
+        # only exercise tool handlers.
         import contextlib
 
         import uvicorn
@@ -485,8 +462,8 @@ class SchwabMcpServer:
         )
 
         # Launch the auth monitor — proactive refresh-token rotation
-        # + expiry notifications. Only meaningful in daemon mode
-        # (long-lived); stdio sessions are per-agent and short.
+        # + expiry notifications. The daemon is long-lived, so the
+        # monitor always runs alongside the HTTP transport.
         if self._auth_monitor_enabled:
             self._auth_monitor = AuthMonitor(
                 self._logbook,

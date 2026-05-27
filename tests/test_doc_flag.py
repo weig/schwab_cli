@@ -70,7 +70,7 @@ def test_doc_flag_on_mcp_shows_mcp_page():
     assert result.exit_code == 0, result.output
     # Distinctive phrasing from doc/mcp.md:
     assert "MCP server" in result.output
-    assert "stdio" in result.output
+    assert "Streamable HTTP" in result.output
 
 
 def test_doc_flag_on_stream_shows_stream_page():
