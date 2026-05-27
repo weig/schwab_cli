@@ -114,6 +114,32 @@ class PositionsResult:
 
 
 @dataclass(frozen=True)
+class SkewResult:
+    """Option skew / smile metrics view (L1 / L2 / L3 modes).
+
+    Wraps the metrics object that the ``output.skew`` renderers consume
+    verbatim, keeping rendered HUMAN/JSON/MD output byte-identical to the
+    pre-migration command. The wrapped shape depends on the mode:
+
+    * L1 (``get_skew_l1``): a single metrics ``Mapping`` for
+      ``output.skew.render_skew``.
+    * L2 term / dtes (``get_skew_term`` / ``get_skew_dtes``): a list of
+      per-expiry metrics ``Mapping`` for ``output.skew.render_term``.
+    * L3 cross / cross-dtes (``get_skew_cross`` / ``get_skew_cross_dtes``):
+      a list of per-symbol metrics ``Mapping`` for
+      ``output.skew.render_cross``.
+
+    ``metrics`` is typed loosely as ``Any`` because the renderer contract
+    differs per mode; the command picks the matching renderer. ``symbol``
+    carries the (upper-cased) underlying for the term renderers that need
+    it in their header, and is ``None`` for modes that don't.
+    """
+
+    metrics: Any
+    symbol: str | None = None
+
+
+@dataclass(frozen=True)
 class HistoryResult:
     """OHLCV price-history view.
 
