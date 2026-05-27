@@ -107,8 +107,8 @@ def test_vol_happy_path_human(monkeypatch, tmp_path):
     realistic option-price history (the synthetic side-effect would
     inflate the sample count)."""
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
     assert result.exit_code == 0, result.output
 
@@ -127,8 +127,8 @@ def test_vol_happy_path_human(monkeypatch, tmp_path):
 
 def test_vol_json_shape_and_values(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         # --no-record keeps the envelope predictable: no backfill side-effects.
         result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
     assert result.exit_code == 0, result.output
@@ -167,8 +167,8 @@ def test_vol_json_shape_and_values(monkeypatch, tmp_path):
 
 def test_vol_md_has_all_rows(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--md"])
     assert result.exit_code == 0, result.output
     for label in ("| IV ", "| HV ", "| HVP ", "| P/C vol ", "| P/C OI ", "| IVP "):
@@ -186,8 +186,8 @@ def test_vol_missing_spot_exits_1(monkeypatch, tmp_path):
     """If the chain response lacks underlying.last, the command bails cleanly."""
     _prep(monkeypatch, tmp_path)
     resp = {**_CHAIN_RESP, "underlying": {}}
-    with patch("schwab_cli.commands.vol.get_chain", return_value=resp), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=resp), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA"])
     assert result.exit_code == 1
     assert "spot" in result.output.lower()
@@ -196,8 +196,8 @@ def test_vol_missing_spot_exits_1(monkeypatch, tmp_path):
 def test_vol_hv_none_when_history_too_short(monkeypatch, tmp_path):
     """Fewer closes than the HV window means HV and HVP are both None."""
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(10)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(10)):
         result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
     assert result.exit_code == 0, result.output
     env = json.loads(result.output)
@@ -228,8 +228,8 @@ def test_vol_ivp_partial_when_history_between_min_and_lookback(monkeypatch, tmp_
                 atm_strike=200.0, atm_expiry="2026-05-01", atm_dte=9,
                 captured_at_ms=ts,
             )
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--json"])
     env = json.loads(result.output)
     # 120 seeded (Aug–Nov 2025) + 1 from today's run (Apr 2026) = 121
@@ -261,8 +261,8 @@ def test_vol_ivp_ok_when_history_exceeds_lookback(monkeypatch, tmp_path):
                 atm_strike=200.0, atm_expiry="2026-05-01", atm_dte=9,
                 captured_at_ms=ts,
             )
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--ivp-lookback=5", "--json"])
     env = json.loads(result.output)
     assert env["ivp"]["state"] == "ok"
@@ -274,8 +274,8 @@ def test_vol_no_record_skips_write(monkeypatch, tmp_path):
     from schwab_cli.storage.vol_history import connect
 
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
     assert result.exit_code == 0, result.output
     with connect() as conn:
@@ -290,8 +290,8 @@ def test_vol_snapshot_only_writes_and_is_silent(monkeypatch, tmp_path):
     from schwab_cli.storage.vol_history import connect
 
     _prep(monkeypatch, tmp_path)
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         result = runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
     assert result.exit_code == 0, result.output
     # stdout stays empty in snapshot-only mode (the backfill notice is
@@ -350,8 +350,8 @@ def test_vol_backfill_populates_synthetic_rows_on_first_run(monkeypatch, tmp_pat
         # Differentiate by symbol: the option symbol carries spaces.
         return opt if " " in symbol else und
 
-    with patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", side_effect=fake_history):
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", side_effect=fake_history):
         result = runner.invoke(app, ["vol", "NVDA", "--json"])
 
     assert result.exit_code == 0, result.output
@@ -432,8 +432,8 @@ def test_vol_stitched_backfill_uses_multiple_strikes(monkeypatch, tmp_path):
         raw_strike = int(symbol[-8:]) / 1000.0
         return opt_resp_for_strike(raw_strike)
 
-    with patch("schwab_cli.commands.vol.get_chain", return_value=chain), \
-         patch("schwab_cli.commands.vol.get_history", side_effect=fake_history):
+    with patch("schwab_cli.api.chains.get_chain", return_value=chain), \
+         patch("schwab_cli.api.history.get_history", side_effect=fake_history):
         result = runner.invoke(app, ["vol", "NVDA", "--json"])
     assert result.exit_code == 0, result.output
 
@@ -476,16 +476,16 @@ def test_vol_backfill_skipped_when_synthetic_rows_exist(monkeypatch, tmp_path):
 
     backfill_called = {"count": 0}
     real_backfill = __import__(
-        "schwab_cli.commands.vol", fromlist=["_backfill_synthetic_iv"]
+        "schwab_cli.service.vol", fromlist=["_backfill_synthetic_iv"]
     )._backfill_synthetic_iv
 
     def spy(*args, **kwargs):
         backfill_called["count"] += 1
         return real_backfill(*args, **kwargs)
 
-    with patch("schwab_cli.commands.vol._backfill_synthetic_iv", side_effect=spy), \
-         patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.service.vol._backfill_synthetic_iv", side_effect=spy), \
+         patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         runner.invoke(app, ["vol", "NVDA"])
 
     assert backfill_called["count"] == 0, "backfill should skip when synthetics exist"
@@ -514,16 +514,16 @@ def test_vol_backfill_skipped_when_enough_real_observations(monkeypatch, tmp_pat
 
     backfill_called = {"count": 0}
     real_backfill = __import__(
-        "schwab_cli.commands.vol", fromlist=["_backfill_synthetic_iv"]
+        "schwab_cli.service.vol", fromlist=["_backfill_synthetic_iv"]
     )._backfill_synthetic_iv
 
     def spy(*args, **kwargs):
         backfill_called["count"] += 1
         return real_backfill(*args, **kwargs)
 
-    with patch("schwab_cli.commands.vol._backfill_synthetic_iv", side_effect=spy), \
-         patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.service.vol._backfill_synthetic_iv", side_effect=spy), \
+         patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         runner.invoke(app, ["vol", "NVDA"])
 
     assert backfill_called["count"] == 0, (
@@ -553,9 +553,9 @@ def test_vol_backfill_still_fires_with_some_legacy_observed_rows(monkeypatch, tm
         backfill_called["count"] += 1
         return 0  # short-circuit — we only care that it was invoked
 
-    with patch("schwab_cli.commands.vol._backfill_synthetic_iv", side_effect=spy), \
-         patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.service.vol._backfill_synthetic_iv", side_effect=spy), \
+         patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         runner.invoke(app, ["vol", "NVDA"])
 
     assert backfill_called["count"] == 1, (
@@ -573,8 +573,8 @@ def test_vol_chain_call_uses_wide_params(monkeypatch, tmp_path):
         captured.update(kwargs)
         return _CHAIN_RESP
 
-    with patch("schwab_cli.commands.vol.get_chain", side_effect=fake_chain), \
-         patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)):
+    with patch("schwab_cli.api.chains.get_chain", side_effect=fake_chain), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
         # --no-record suppresses the backfill's extra chain call so the
         # captured dict only reflects the primary vol-window lookup.
         runner.invoke(app, ["vol", "NVDA", "--no-record"])

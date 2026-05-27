@@ -8,9 +8,9 @@ behaviour-preserving without altering production code.
 
 | Seam | Current patch target | Post-migration target |
 |------|---------------------|----------------------|
-| Chain API call | ``schwab_cli.commands.vol.get_chain`` | ``schwab_cli.api.chains.get_chain`` (via service) |
-| History API call | ``schwab_cli.commands.vol.get_history`` | ``schwab_cli.api.history.get_history`` (via service) |
-| Backfill helper | ``schwab_cli.commands.vol._backfill_synthetic_iv`` | ``schwab_cli.service.vol._backfill_synthetic_iv`` |
+| Chain API call | ``schwab_cli.api.chains.get_chain`` | ``schwab_cli.api.chains.get_chain`` (via service) |
+| History API call | ``schwab_cli.api.history.get_history`` | ``schwab_cli.api.history.get_history`` (via service) |
+| Backfill helper | ``schwab_cli.service.vol._backfill_synthetic_iv`` | ``schwab_cli.service.vol._backfill_synthetic_iv`` |
 | Snapshot write | ``schwab_cli.storage.vol_history.record_snapshot`` | same (storage layer stays) |
 
 ## Golden values captured by running current code
@@ -237,16 +237,16 @@ _GOLDEN_SHORT_MD_IVP_ROW = "| IVP | — | insufficient history: 0/252 days |"
 class TestGoldenHumanOutput:
     """Pin HUMAN output for normal vol NVDA with canned chain+history.
 
-    Seams: schwab_cli.commands.vol.get_chain, schwab_cli.commands.vol.get_history,
-           schwab_cli.commands.vol._backfill_synthetic_iv (neutralized)
+    Seams: schwab_cli.api.chains.get_chain, schwab_cli.api.history.get_history,
+           schwab_cli.service.vol._backfill_synthetic_iv (neutralized)
     """
 
     def _invoke(self, monkeypatch, tmp_path) -> str:
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
         assert result.exit_code == 0, result.output
@@ -323,16 +323,16 @@ class TestGoldenHumanOutput:
 class TestGoldenJsonOutput:
     """Pin JSON envelope structure and pinned values.
 
-    Seams: schwab_cli.commands.vol.get_chain, schwab_cli.commands.vol.get_history,
-           schwab_cli.commands.vol._backfill_synthetic_iv (neutralized)
+    Seams: schwab_cli.api.chains.get_chain, schwab_cli.api.history.get_history,
+           schwab_cli.service.vol._backfill_synthetic_iv (neutralized)
     """
 
     def _env(self, monkeypatch, tmp_path) -> dict:
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
         assert result.exit_code == 0, result.output
@@ -447,16 +447,16 @@ class TestGoldenJsonOutput:
 class TestGoldenMdOutput:
     """Pin MD format output for normal vol NVDA.
 
-    Seams: schwab_cli.commands.vol.get_chain, schwab_cli.commands.vol.get_history,
-           schwab_cli.commands.vol._backfill_synthetic_iv (neutralized)
+    Seams: schwab_cli.api.chains.get_chain, schwab_cli.api.history.get_history,
+           schwab_cli.service.vol._backfill_synthetic_iv (neutralized)
     """
 
     def _invoke(self, monkeypatch, tmp_path) -> str:
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--md"])
         assert result.exit_code == 0, result.output
@@ -526,16 +526,16 @@ class TestGoldenMdOutput:
 class TestHvWindowAndLookback:
     """Pin that flag values propagate through to the HV/HVP envelope.
 
-    Seams: schwab_cli.commands.vol.get_chain, schwab_cli.commands.vol.get_history,
-           schwab_cli.commands.vol._backfill_synthetic_iv (neutralized)
+    Seams: schwab_cli.api.chains.get_chain, schwab_cli.api.history.get_history,
+           schwab_cli.service.vol._backfill_synthetic_iv (neutralized)
     """
 
     def _env(self, monkeypatch, tmp_path, extra_flags: list[str]) -> dict:
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(
                 app, ["vol", "NVDA", "--no-record", "--json"] + extra_flags
@@ -592,8 +592,8 @@ class TestHvWindowAndLookback:
 class TestSnapshotOnly:
     """Pin --snapshot-only behaviour: records and exits with empty stdout.
 
-    Seams: schwab_cli.commands.vol.get_chain, schwab_cli.commands.vol.get_history,
-           schwab_cli.commands.vol._backfill_synthetic_iv (neutralized)
+    Seams: schwab_cli.api.chains.get_chain, schwab_cli.api.history.get_history,
+           schwab_cli.service.vol._backfill_synthetic_iv (neutralized)
            schwab_cli.storage.vol_history.record_snapshot (write spy)
     """
 
@@ -601,9 +601,9 @@ class TestSnapshotOnly:
         """--snapshot-only must exit 0 on success."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
         assert result.exit_code == 0
@@ -612,9 +612,9 @@ class TestSnapshotOnly:
         """--snapshot-only must produce no output on stdout."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
         assert result.output.strip() == ""
@@ -623,9 +623,9 @@ class TestSnapshotOnly:
         """Rendered metric rows (IV, HV, separator) must not appear in stdout."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
         assert "IV" not in result.output
@@ -638,9 +638,9 @@ class TestSnapshotOnly:
 
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
         assert result.exit_code == 0
@@ -659,8 +659,8 @@ class TestSnapshotOnly:
 class TestNoRecord:
     """Pin --no-record: full render is produced but store write is skipped.
 
-    Seams: schwab_cli.commands.vol.get_chain, schwab_cli.commands.vol.get_history,
-           schwab_cli.commands.vol._backfill_synthetic_iv (neutralized),
+    Seams: schwab_cli.api.chains.get_chain, schwab_cli.api.history.get_history,
+           schwab_cli.service.vol._backfill_synthetic_iv (neutralized),
            schwab_cli.storage.vol_history.record_snapshot (spy)
     """
 
@@ -668,9 +668,9 @@ class TestNoRecord:
         """--no-record must still exit 0."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
         assert result.exit_code == 0
@@ -691,9 +691,9 @@ class TestNoRecord:
             return orig(*args, **kwargs)
 
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
             patch("schwab_cli.storage.vol_history.record_snapshot", side_effect=_spy),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
@@ -709,9 +709,9 @@ class TestNoRecord:
 
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
         with connect() as conn:
@@ -722,9 +722,9 @@ class TestNoRecord:
         """--no-record must still produce a full render (human format)."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
         assert "IV" in result.output
@@ -743,16 +743,16 @@ class TestShortHistory:
     With _history_resp(10) the underlying has only 10 candles — fewer than
     the default 30-day HV window — so HV and HVP are both null/dash.
 
-    Seams: schwab_cli.commands.vol.get_chain, schwab_cli.commands.vol.get_history,
-           schwab_cli.commands.vol._backfill_synthetic_iv (neutralized)
+    Seams: schwab_cli.api.chains.get_chain, schwab_cli.api.history.get_history,
+           schwab_cli.service.vol._backfill_synthetic_iv (neutralized)
     """
 
     def _env(self, monkeypatch, tmp_path) -> dict:
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(10)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(10)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--json"])
         assert result.exit_code == 0, result.output
@@ -761,9 +761,9 @@ class TestShortHistory:
     def _md(self, monkeypatch, tmp_path) -> str:
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(10)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(10)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record", "--md"])
         assert result.exit_code == 0, result.output
@@ -809,9 +809,9 @@ class TestShortHistory:
         """Short history must still exit 0 (graceful degradation)."""
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(10)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(10)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
         assert result.exit_code == 0
@@ -932,11 +932,11 @@ class TestErrorPaths:
     def test_api_error_on_chain_exit_1(self, monkeypatch, tmp_path):
         """ApiError from get_chain must exit 1.
 
-        Seam: schwab_cli.commands.vol.get_chain
+        Seam: schwab_cli.api.chains.get_chain
         """
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.vol.get_chain",
+            "schwab_cli.api.chains.get_chain",
             side_effect=ApiError("503 down"),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
@@ -946,7 +946,7 @@ class TestErrorPaths:
         """ApiError message must appear in output."""
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.vol.get_chain",
+            "schwab_cli.api.chains.get_chain",
             side_effect=ApiError("503 down"),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
@@ -955,11 +955,11 @@ class TestErrorPaths:
     def test_session_expired_on_chain_exit_1(self, monkeypatch, tmp_path):
         """SessionExpired from get_chain must exit 1.
 
-        Seam: schwab_cli.commands.vol.get_chain
+        Seam: schwab_cli.api.chains.get_chain
         """
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.vol.get_chain",
+            "schwab_cli.api.chains.get_chain",
             side_effect=SessionExpired("token expired"),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
@@ -968,7 +968,7 @@ class TestErrorPaths:
     def test_session_expired_on_chain_message(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with patch(
-            "schwab_cli.commands.vol.get_chain",
+            "schwab_cli.api.chains.get_chain",
             side_effect=SessionExpired("token expired"),
         ):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
@@ -977,14 +977,14 @@ class TestErrorPaths:
     def test_api_error_on_history_exit_1(self, monkeypatch, tmp_path):
         """ApiError from get_history must exit 1.
 
-        Seams: schwab_cli.commands.vol.get_chain (passes),
-               schwab_cli.commands.vol.get_history (raises ApiError)
+        Seams: schwab_cli.api.chains.get_chain (passes),
+               schwab_cli.api.history.get_history (raises ApiError)
         """
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
             patch(
-                "schwab_cli.commands.vol.get_history",
+                "schwab_cli.api.history.get_history",
                 side_effect=ApiError("rate limited"),
             ),
         ):
@@ -994,9 +994,9 @@ class TestErrorPaths:
     def test_api_error_on_history_message(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
             patch(
-                "schwab_cli.commands.vol.get_history",
+                "schwab_cli.api.history.get_history",
                 side_effect=ApiError("rate limited"),
             ),
         ):
@@ -1006,14 +1006,14 @@ class TestErrorPaths:
     def test_session_expired_on_history_exit_1(self, monkeypatch, tmp_path):
         """SessionExpired from get_history must exit 1.
 
-        Seams: schwab_cli.commands.vol.get_chain (passes),
-               schwab_cli.commands.vol.get_history (raises SessionExpired)
+        Seams: schwab_cli.api.chains.get_chain (passes),
+               schwab_cli.api.history.get_history (raises SessionExpired)
         """
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
             patch(
-                "schwab_cli.commands.vol.get_history",
+                "schwab_cli.api.history.get_history",
                 side_effect=SessionExpired("expired"),
             ),
         ):
@@ -1023,9 +1023,9 @@ class TestErrorPaths:
     def test_session_expired_on_history_message(self, monkeypatch, tmp_path):
         _prep(monkeypatch, tmp_path)
         with (
-            patch("schwab_cli.commands.vol.get_chain", return_value=_CHAIN_RESP),
+            patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP),
             patch(
-                "schwab_cli.commands.vol.get_history",
+                "schwab_cli.api.history.get_history",
                 side_effect=SessionExpired("expired"),
             ),
         ):
@@ -1035,11 +1035,11 @@ class TestErrorPaths:
     def test_missing_spot_in_chain_exit_1(self, monkeypatch, tmp_path):
         """Chain response with no underlying.last must exit 1.
 
-        Seam: schwab_cli.commands.vol.get_chain
+        Seam: schwab_cli.api.chains.get_chain
         """
         _prep(monkeypatch, tmp_path)
         resp = {**_CHAIN_RESP, "underlying": {}}
-        with patch("schwab_cli.commands.vol.get_chain", return_value=resp):
+        with patch("schwab_cli.api.chains.get_chain", return_value=resp):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
         assert result.exit_code == 1
 
@@ -1047,7 +1047,7 @@ class TestErrorPaths:
         """Missing spot error must mention 'spot'."""
         _prep(monkeypatch, tmp_path)
         resp = {**_CHAIN_RESP, "underlying": {}}
-        with patch("schwab_cli.commands.vol.get_chain", return_value=resp):
+        with patch("schwab_cli.api.chains.get_chain", return_value=resp):
             result = runner.invoke(app, ["vol", "NVDA", "--no-record"])
         assert "spot" in result.output.lower()
 
@@ -1060,7 +1060,7 @@ class TestErrorPaths:
 class TestChainCallParameters:
     """Pin that get_chain is called with contract_type=ALL and strike_count=60.
 
-    Seam: schwab_cli.commands.vol.get_chain (capture kwargs)
+    Seam: schwab_cli.api.chains.get_chain (capture kwargs)
     """
 
     def test_chain_called_with_wide_params(self, monkeypatch, tmp_path):
@@ -1074,9 +1074,9 @@ class TestChainCallParameters:
             return _CHAIN_RESP
 
         with (
-            patch("schwab_cli.commands.vol.get_chain", side_effect=_fake_chain),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", side_effect=_fake_chain),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             runner.invoke(app, ["vol", "NVDA", "--no-record"])
 
@@ -1098,9 +1098,9 @@ class TestChainCallParameters:
             return _CHAIN_RESP
 
         with (
-            patch("schwab_cli.commands.vol.get_chain", side_effect=_fake_chain),
-            patch("schwab_cli.commands.vol.get_history", return_value=_history_resp(300)),
-            patch("schwab_cli.commands.vol._backfill_synthetic_iv", return_value=0),
+            patch("schwab_cli.api.chains.get_chain", side_effect=_fake_chain),
+            patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)),
+            patch("schwab_cli.service.vol._backfill_synthetic_iv", return_value=0),
         ):
             runner.invoke(app, ["vol", "NVDA", "--no-record"])
 

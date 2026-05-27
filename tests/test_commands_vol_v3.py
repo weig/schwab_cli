@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from schwab_cli.storage import vol_history
-from schwab_cli.commands.vol import compute_iv_rank_and_percentile
+from schwab_cli.service.vol import compute_iv_rank_and_percentile
 
 
 @pytest.fixture

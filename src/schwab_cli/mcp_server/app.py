@@ -690,7 +690,7 @@ def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
         return _json.dumps([dict(r) for r in rows], indent=2, default=str)
 
     if name == "dataset.iv_rank":
-        from schwab_cli.commands.vol import compute_iv_rank_and_percentile
+        from schwab_cli.service.vol import compute_iv_rank_and_percentile
         with vol_history.connect() as conn:
             recent = conn.execute(
                 "SELECT atm_iv_30d, atm_iv FROM vol_snapshots "
