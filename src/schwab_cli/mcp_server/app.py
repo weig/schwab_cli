@@ -32,9 +32,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from schwab_cli import config as config_module
-from schwab_cli.api.chains import get_chain
-from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
-from schwab_cli.api.quotes import get_quotes
+from schwab_cli.api.client import SchwabClient
 from schwab_cli.mcp_server.auth_monitor import (
     DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
     AuthMonitor,
@@ -43,7 +41,14 @@ from schwab_cli.mcp_server.logbook import LogBook
 from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
 from schwab_cli.notify import Notifier
-from schwab_cli.output.chains import shape_envelope
+from schwab_cli.service import chains as service_chains
+from schwab_cli.service import quotes as service_quotes
+from schwab_cli.service.auth import (
+    ApiError,
+    NotAuthenticated,
+    NotConfigured,
+    SessionExpired,
+)
 
 
 class SchwabMcpServer:
@@ -254,7 +259,9 @@ class SchwabMcpServer:
                 self._logbook.error("tool.error", tool=name, error=str(e))
                 return [TextContent(
                     type="text",
-                    text=f"schwab error: {e}",
+                    # Same format as the per-tool handlers so log/grep
+                    # correlation is consistent across every tool.
+                    text=f"schwab error: {type(e).__name__}: {e}",
                 )]
             except Exception as e:
                 self._logbook.error(
@@ -275,7 +282,13 @@ class SchwabMcpServer:
             )]
         if not symbols:
             return [TextContent(type="text", text="symbols list is empty")]
-        data = get_quotes(self._client, [s.upper() for s in symbols])
+        upcased = [s.upper() for s in symbols]
+        try:
+            data = service_quotes.get_quote_payload(upcased)
+        except (NotConfigured, NotAuthenticated, ApiError, SessionExpired) as e:
+            return [TextContent(
+                type="text", text=f"schwab error: {type(e).__name__}: {e}",
+            )]
         return [TextContent(type="text", text=json.dumps(data, default=str))]
 
     async def _tool_get_chain(self, args: dict[str, Any]) -> list[TextContent]:
@@ -292,15 +305,16 @@ class SchwabMcpServer:
             return [TextContent(
                 type="text", text=f"invalid expiry {expiry_str!r} (need YYYY-MM-DD)",
             )]
-        raw = get_chain(
-            self._client,
-            symbol.upper(),
-            contract_type="ALL",
-            strike_count=strike_count,
-            from_date=expiry,
-            to_date=expiry,
-        )
-        envelope = shape_envelope(raw)
+        try:
+            envelope = service_chains.get_chain_envelope(
+                symbol.upper(),
+                expiry=expiry,
+                strike_count=strike_count,
+            )
+        except (NotConfigured, NotAuthenticated, ApiError, SessionExpired) as e:
+            return [TextContent(
+                type="text", text=f"schwab error: {type(e).__name__}: {e}",
+            )]
         return [TextContent(type="text", text=json.dumps(envelope, default=str))]
 
     async def _tool_stream_quote(

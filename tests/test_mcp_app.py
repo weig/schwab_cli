@@ -49,7 +49,10 @@ def _call(coro) -> list:
 def test_get_quote_returns_json_payload():
     server = _make_server()
     fake_quotes = {"NVDA": {"symbol": "NVDA", "lastPrice": 250.1}}
-    with patch("schwab_cli.mcp_server.app.get_quotes", return_value=fake_quotes):
+    with patch(
+        "schwab_cli.service.quotes.get_quote_payload",
+        return_value=fake_quotes,
+    ):
         result = _call(server._tool_get_quote({"symbols": ["NVDA"]}))
     assert len(result) == 1
     data = json.loads(result[0].text)
@@ -60,13 +63,30 @@ def test_get_quote_upcases_symbols():
     server = _make_server()
     captured = {}
 
-    def fake_quotes(client, symbols):
+    def fake_quotes(symbols):
         captured["symbols"] = list(symbols)
         return {}
 
-    with patch("schwab_cli.mcp_server.app.get_quotes", side_effect=fake_quotes):
+    with patch(
+        "schwab_cli.service.quotes.get_quote_payload",
+        side_effect=fake_quotes,
+    ):
         _call(server._tool_get_quote({"symbols": ["nvda", "aapl"]}))
     assert captured["symbols"] == ["NVDA", "AAPL"]
+
+
+def test_get_quote_auth_error_returns_text_not_raise():
+    from schwab_cli.service.auth import NotAuthenticated
+
+    server = _make_server()
+    with patch(
+        "schwab_cli.service.quotes.get_quote_payload",
+        side_effect=NotAuthenticated("no session"),
+    ):
+        result = _call(server._tool_get_quote({"symbols": ["NVDA"]}))
+    assert len(result) == 1
+    assert "schwab error" in result[0].text
+    assert "NotAuthenticated" in result[0].text
 
 
 def test_get_quote_empty_symbols_errors():
@@ -86,12 +106,18 @@ def test_get_quote_rejects_non_list():
 
 def test_get_chain_happy_path():
     server = _make_server()
-    fake_raw = {
+    # The service returns an already-shaped envelope; the tool serializes
+    # it unchanged. Use a representative envelope so the JSON the tool
+    # emits matches the pre-refactor (shape_envelope) output.
+    fake_envelope = {
         "symbol": "AMZN",
         "underlying": {"last": 255.0, "change": 0, "percentChange": 0},
-        "callExpDateMap": {}, "putExpDateMap": {},
+        "contracts": [],
     }
-    with patch("schwab_cli.mcp_server.app.get_chain", return_value=fake_raw):
+    with patch(
+        "schwab_cli.service.chains.get_chain_envelope",
+        return_value=fake_envelope,
+    ):
         result = _call(server._tool_get_chain({
             "symbol": "AMZN",
             "expiry": "2026-05-01",
@@ -100,6 +126,22 @@ def test_get_chain_happy_path():
     data = json.loads(result[0].text)
     assert data["symbol"] == "AMZN"
     assert data["underlying"]["last"] == 255.0
+
+
+def test_get_chain_auth_error_returns_text_not_raise():
+    from schwab_cli.api.client import SessionExpired
+
+    server = _make_server()
+    with patch(
+        "schwab_cli.service.chains.get_chain_envelope",
+        side_effect=SessionExpired("expired"),
+    ):
+        result = _call(server._tool_get_chain({
+            "symbol": "AMZN", "expiry": "2026-05-01",
+        }))
+    assert len(result) == 1
+    assert "schwab error" in result[0].text
+    assert "SessionExpired" in result[0].text
 
 
 def test_get_chain_requires_symbol_and_expiry():
