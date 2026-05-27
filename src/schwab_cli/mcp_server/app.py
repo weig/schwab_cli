@@ -429,7 +429,9 @@ class SchwabMcpServer:
 
     # ---- lifecycle -----------------------------------------------------
 
-    async def run_http(self, host: str, port: int) -> None:
+    async def run_http(
+        self, host: str, port: int, *, extra_routes=None
+    ) -> None:
         """Drive the server over Streamable HTTP + HTTP admin endpoints
         on ``host:port`` until a shutdown is signalled.
 
@@ -439,6 +441,12 @@ class SchwabMcpServer:
         lifecycle (create/route/teardown) is the manager's concern. A
         small set of ``/admin/*`` routes are mounted alongside it for
         status / shutdown control.
+
+        ``extra_routes`` (optional) is a list of Starlette ``Route``
+        objects appended to the app's route table — used by the REST PoC
+        so its ``/quote/{symbol}`` route shares this server's single
+        port. Defaults to ``None`` (no extra routes) so existing callers
+        are unaffected.
         """
         # Deferred imports avoid pulling in uvicorn/Starlette when tests
         # only exercise tool handlers.
@@ -534,6 +542,8 @@ class SchwabMcpServer:
             Route("/admin/shutdown", endpoint=admin_shutdown, methods=["POST"]),
             Route("/admin/flush", endpoint=admin_flush, methods=["POST"]),
         ]
+        if extra_routes:
+            routes.extend(extra_routes)
         app = Starlette(routes=routes, lifespan=_lifespan)
 
         self._logbook.info(

@@ -41,6 +41,9 @@ def run(
     enable_mcp: bool = False,
     mcp_host: str = "127.0.0.1",
     mcp_port: int = 7234,
+    enable_rest: bool = False,
+    rest_host: str = "127.0.0.1",
+    rest_port: int = 8000,
     log_file: str | None = None,
     no_log_file: bool = False,
     no_auto_login: bool = False,
@@ -57,12 +60,29 @@ def run(
     a daemon thread as the single proactive refresh-token renewer, and
     the MCP server runs on the main thread with
     ``auth_monitor_enabled=False`` so there is no competing rotation.
+    ``enable_rest=True`` additionally mounts the REST PoC routes onto
+    that same MCP Starlette app (one shared port).
+
+    With ``enable_rest=True`` but WITHOUT ``--enable-mcp`` it serves the
+    standalone REST PoC app via uvicorn on ``rest_host:rest_port`` with
+    the maintenance loop underneath in a daemon thread.
     """
     if enable_mcp:
         return _run_with_mcp(
             interval_s=interval_s,
             mcp_host=mcp_host,
             mcp_port=mcp_port,
+            enable_rest=enable_rest,
+            log_file=log_file,
+            no_log_file=no_log_file,
+            no_auto_login=no_auto_login,
+        )
+
+    if enable_rest:
+        return _run_with_rest(
+            interval_s=interval_s,
+            rest_host=rest_host,
+            rest_port=rest_port,
             log_file=log_file,
             no_log_file=no_log_file,
             no_auto_login=no_auto_login,
@@ -119,6 +139,7 @@ def _run_with_mcp(
     interval_s: int,
     mcp_host: str,
     mcp_port: int,
+    enable_rest: bool = False,
     log_file: str | None,
     no_log_file: bool,
     no_auto_login: bool,
@@ -261,9 +282,19 @@ def _run_with_mcp(
         f"+ auth-maintenance loop (interval {interval_s}s)",
         fg=typer.colors.CYAN, err=True,
     )
+    # --enable-rest mounts the REST PoC routes onto the MCP server's
+    # Starlette app so both share this single port.
+    extra_routes = None
+    if enable_rest:
+        from schwab_cli.server.rest import rest_routes
+
+        extra_routes = rest_routes()
+
     crashed = False
     try:
-        asyncio.run(server.run_http(mcp_host, mcp_port))
+        asyncio.run(
+            server.run_http(mcp_host, mcp_port, extra_routes=extra_routes)
+        )
     except KeyboardInterrupt:
         logbook.info("daemon.stop", reason="SIGINT")
     except Exception as e:
@@ -281,6 +312,131 @@ def _run_with_mcp(
     return 0
 
 
+def _run_with_rest(
+    *,
+    interval_s: int,
+    rest_host: str,
+    rest_port: int,
+    log_file: str | None,
+    no_log_file: bool,
+    no_auto_login: bool,
+) -> int | None:
+    """``schwab server --enable-rest`` (without ``--enable-mcp``).
+
+    Serves the standalone REST PoC Starlette app via uvicorn on
+    ``rest_host:rest_port`` with the auth-maintenance loop running
+    underneath in a daemon thread (the single proactive refresh-token
+    renewer). Mirrors :func:`_run_with_mcp`'s startup (cfg + session
+    presence, logbook + notifier, refresh-expiry startup auto-login) and
+    its thread + ``asyncio.run`` + ``stop_event`` + join structure;
+    uvicorn owns SIGINT/SIGTERM, so we install NO signal handlers here.
+
+    The REST app is UNAUTHENTICATED — it is a proof of the REST ->
+    service path only (auth/allowlisting is a deliberate later step).
+    """
+    from schwab_cli.commands.mcp import (
+        _attempt_startup_autologin,
+        _resolve_log_file,
+    )
+    from schwab_cli.mcp_server.logbook import LogBook
+    from schwab_cli.server.rest import build_rest_app
+    from schwab_cli.session import load as load_session
+
+    cfg = config_module.load()
+    if cfg is None:
+        typer.secho(
+            "No config found. Run `schwab_cli setup` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise SystemExit(1)
+    session = load_session()
+    if session is None:
+        typer.secho(
+            "No session found. Run `schwab_cli auth` first.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise SystemExit(1)
+
+    resolved_log_file = _resolve_log_file(log_file, no_log_file)
+    logbook = LogBook(log_file=resolved_log_file)
+    from schwab_cli.notify import Notifier
+    base_notifier = Notifier.from_file(logbook=logbook)
+
+    now = int(time.time())
+    if session.refresh_token_expires_at <= now:
+        if no_auto_login:
+            typer.secho(
+                "Refresh token expired and --no-auto-login is set. "
+                "Run `schwab_cli auth --force` to re-authenticate, "
+                "then restart the server.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise SystemExit(1)
+        logbook.warning("daemon.startup_refresh_expired", attempting_autologin=True)
+        fresh = _attempt_startup_autologin(logbook, base_notifier)
+        if fresh is None:
+            typer.secho(
+                "Startup auto-login failed. Check the log for details, "
+                "then run `schwab_cli auth --force` manually before "
+                "restarting.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise SystemExit(1)
+        logbook.info("daemon.startup_refresh_recovered")
+
+    # Forward maintenance ticks through the logbook-aware notifier (no
+    # second notification.json load). REST calls the service per-request,
+    # so there is no persistent client needing an in-memory session handoff.
+    notifier = _build_notifier(base_notifier)
+
+    # The maintenance loop owns ongoing refresh-token renewal — start it
+    # in a daemon thread, exactly as the --enable-mcp path does.
+    stop_event = threading.Event()
+    maint = threading.Thread(
+        target=maintenance.run_loop,
+        args=(cfg,),
+        kwargs=dict(
+            stop=stop_event.is_set,
+            sleep=stop_event.wait,
+            now=lambda: int(time.time()),
+            interval_s=interval_s,
+            notifier=notifier,
+        ),
+        daemon=True,
+        name="schwab-server-maintenance",
+    )
+    maint.start()
+
+    typer.secho(
+        f"server: starting REST PoC (unauthenticated) on "
+        f"{rest_host}:{rest_port} + auth-maintenance loop "
+        f"(interval {interval_s}s)",
+        fg=typer.colors.CYAN, err=True,
+    )
+
+    async def _serve() -> None:
+        import uvicorn
+
+        config = uvicorn.Config(
+            build_rest_app(),
+            host=rest_host,
+            port=rest_port,
+            log_level="warning",
+            loop="asyncio",
+        )
+        await uvicorn.Server(config).serve()
+
+    try:
+        asyncio.run(_serve())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        maint.join(timeout=5)
+    typer.secho("server: stopped.", fg=typer.colors.CYAN, err=True)
+    return 0
+
+
 def _install_signal_handlers(handler) -> None:
     """Best-effort SIGTERM/SIGINT install (no-op off the main thread)."""
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -291,18 +447,22 @@ def _install_signal_handlers(handler) -> None:
             pass
 
 
-def _build_notifier():
-    """Build a notifier that forwards ticks to the Notifier infra.
+def _build_notifier(notifier=None):
+    """Build a maintenance-tick forwarder over the Notifier infra.
 
-    Returns ``None`` if the notification stack can't be constructed, so
-    the loop degrades to silent maintenance rather than crashing.
+    Pass an already-constructed ``notifier`` (e.g. a logbook-aware one) to
+    reuse it and avoid a second ``notification.json`` load; omit it to build
+    a fresh one. Returns ``None`` if the notification stack can't be
+    constructed, so the loop degrades to silent maintenance rather than
+    crashing.
     """
-    try:
-        from schwab_cli.notify import Notifier
+    if notifier is None:
+        try:
+            from schwab_cli.notify import Notifier
 
-        notifier = Notifier.from_file()
-    except Exception:  # noqa: BLE001 — notifications are optional
-        return None
+            notifier = Notifier.from_file()
+        except Exception:  # noqa: BLE001 — notifications are optional
+            return None
 
     _event_for = {
         "renewed": "scheduler.proactive_auth_succeeded",

@@ -700,6 +700,26 @@ def server_root(
         7234, "--mcp-port",
         help="MCP HTTP bind port (only used with --enable-mcp).",
     ),
+    enable_rest: bool = typer.Option(
+        False, "--enable-rest",
+        help=(
+            "Also serve the REST PoC. UNAUTHENTICATED proof of the "
+            "REST -> service path (GET /quote/{symbol}); auth/"
+            "allowlisting is a deliberate later step. Standalone it "
+            "runs on --rest-host:--rest-port; combined with "
+            "--enable-mcp its routes mount onto the MCP server's port."
+        ),
+    ),
+    rest_host: str = typer.Option(
+        "127.0.0.1", "--rest-host",
+        help="REST PoC bind host (only used with --enable-rest, "
+        "standalone). Loopback-only by default.",
+    ),
+    rest_port: int = typer.Option(
+        8000, "--rest-port",
+        help="REST PoC bind port (only used with --enable-rest, "
+        "standalone).",
+    ),
     log_file: str = typer.Option(
         None, "--log-file",
         help="Path to the MCP structured log file (only used with "
@@ -728,6 +748,9 @@ def server_root(
         enable_mcp=enable_mcp,
         mcp_host=mcp_host,
         mcp_port=mcp_port,
+        enable_rest=enable_rest,
+        rest_host=rest_host,
+        rest_port=rest_port,
         log_file=log_file,
         no_log_file=no_log_file,
         no_auto_login=no_auto_login,
