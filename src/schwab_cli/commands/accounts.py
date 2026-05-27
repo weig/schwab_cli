@@ -1,37 +1,22 @@
 from __future__ import annotations
 
+from typing import NoReturn
+
 import typer
 
-from schwab_cli import config as config_module
-from schwab_cli.api.accounts import get_account, get_positions, list_accounts
-from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
 from schwab_cli.output.accounts import (
-    render_account,
-    render_accounts,
-    render_positions,
+    render_account_result,
+    render_accounts_result,
+    render_positions_result,
 )
 from schwab_cli.output.format import FormatError, pick_format
-from schwab_cli.session import load as load_session
-
-
-def _client() -> SchwabClient:
-    cfg = config_module.load()
-    if cfg is None:
-        typer.secho(
-            "No config found. Run `schwab_cli setup` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    session = load_session()
-    if session is None:
-        typer.secho(
-            "No session found. Run `schwab_cli auth` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    return SchwabClient(cfg, session)
+from schwab_cli.service.accounts import get_account, get_positions, list_accounts
+from schwab_cli.service.auth import (
+    ApiError,
+    NotAuthenticated,
+    NotConfigured,
+    SessionExpired,
+)
 
 
 def _resolve_format(json: bool, md: bool):
@@ -42,7 +27,25 @@ def _resolve_format(json: bool, md: bool):
         raise typer.Exit(code=2)
 
 
-def _handle_api_error(e: Exception) -> None:
+def _handle_not_configured() -> NoReturn:
+    typer.secho(
+        "No config found. Run `schwab_cli setup` first.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _handle_not_authenticated() -> NoReturn:
+    typer.secho(
+        "No session found. Run `schwab_cli auth` first.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _handle_api_error(e: Exception) -> NoReturn:
     msg = str(e) if str(e) else type(e).__name__
     typer.secho(msg, fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
@@ -50,29 +53,38 @@ def _handle_api_error(e: Exception) -> None:
 
 def run_list(*, as_json: bool, as_md: bool) -> None:
     fmt = _resolve_format(as_json, as_md)
-    client = _client()
     try:
-        data = list_accounts(client)
+        result = list_accounts()
+    except NotConfigured:
+        _handle_not_configured()
+    except NotAuthenticated:
+        _handle_not_authenticated()
     except (ApiError, SessionExpired) as e:
         _handle_api_error(e)
-    typer.echo(render_accounts(data, fmt))
+    typer.echo(render_accounts_result(result, fmt))
 
 
 def run_show(account_number: str, *, as_json: bool, as_md: bool) -> None:
     fmt = _resolve_format(as_json, as_md)
-    client = _client()
     try:
-        data = get_account(client, account_number)
+        result = get_account(account_number)
+    except NotConfigured:
+        _handle_not_configured()
+    except NotAuthenticated:
+        _handle_not_authenticated()
     except (ApiError, SessionExpired) as e:
         _handle_api_error(e)
-    typer.echo(render_account(data, fmt))
+    typer.echo(render_account_result(result, fmt))
 
 
 def run_positions(account_number: str | None, *, as_json: bool, as_md: bool) -> None:
     fmt = _resolve_format(as_json, as_md)
-    client = _client()
     try:
-        rows = get_positions(client, account_number)
+        result = get_positions(account_number)
+    except NotConfigured:
+        _handle_not_configured()
+    except NotAuthenticated:
+        _handle_not_authenticated()
     except (ApiError, SessionExpired) as e:
         _handle_api_error(e)
-    typer.echo(render_positions(rows, fmt))
+    typer.echo(render_positions_result(result, fmt))
