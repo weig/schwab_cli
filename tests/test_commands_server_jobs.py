@@ -230,8 +230,12 @@ class TestServerJobsSubprocessIntegration:
 
         env = os.environ.copy()
         env["SCHWAB_CLI_CONFIG_DIR"] = str(config_dir)
-        # Prevent the daemon from trying to load a notification config.
-        env.pop("SCHWAB_CLI_NOTIFY", None)
+        # Notifications are isolated by SCHWAB_CLI_CONFIG_DIR: notify_config
+        # resolves notification.json under the (tmp) config dir, so the spawned
+        # daemon finds no config there and the notifier is inert — it can NEVER
+        # send a real alert during the test. (HOME is also redirected as a
+        # belt-and-suspenders guard against any hardcoded ~/.config lookups.)
+        env["HOME"] = str(config_dir)
 
         current_dir = jobs_dir / ".current"
         return {
