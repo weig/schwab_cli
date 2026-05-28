@@ -12,7 +12,11 @@ import importlib
 import logging
 import os
 import shutil
+import signal
+import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from schwab_cli._exit_codes import EXIT_AUTH_FAILED
@@ -147,3 +151,62 @@ def execute_job(cfg: JobConfig) -> int:
         return _execute_python(cfg)
     log.error("job %s has unknown type %r; cannot execute", cfg.id, cfg.type)
     return 1
+
+
+# ---------------------------------------------------------------------------
+# Worker spawning (used by the scheduler)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class JobHandle:
+    """A handle to a spawned worker process and its process group.
+
+    The worker is started in its own session/process group so the whole tree
+    can be signalled together — a command job's ``execvp`` child and any
+    grandchildren go down with a single ``killpg``.
+    """
+
+    pid: int
+    pgid: int
+    poll: Callable[[], int | None]
+    terminate: Callable[[], None]
+    kill: Callable[[], None]
+
+
+def spawn_worker(
+    cfg: JobConfig,
+    *,
+    log_path: Path,
+    binary: str | None = None,
+) -> JobHandle:
+    """Spawn ``schwab jobs run <id>`` as a detached worker process.
+
+    Output (stdout + stderr merged) is appended to ``log_path``; its parent
+    directory is created if needed. The child runs in a new session so its
+    process group can be signalled independently of the daemon.
+    """
+    argv = [binary or resolve_binary(), "jobs", "run", cfg.id]
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # The child inherits its own copy of this fd; the parent must close its
+    # copy unconditionally once Popen has forked (success or failure) so the
+    # daemon does not leak a file descriptor per spawned job.
+    log_file = open(log_path, "ab")  # noqa: SIM115 — closed in finally below
+    try:
+        proc = subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        log_file.close()
+
+    pgid = os.getpgid(proc.pid)
+    return JobHandle(
+        pid=proc.pid,
+        pgid=pgid,
+        poll=proc.poll,
+        terminate=lambda: os.killpg(pgid, signal.SIGTERM),
+        kill=lambda: os.killpg(pgid, signal.SIGKILL),
+    )
