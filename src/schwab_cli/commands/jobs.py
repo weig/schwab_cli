@@ -19,8 +19,10 @@ from typing import Any
 import typer
 
 from schwab_cli import paths
+from schwab_cli.dataset.launchd import uninstall_all_schwab_plists
 from schwab_cli.server.jobs import config
 from schwab_cli.server.jobs.config import JobConfig, JobConfigError
+from schwab_cli.server.jobs.defaults import write_default_jobs
 from schwab_cli.server.jobs.runner import execute_job
 from schwab_cli.server.jobs.runtime import (
     current_dir,
@@ -429,6 +431,51 @@ def _set_enabled(job_id: str, enabled: bool) -> None:
     info = read_pidfile(current)
     if info and isinstance(info.get("pid"), int) and _pid_alive(info["pid"]):
         os.kill(info["pid"], signal.SIGHUP)
+
+
+# ---------------------------------------------------------------------------
+# CLI: init / migrate
+# ---------------------------------------------------------------------------
+
+
+@app.command("init")
+def init() -> None:
+    """Seed the three default job configs into the staging jobs dir.
+
+    Existing files are never overwritten. Prints ``<stem>: created|exists``
+    for each default and exits 0.
+    """
+    results = write_default_jobs(jobs_dir())
+    for stem in sorted(results):
+        typer.echo(f"{stem}: {results[stem]}")
+    raise typer.Exit(0)
+
+
+@app.command("migrate")
+def migrate() -> None:
+    """Cut over from the legacy launchd scheduler to server-run jobs.
+
+    Tears down the old launchd scheduler FIRST, then seeds the default job
+    configs. If the teardown fails, no defaults are written.
+    """
+    try:
+        uninstall_all_schwab_plists()
+    except RuntimeError as exc:
+        typer.secho(
+            f"migrate aborted: could not remove the legacy scheduler: {exc}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+
+    results = write_default_jobs(jobs_dir())
+    for stem in sorted(results):
+        typer.echo(f"{stem}: {results[stem]}")
+
+    typer.echo("")
+    typer.echo("(re)start `schwab server` to pick up the jobs.")
+    typer.echo("Check job status anytime with `schwab jobs status`.")
+    raise typer.Exit(0)
 
 
 @app.command("enable")
