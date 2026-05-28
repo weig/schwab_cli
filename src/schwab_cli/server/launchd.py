@@ -76,6 +76,11 @@ def build_plist(spec: ServerPlistSpec) -> bytes:
         "ProgramArguments": _program_arguments(spec),
         "RunAtLoad": True,
         "KeepAlive": True,
+        # Interactive = scheduled like a user app, so launchd spawns it
+        # promptly on load (matches the pre-restructure mcp daemon). Without
+        # it the job is treated as background/standard and launchd is lazier
+        # about the RunAtLoad spawn.
+        "ProcessType": "Interactive",
         "EnvironmentVariables": {
             # Marker so the daemon knows it was launched by launchd.
             "LAUNCHD_MANAGED": "1",
