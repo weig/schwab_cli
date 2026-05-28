@@ -341,7 +341,9 @@ def _check_install() -> None:
 
 
 _MCP_DEFAULT_URL = "http://127.0.0.1:7234"
-_MCP_LAUNCHD_LABEL = "com.schwab-cli.mcp"
+# `schwab server` is the only daemon now (PR #52); MCP runs under it via
+# `--enable-mcp`, so the launchd job to look for is the server's.
+_MCP_LAUNCHD_LABEL = "com.schwab-cli.server"
 _MCP_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{_MCP_LAUNCHD_LABEL}.plist"
 
 
@@ -394,7 +396,7 @@ def _check_mcp() -> None:
         )
     else:
         _bad("Not running")
-        _hint("schwab_cli mcp --sse  (or `mcp start-service` if installed)")
+        _hint("schwab server --enable-mcp  (the MCP server runs under `server`)")
 
     plist_loaded = _launchctl_loaded(_MCP_LAUNCHD_LABEL)
     plist_present = _MCP_PLIST.exists()
@@ -405,13 +407,13 @@ def _check_mcp() -> None:
         _hint(f"launchctl load -w {_MCP_PLIST}")
     else:
         _bad("launchd plist not installed")
-        _hint("schwab_cli mcp install-service")
+        _hint("schwab server install --enable-mcp")
 
     if _claude_code_has_schwab():
         _ok("Registered with Claude Code", "~/.claude/settings.json")
     else:
         _bad("Not registered with Claude Code")
-        _hint("schwab_cli mcp install")
+        _hint("schwab server register-claude")
 
 
 # ---- 3. Schwab auth ---------------------------------------------------

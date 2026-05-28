@@ -2,43 +2,14 @@ from __future__ import annotations
 
 import typer
 
-from schwab_cli import config as config_module
-from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
-from schwab_cli.api.transactions import get_all_transactions  # noqa: F401 (legacy import surface)
-from schwab_cli.api.transactions_cache import fetch_cached
+from schwab_cli.commands._error import cli_errors
 from schwab_cli.history_spec import RangeSpecError, parse_range
 from schwab_cli.output.format import FormatError, pick_format
-from schwab_cli.output.transactions import render_transactions, shape_transactions
-from schwab_cli.session import load as load_session
+from schwab_cli.output.transactions import render_transactions_result
+from schwab_cli.service.transactions import TransactionsService
 
 
-def _client() -> SchwabClient:
-    cfg = config_module.load()
-    if cfg is None:
-        typer.secho(
-            "No config found. Run `schwab_cli setup` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    session = load_session()
-    if session is None:
-        typer.secho(
-            "No session found. Run `schwab_cli auth` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    return SchwabClient(cfg, session)
-
-
-def _filter_by_type(rows: list[dict], type_filter: str) -> list[dict]:
-    if not type_filter or type_filter == "ALL":
-        return rows
-    wanted = {t.strip() for t in type_filter.split(",") if t.strip()}
-    return [r for r in rows if (r.get("type") or "") in wanted]
-
-
+@cli_errors
 def run(
     account: str | None,
     *,
@@ -61,29 +32,12 @@ def run(
         code = 2 if getattr(e, "kind", "invalid") == "invalid" else 1
         raise typer.Exit(code=code)
 
-    client = _client()
-    cache_stats: dict = {}
-    try:
-        # Cache always fetches the full type set; apply the user's
-        # filter locally on the way to the renderer.
-        raw = fetch_cached(
-            client, account,
-            start=start, end=end,
-            refresh=refresh,
-            stats=cache_stats,
-        )
-    except (ApiError, SessionExpired) as e:
-        msg = str(e) if str(e) else type(e).__name__
-        typer.secho(msg, fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    result = TransactionsService().get_transactions(
+        account,
+        start=start,
+        end=end,
+        type_filter=type_filter,
+        refresh=refresh,
+    )
 
-    raw = _filter_by_type(raw, type_filter)
-    rows = shape_transactions(raw)
-    typer.echo(render_transactions(
-        rows, fmt=fmt,
-        # When the user filtered to a specific account, drop the
-        # redundant Account column from human/MD output. JSON is
-        # unaffected (stable shape for machine consumers).
-        show_account=(account is None),
-        cache_stats=cache_stats,
-    ))
+    typer.echo(render_transactions_result(result, fmt=fmt))

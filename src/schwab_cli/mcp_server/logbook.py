@@ -3,7 +3,7 @@
 Every subscribe / unsubscribe / auth / guardrail / error event goes
 through :meth:`LogBook.emit` and is written as one JSON line to
 both stderr (for foreground runs) and, optionally, a rolling log
-file (so ``schwab_cli mcp log -f`` can tail from another terminal).
+file (so ``schwab server log -f`` can tail from another terminal).
 
 Event schema is informal — callers pass an ``event`` string and any
 keyword fields, which are serialised as top-level JSON keys alongside

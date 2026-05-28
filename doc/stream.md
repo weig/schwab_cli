@@ -70,7 +70,7 @@ routed by ticker.
 
 When the MCP daemon is running, using the default (auto) mode is
 preferred: every subscribe / unsubscribe event shows up in the
-daemon's log, `mcp status` reflects your client, and multiple
+daemon's log, `server status` reflects your client, and multiple
 concurrent `stream` invocations share the one Schwab WebSocket.
 
 ## After-hours behaviour
@@ -81,7 +81,7 @@ quote updates actually happen. Outside market hours (4:00-20:00 ET
 extended or 9:30-16:00 ET regular) there's typically no activity, so
 you'll see one initial row per symbol and then silence. The
 subscription stays live — data resumes as soon as the market moves.
-This is correct behaviour, not a bug. Use `-f` mode of `mcp log` to
+This is correct behaviour, not a bug. Use `-f` mode of `server log` to
 see heartbeats flow in the background during quiet periods.
 
 ## Schwab streamer constraint
@@ -89,8 +89,9 @@ see heartbeats flow in the background during quiet periods.
 Schwab allows **one streamer session per account**. Two
 `schwab_cli stream --direct` processes running simultaneously will
 clobber each other's connections (each new `ADMIN LOGIN` disconnects
-the prior). Use SSE mode of `schwab_cli mcp` + `--mcp` (when it
-ships) for true concurrent multi-tool streaming.
+the prior). Run the MCP daemon (`schwab server --enable-mcp`) and use
+`schwab stream --mcp` for true concurrent multi-tool streaming through
+its shared `stream_quote` tool.
 
 ## Exit codes
 

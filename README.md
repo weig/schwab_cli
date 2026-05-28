@@ -31,7 +31,7 @@ No third-party intermediaries, no data sharing, no shared API keys.
 | Streaming | `stream`, `watch` | [stream](doc/stream.md) |
 | Orders (place / preview / cancel / replace) | `order` | [order](doc/order.md) |
 | Notifications | `notify` (Telegram) | [notify](doc/notify.md) |
-| MCP server | `mcp install`, `mcp status`, `mcp log`, … | [mcp](doc/mcp.md) |
+| Server / MCP daemon | `server`, `server --enable-mcp`, `server install`, `server status`, `server register-claude` | [server](doc/server.md) · [mcp tools](doc/mcp.md) |
 | Cached dataset backend | `dataset subscribe`, `dataset sync`, `dataset cron …` | [setup](doc/setup.md) |
 | Health check | `doctor` | _(prints install / MCP / auth / dataset status)_ |
 
@@ -40,6 +40,33 @@ Output formats are uniform across commands:
 - `--json`: machine-readable for `| jq` and scripts.
 - `--md`: GitHub-flavored markdown — drop into an LLM prompt and the
   agent can read prices, greeks, etc. without parsing tables.
+
+---
+
+## Architecture
+
+`schwab_cli` is organized into three layers so the same Schwab
+operations can be reached from the CLI, an MCP agent, or REST without
+duplicating logic:
+
+- **Layer 1 — `schwab_cli.api.*`**: a pure HTTP wrapper over the Schwab
+  endpoints. It takes an authenticated client and does no auth or
+  state-management of its own.
+- **Layer 2 — `schwab_cli.service.*`**: the business layer. It **owns
+  auth** — it reads `session.json`, transparently mints a fresh access
+  token when the current one is stale, and raises `SessionExpired` when
+  the refresh token itself is dead. It returns frozen dataclasses /
+  plain payloads so every interface renders the same shape.
+- **Layer 3 — interfaces**: thin adapters that parse input → call a
+  service → render output. These are the CLI commands (`commands/*`),
+  the MCP tools, and the REST PoC.
+
+Because the service mints access tokens per call, every interface stays
+fresh as long as the 7-day refresh token is alive. Keeping that refresh
+token alive across its 7-day expiry is the job of [`schwab
+server`](#auth-maintenance-server-schwab-server) — it is the *only*
+component that proactively renews the refresh token (via headless
+browser auto-login).
 
 ---
 
@@ -203,20 +230,52 @@ instead — pick this if you'd rather not run a worker. See
 
 Expose `schwab_cli` as a Model Context Protocol server so AI agents
 (Claude Code, Claude Desktop, custom tools) can call Schwab operations
-as MCP tools.
+as MCP tools. **The MCP server runs under the daemon** — there is no
+separate `schwab mcp` command; use `schwab server --enable-mcp`.
 
 ```bash
-schwab mcp install         # install + load the launchd agent (macOS)
-schwab mcp status          # daemon status + last 10 logbook events
-schwab mcp log             # tail the JSONL logbook
-schwab mcp restart         # rolling restart
-schwab mcp logout          # forget the session (force re-auth on next call)
+schwab server --enable-mcp        # run the MCP server (single /mcp endpoint)
+schwab server register-claude     # register /mcp in ~/.claude/settings.json
+schwab server status              # launchd check + GET /health probe + snapshot
+schwab server log                 # tail the JSONL logbook
+schwab server restart             # bounce the daemon
+schwab server logout              # graceful /admin/shutdown
 ```
 
 Available MCP tools out of the box: `get_quote`, `get_chain`,
 `stream_quote`, `dataset_status`, `dataset_history`, `dataset_iv_rank`,
-`server_status`. See [doc/mcp.md](doc/mcp.md) for the full list,
-stdio vs SSE transport, and Claude Code integration.
+`server_status`. The daemon speaks Streamable HTTP only — a single
+`/mcp` endpoint. See [doc/mcp.md](doc/mcp.md) for the tool list and
+Claude Code integration, and [doc/server.md](doc/server.md) for running
+and managing the daemon.
+
+---
+
+## Auth-maintenance server (`schwab server`)
+
+`schwab server` is a long-lived daemon whose core job is to **keep your
+7-day refresh token alive** so the box never falls out of auth. It is
+the single component that proactively renews the refresh token (via the
+headless browser auto-login). Run it under launchd
+(`com.schwab-cli.server`) and the rest of `schwab_cli` stays logged in
+indefinitely.
+
+```bash
+schwab server                       # bare: auth-maintenance loop only
+schwab server --enable-mcp          # + Streamable HTTP MCP server (single /mcp)
+schwab server --enable-rest         # + unauthenticated REST PoC (GET /quote/{symbol}, /health)
+schwab server install               # install + load the launchd LaunchAgent (bare)
+schwab server install --enable-mcp  # bake --enable-mcp into the launchd plist
+schwab server status                # launchd check + GET /health probe + snapshot
+schwab server uninstall             # unload + remove the LaunchAgent
+```
+
+The `--enable-*` flags compose. When MCP runs under `schwab server` its
+own auth monitor is disabled — the maintenance loop is the sole renewer,
+so there is no competing rotation. `server install` bakes whichever mode
+flags you pass into the plist's `ProgramArguments`. `--enable-rest` is a
+proof-of-concept only and serves **unauthenticated**; don't expose it
+beyond loopback. See [doc/server.md](doc/server.md) for the full picture.
 
 ---
 

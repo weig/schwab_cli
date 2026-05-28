@@ -180,9 +180,13 @@ def run_audit(
         return
 
     # Walk one file per day in the range — files are
-    # YYYY-MM-DD.order.log.
-    cur = start.date()
-    last = end.date()
+    # YYYY-MM-DD.order.log, named by LOCAL date (audit.today_path uses
+    # date.today()). parse_range returns tz-aware UTC, so convert to local
+    # before taking .date() — otherwise, when the local date is ahead of
+    # UTC (evening in UTC+ zones), the walk would miss today's file and
+    # report "(no matching audit entries)" for a just-written row.
+    cur = start.astimezone().date()
+    last = end.astimezone().date()
     while cur <= last:
         path = base / f"{cur.isoformat()}.order.log"
         if path.exists():

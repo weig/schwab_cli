@@ -1,6 +1,6 @@
 """MCP server wiring for Schwab.
 
-Exposes a minimal set of tools over MCP (stdio transport). Wraps
+Exposes a minimal set of tools over MCP via Streamable HTTP. Wraps
 the existing REST API for synchronous queries; streaming tools are
 scaffolded here and wired through :class:`SubscriptionManager` but
 the actual Schwab-WebSocket → progress-notification bridge is
@@ -12,9 +12,11 @@ Tools currently live:
 * ``get_chain(symbol, expiry, strike_count)`` — REST chain.
 * ``server_status()`` — counts and subscription summary.
 
-The server instance is designed to be transport-agnostic; SSE mode
-can be added by wiring the same :class:`SchwabMcpServer` instance
-through the mcp SDK's ``SseServerTransport``.
+The daemon is HTTP-only: ``run_http`` wires the
+:class:`SchwabMcpServer` instance through the mcp SDK's
+``StreamableHTTPSessionManager`` (single ``/mcp`` endpoint). The
+long-lived authenticated session this requires cannot be held over
+stdio, so stdio transport is not supported.
 """
 
 from __future__ import annotations
@@ -28,13 +30,10 @@ from typing import Any
 
 import anyio
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from schwab_cli import config as config_module
-from schwab_cli.api.chains import get_chain
-from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
-from schwab_cli.api.quotes import get_quotes
+from schwab_cli.api.client import SchwabClient
 from schwab_cli.mcp_server.auth_monitor import (
     DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
     AuthMonitor,
@@ -43,7 +42,14 @@ from schwab_cli.mcp_server.logbook import LogBook
 from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
 from schwab_cli.notify import Notifier
-from schwab_cli.output.chains import shape_envelope
+from schwab_cli.service.chains import ChainsService
+from schwab_cli.service.quotes import QuoteService
+from schwab_cli.service.auth import (
+    ApiError,
+    NotAuthenticated,
+    NotConfigured,
+    SessionExpired,
+)
 
 
 class SchwabMcpServer:
@@ -75,8 +81,8 @@ class SchwabMcpServer:
         self._transport = "idle"
         self._stream_counter = 0
         # Auth monitor — proactive refresh-token rotation. Shares
-        # the notifier already built above. Disabled by default in
-        # stdio mode (see run_stdio), only started in run_sse.
+        # the notifier already built above. The daemon is HTTP-only,
+        # so the monitor always runs (started in run_http).
         self._auth_monitor_enabled = auth_monitor_enabled
         self._auth_monitor: AuthMonitor | None = None
         self._register_tools()
@@ -254,7 +260,9 @@ class SchwabMcpServer:
                 self._logbook.error("tool.error", tool=name, error=str(e))
                 return [TextContent(
                     type="text",
-                    text=f"schwab error: {e}",
+                    # Same format as the per-tool handlers so log/grep
+                    # correlation is consistent across every tool.
+                    text=f"schwab error: {type(e).__name__}: {e}",
                 )]
             except Exception as e:
                 self._logbook.error(
@@ -275,7 +283,13 @@ class SchwabMcpServer:
             )]
         if not symbols:
             return [TextContent(type="text", text="symbols list is empty")]
-        data = get_quotes(self._client, [s.upper() for s in symbols])
+        upcased = [s.upper() for s in symbols]
+        try:
+            data = QuoteService().get_quote_payload(upcased)
+        except (NotConfigured, NotAuthenticated, ApiError, SessionExpired) as e:
+            return [TextContent(
+                type="text", text=f"schwab error: {type(e).__name__}: {e}",
+            )]
         return [TextContent(type="text", text=json.dumps(data, default=str))]
 
     async def _tool_get_chain(self, args: dict[str, Any]) -> list[TextContent]:
@@ -292,15 +306,16 @@ class SchwabMcpServer:
             return [TextContent(
                 type="text", text=f"invalid expiry {expiry_str!r} (need YYYY-MM-DD)",
             )]
-        raw = get_chain(
-            self._client,
-            symbol.upper(),
-            contract_type="ALL",
-            strike_count=strike_count,
-            from_date=expiry,
-            to_date=expiry,
-        )
-        envelope = shape_envelope(raw)
+        try:
+            envelope = ChainsService().get_chain_envelope(
+                symbol.upper(),
+                expiry=expiry,
+                strike_count=strike_count,
+            )
+        except (NotConfigured, NotAuthenticated, ApiError, SessionExpired) as e:
+            return [TextContent(
+                type="text", text=f"schwab error: {type(e).__name__}: {e}",
+            )]
         return [TextContent(type="text", text=json.dumps(envelope, default=str))]
 
     async def _tool_stream_quote(
@@ -414,52 +429,49 @@ class SchwabMcpServer:
 
     # ---- lifecycle -----------------------------------------------------
 
-    async def run_stdio(self) -> None:
-        """Drive the server over stdio until the client disconnects."""
-        self._transport = "stdio"
-        self._logbook.info("server.start", transport="stdio")
-        # Stdio has exactly one session for the life of the process;
-        # mark it explicitly so the log ladder matches SSE's shape.
-        self._logbook.info("session.connect", session="stdio_0", transport="stdio")
-        try:
-            async with stdio_server() as (read, write):
-                await self._server.run(
-                    read,
-                    write,
-                    self._server.create_initialization_options(),
-                )
-        finally:
-            # Clean up any subscriptions held by the stdio session.
-            await self._bridge.drop_session("stdio_0")
-            self._logbook.info(
-                "session.disconnect", session="stdio_0", transport="stdio",
-            )
-            self._logbook.info("server.stop", transport="stdio")
-
-    async def run_sse(self, host: str, port: int) -> None:
-        """Drive the server over SSE + HTTP admin endpoints on
-        ``host:port`` until a shutdown is signalled.
+    async def run_http(
+        self, host: str, port: int, *, extra_routes=None
+    ) -> None:
+        """Drive the server over Streamable HTTP + HTTP admin endpoints
+        on ``host:port`` until a shutdown is signalled.
 
         Uses Starlette + uvicorn (transitive deps of the ``mcp`` SDK).
-        A small set of ``/admin/*`` routes are mounted alongside the
-        SSE MCP transport for status / shutdown control.
+        The modern Streamable HTTP transport exposes a single ``/mcp``
+        endpoint owned by ``StreamableHTTPSessionManager``; MCP session
+        lifecycle (create/route/teardown) is the manager's concern. A
+        small set of ``/admin/*`` routes are mounted alongside it for
+        status / shutdown control.
+
+        ``extra_routes`` (optional) is a list of Starlette ``Route``
+        objects appended to the app's route table — used by the REST PoC
+        so its ``/quote/{symbol}`` route shares this server's single
+        port. Defaults to ``None`` (no extra routes) so existing callers
+        are unaffected.
         """
-        # Deferred imports keep the stdio path free of Starlette cost
-        # and avoid pulling in uvicorn when tests only exercise tool
-        # handlers.
+        # Deferred imports avoid pulling in uvicorn/Starlette when tests
+        # only exercise tool handlers.
+        import contextlib
+
         import uvicorn
-        from mcp.server.sse import SseServerTransport
+        from mcp.server.streamable_http_manager import (
+            StreamableHTTPSessionManager,
+        )
         from starlette.applications import Starlette
-        from starlette.responses import JSONResponse, Response
+        from starlette.responses import JSONResponse
         from starlette.routing import Mount, Route
 
-        self._transport = "sse"
+        self._transport = "http"
         self._shutdown_event = asyncio.Event()
-        sse = SseServerTransport("/messages/")
+        # The session manager owns MCP session create/route/teardown. Its
+        # task group must be active for the lifetime of the server, so we
+        # drive ``run()`` from the Starlette lifespan below.
+        session_manager = StreamableHTTPSessionManager(
+            app=self._server, json_response=False, stateless=False,
+        )
 
         # Launch the auth monitor — proactive refresh-token rotation
-        # + expiry notifications. Only meaningful in SSE mode
-        # (long-lived); stdio sessions are per-agent and short.
+        # + expiry notifications. The daemon is long-lived, so the
+        # monitor always runs alongside the HTTP transport.
         if self._auth_monitor_enabled:
             self._auth_monitor = AuthMonitor(
                 self._logbook,
@@ -471,47 +483,25 @@ class SchwabMcpServer:
             )
             self._auth_monitor.start()
 
-        async def handle_sse(request):
-            client_ip = (
-                request.client.host if request.client else "unknown"
-            )
-            # Use id() of the request as a stable session marker for logs.
-            sess_id = f"sse_{id(request)}"
-            self._logbook.info(
-                "session.connect", session=sess_id, transport="sse",
-                client=client_ip,
-            )
-            try:
-                async with sse.connect_sse(
-                    request.scope, request.receive, request._send,
-                ) as streams:
-                    await self._server.run(
-                        streams[0], streams[1],
-                        self._server.create_initialization_options(),
-                    )
-            except Exception as e:
-                # Swallow post-SSE errors so the response to the client
-                # stays clean. Log for debugging.
-                self._logbook.warning(
-                    "session.sse_error", session=sess_id,
-                    error=f"{type(e).__name__}: {e}",
-                )
-            finally:
-                # Ensure any subscriptions this session held are cleared,
-                # regardless of how the stream ended.
-                try:
-                    await self._bridge.drop_session(sess_id)
-                except Exception as e:
-                    self._logbook.warning(
-                        "session.drop_error", session=sess_id,
-                        error=f"{type(e).__name__}: {e}",
-                    )
-                self._logbook.info(
-                    "session.disconnect", session=sess_id, transport="sse",
-                )
-            # SSE transport already sent the response; Starlette's Route
-            # layer still wants a Response object — return an empty one.
-            return Response()
+        async def handle_mcp(scope, receive, send):
+            # Bare ASGI app: the session manager reads/writes the stream
+            # directly and returns None, so this is Mount-ed (not Route-d).
+            await session_manager.handle_request(scope, receive, send)
+
+        # NOTE: Unlike the old SSE path, there is no per-request session
+        # teardown hook here — ``StreamableHTTPSessionManager`` owns MCP
+        # session lifecycle. The ``stream_quote`` tool + ``StreamerBridge``
+        # still hold per-session subscription state keyed off the MCP
+        # session id, but fine-grained bridge cleanup-on-disconnect is
+        # DEFERRED: a client disconnect no longer eagerly drops its
+        # subscriptions. This is acceptable for 3b — the `/admin/flush`
+        # endpoint plus a process restart still clear all stream state.
+
+        async def health(request):
+            # Unauthenticated liveness probe — powers `server status`'s
+            # real /health reachability check. Mirrors the REST app's
+            # /health so both daemons answer the same shape.
+            return JSONResponse({"ok": True})
 
         async def admin_status(request):
             if not self._admin_auth_ok(request):
@@ -540,21 +530,32 @@ class SchwabMcpServer:
             )
             return JSONResponse({"ok": True, "flushed": before})
 
-        # `/messages/` must be Mount, not Route: `sse.handle_post_message`
+        @contextlib.asynccontextmanager
+        async def _lifespan(app):
+            # The manager's task group must stay active for the whole
+            # server lifetime — hold it open across the lifespan.
+            async with session_manager.run():
+                yield
+
+        # `/mcp` must be Mount, not Route: `session_manager.handle_request`
         # is an ASGI app (scope/receive/send → None) rather than a
         # Starlette endpoint that returns a Response. Wrapping it in
         # Route yields a NoneType-not-callable crash when Starlette
         # tries to treat the None return as a Response.
         routes = [
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
+            Mount("/mcp", app=handle_mcp),
+            Route("/health", endpoint=health, methods=["GET"]),
             Route("/admin/status", endpoint=admin_status, methods=["GET"]),
             Route("/admin/shutdown", endpoint=admin_shutdown, methods=["POST"]),
             Route("/admin/flush", endpoint=admin_flush, methods=["POST"]),
         ]
-        app = Starlette(routes=routes)
+        if extra_routes:
+            routes.extend(extra_routes)
+        app = Starlette(routes=routes, lifespan=_lifespan)
 
-        self._logbook.info("server.start", transport="sse", bind=f"{host}:{port}")
+        self._logbook.info(
+            "server.start", transport="http", bind=f"{host}:{port}",
+        )
         cfg = uvicorn.Config(
             app, host=host, port=port, log_level="warning", loop="asyncio",
         )
@@ -574,7 +575,7 @@ class SchwabMcpServer:
             # subprocess (if mid-rotation) can wind down.
             if self._auth_monitor is not None:
                 await self._auth_monitor.stop()
-            self._logbook.info("server.stop", transport="sse")
+            self._logbook.info("server.stop", transport="http")
 
     async def _on_rotation_success(self) -> None:
         """Called by the auth monitor after a successful rotation.
@@ -690,7 +691,7 @@ def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
         return _json.dumps([dict(r) for r in rows], indent=2, default=str)
 
     if name == "dataset.iv_rank":
-        from schwab_cli.commands.vol import compute_iv_rank_and_percentile
+        from schwab_cli.service.vol import compute_iv_rank_and_percentile
         with vol_history.connect() as conn:
             recent = conn.execute(
                 "SELECT atm_iv_30d, atm_iv FROM vol_snapshots "

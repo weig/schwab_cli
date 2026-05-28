@@ -70,6 +70,7 @@ from rich.console import Console
 from rich.table import Table
 
 from schwab_cli.output.format import Format
+from schwab_cli.service.types import FundamentalsResult
 
 
 def _num(v: Any, decimals: int = 2) -> str:
@@ -339,6 +340,12 @@ def _shape_row(symbol: str, payload: dict, invalid: set[str]) -> dict:
         "valuation": _compute_valuation(last, fundamental),
         "data_quality_warnings": _data_quality_warnings(symbol, fundamental, last),
     }
+
+
+def render_fundamentals_result(result: FundamentalsResult, fmt: Format) -> str:
+    """Render a :class:`FundamentalsResult` to text, byte-identical to the
+    legacy :func:`render_fundamentals` output for the same data."""
+    return render_fundamentals(list(result.symbols), dict(result.payload), fmt)
 
 
 def render_fundamentals(symbols: list[str], payload: dict, fmt: Format) -> str:

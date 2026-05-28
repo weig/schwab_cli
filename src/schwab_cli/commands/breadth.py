@@ -28,7 +28,7 @@ from schwab_cli.analytics.breadth import (
 )
 from schwab_cli.api.client import SchwabClient
 from schwab_cli.api.history import get_history
-from schwab_cli.commands.history import _cache_api_response
+from schwab_cli.service.history import cache_api_response
 from schwab_cli import config as config_module
 from schwab_cli.dataset.indices import fetch_index_members
 from schwab_cli.session import load as load_session
@@ -235,7 +235,7 @@ def _load_closes(
                 failures.append(sym)
                 progress.advance(task)
                 continue
-            _cache_api_response(sym, raw)
+            cache_api_response(sym, raw)
             with vol_history.connect() as conn:
                 rows = ohlcv_history.read_range(
                     conn, symbol=sym, start=start, end=end,

@@ -9,8 +9,9 @@ Three scenarios:
 """
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timezone
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 
 def _ms(year, month, day, hour=22):
@@ -20,8 +21,24 @@ def _ms(year, month, day, hour=22):
 
 import pytest
 
-from schwab_cli.storage import vol_history, ohlcv_history
 from schwab_cli.commands import history as history_cmd
+from schwab_cli.config import Config
+from schwab_cli.config import save as save_config
+from schwab_cli.session import Session
+from schwab_cli.session import save as save_session
+from schwab_cli.storage import ohlcv_history, vol_history
+
+
+def _prep_auth(monkeypatch, tmp_path) -> None:
+    """Config + future-dated session so the service-layer auth path
+    (``service.auth.get_session``) does not attempt an ``oauth.refresh``."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    save_config(Config(client_id="cid", client_secret="csec",
+                       redirect_uri="https://127.0.0.1:8443"))
+    save_session(Session(access_token="atok", refresh_token="rtok",
+                         expires_at=int(time.time()) + 3600,
+                         refresh_token_expires_at=int(time.time()) + 7 * 24 * 3600))
 
 
 def _seed_cache(monkeypatch, tmp_path, *, symbol, days):
@@ -46,9 +63,8 @@ def test_daily_with_full_cache_does_not_call_api(monkeypatch, tmp_path):
     _seed_cache(monkeypatch, tmp_path, symbol="AAPL",
                 days=["2026-05-12", "2026-05-13"])
 
-    with patch("schwab_cli.commands.history.get_history") as m_api, \
-         patch("schwab_cli.commands.history._client",
-               return_value=MagicMock()):
+    # Cache HIT — the service must never call the Layer-1 API.
+    with patch("schwab_cli.api.history.get_history") as m_api:
         try:
             history_cmd.run(
                 symbol="AAPL",
@@ -56,8 +72,10 @@ def test_daily_with_full_cache_does_not_call_api(monkeypatch, tmp_path):
                 interval_str="1day",
                 as_json=True, as_md=False,
             )
-        except SystemExit:
-            pass
+        except SystemExit as exc:
+            # Cache hit must render cleanly; a non-zero exit would make
+            # assert_not_called pass for the wrong reason.
+            assert exc.code in (0, None), f"cache-hit run failed: exit {exc.code}"
 
     m_api.assert_not_called()
 
@@ -70,6 +88,7 @@ def test_daily_with_partial_cache_calls_api_and_upserts(
     candles to the cache."""
     _seed_cache(monkeypatch, tmp_path, symbol="MSFT",
                 days=["2026-05-11"])
+    _prep_auth(monkeypatch, tmp_path)
 
     fake_response = {
         "symbol": "MSFT",
@@ -84,10 +103,8 @@ def test_daily_with_partial_cache_calls_api_and_upserts(
              "low": 102.5, "close": 104.5, "volume": 1_400_000},
         ],
     }
-    with patch("schwab_cli.commands.history.get_history",
-               return_value=fake_response) as m_api, \
-         patch("schwab_cli.commands.history._client",
-               return_value=MagicMock()):
+    with patch("schwab_cli.api.history.get_history",
+               return_value=fake_response) as m_api:
         try:
             history_cmd.run(
                 symbol="MSFT",
@@ -121,6 +138,7 @@ def test_unsubscribed_symbol_empty_cache_calls_api_then_caches(
     # Force connection so schema is in place before the command runs.
     with vol_history.connect() as _:
         pass
+    _prep_auth(monkeypatch, tmp_path)
 
     fake_response = {
         "symbol": "RANDOM",
@@ -129,10 +147,8 @@ def test_unsubscribed_symbol_empty_cache_calls_api_then_caches(
              "low": 49.0, "close": 50.5, "volume": 100_000},
         ],
     }
-    with patch("schwab_cli.commands.history.get_history",
-               return_value=fake_response) as m_api, \
-         patch("schwab_cli.commands.history._client",
-               return_value=MagicMock()):
+    with patch("schwab_cli.api.history.get_history",
+               return_value=fake_response) as m_api:
         try:
             history_cmd.run(
                 symbol="RANDOM",
@@ -158,6 +174,7 @@ def test_non_daily_interval_does_not_touch_cache(monkeypatch, tmp_path):
     stores daily."""
     _seed_cache(monkeypatch, tmp_path, symbol="AAPL",
                 days=["2026-05-12", "2026-05-13"])
+    _prep_auth(monkeypatch, tmp_path)
 
     fake_response = {
         "symbol": "AAPL",
@@ -166,10 +183,8 @@ def test_non_daily_interval_does_not_touch_cache(monkeypatch, tmp_path):
              "low": 99.5, "close": 101.0, "volume": 1_000_000},
         ],
     }
-    with patch("schwab_cli.commands.history.get_history",
+    with patch("schwab_cli.api.history.get_history",
                return_value=fake_response) as m_api, \
-         patch("schwab_cli.commands.history._client",
-               return_value=MagicMock()), \
          patch.object(ohlcv_history, "upsert_candles") as m_upsert:
         try:
             history_cmd.run(

@@ -3,17 +3,17 @@
 Two transports:
 
 * **MCP** (``--mcp`` or auto-selected when a daemon is reachable):
-  connects to a running ``schwab_cli mcp --sse`` daemon as an MCP
-  client, calls the ``stream_quote`` tool, and prints every progress
-  notification payload. All subscribe / unsubscribe / streamer
-  events show up in the daemon's log.
+  connects to a running ``schwab server --enable-mcp`` daemon (Streamable
+  HTTP) as an MCP client, calls the ``stream_quote`` tool, and prints
+  every progress notification payload. All subscribe / unsubscribe /
+  streamer events show up in the daemon's log.
 * **Direct** (``--direct`` or auto-fallback): opens our own Schwab
   streamer WebSocket. Useful when no daemon is running or for
   debugging; note this counts against Schwab's one-session-per-
   account limit and will clobber a running daemon's connection.
 
 Auto-selection prefers MCP when the daemon is reachable. The probe
-is a cheap TCP connect to the SSE port (default 127.0.0.1:7234).
+is a cheap TCP connect to the HTTP port (default 127.0.0.1:7234).
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ class _McpUnreachable(Exception):
 
 
 def _probe_mcp_daemon(url: str) -> bool:
-    """Cheap TCP probe for the SSE port. Doesn't do a full HTTP
+    """Cheap TCP probe for the HTTP port. Doesn't do a full HTTP
     request — just confirms something is listening, which is enough
     to decide whether to attempt the full MCP client handshake."""
     parsed = urlparse(url)
@@ -173,11 +173,11 @@ async def _run_via_mcp(
     # Deferred imports — avoid pulling in the MCP client unless we
     # actually need it (direct-mode users shouldn't pay that cost).
     from mcp.client.session import ClientSession
-    from mcp.client.sse import sse_client
+    from mcp.client.streamable_http import streamable_http_client
 
-    sse_url = mcp_url.rstrip("/")
-    if not sse_url.endswith("/sse"):
-        sse_url = sse_url + "/sse"
+    http_url = mcp_url.rstrip("/")
+    if not http_url.endswith("/mcp"):
+        http_url = http_url + "/mcp"
 
     async def on_progress(
         progress: float, total: float | None, message: str | None
@@ -193,7 +193,7 @@ async def _run_via_mcp(
         _render(decoded, as_json=as_json)
 
     try:
-        async with sse_client(sse_url) as (read, write):
+        async with streamable_http_client(http_url) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 # Fire the streaming tool with a progress callback —

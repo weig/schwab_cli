@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 
 from schwab_cli.output.format import Format
+from schwab_cli.service.types import AccountResult, AccountsResult, PositionsResult
 
 
 def _shape_account(raw: dict) -> dict:
@@ -101,6 +102,12 @@ def render_accounts(raw_list: list[dict], fmt: Format) -> str:
     return buf.getvalue()
 
 
+def render_accounts_result(result: AccountsResult, fmt: Format) -> str:
+    """Render an :class:`AccountsResult`, byte-identical to the legacy
+    :func:`render_accounts` output for the same data."""
+    return render_accounts(list(result.accounts), fmt)
+
+
 def render_account(raw: dict, fmt: Format) -> str:
     sec = raw.get("securitiesAccount", {})
     data = {
@@ -146,6 +153,12 @@ def render_account(raw: dict, fmt: Format) -> str:
     t.add_row("Positions", str(data["positionCount"]))
     console.print(t)
     return buf.getvalue()
+
+
+def render_account_result(result: AccountResult, fmt: Format) -> str:
+    """Render an :class:`AccountResult`, byte-identical to the legacy
+    :func:`render_account` output for the same data."""
+    return render_account(dict(result.account), fmt)
 
 
 def _shape_position(raw: dict) -> dict:
@@ -202,3 +215,9 @@ def render_positions(rows: list[dict], fmt: Format) -> str:
         )
     console.print(t)
     return buf.getvalue()
+
+
+def render_positions_result(result: PositionsResult, fmt: Format) -> str:
+    """Render a :class:`PositionsResult`, byte-identical to the legacy
+    :func:`render_positions` output for the same data."""
+    return render_positions(list(result.positions), fmt)

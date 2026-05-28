@@ -1,6 +1,6 @@
 """Command-level tests for ``schwab_cli skew``.
 
-The network is mocked via ``patch("schwab_cli.commands.skew.get_chain")``
+The network is mocked via ``patch("schwab_cli.api.chains.get_chain")``
 so tests stay offline and deterministic. We pin down:
 
   * CLI argument parsing for each mode (L1 / L2 --term / L2 --dtes / L3).
@@ -131,7 +131,7 @@ def test_skew_l1_human_happy_path(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     yymmdd, iso = _future_yymmdd(30)
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         return_value=_chain_resp(iso),
     ) as mock:
         result = runner.invoke(app, ["skew", "AMZN", yymmdd])
@@ -150,7 +150,7 @@ def test_skew_l1_json_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     yymmdd, iso = _future_yymmdd(30)
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         return_value=_chain_resp(iso),
     ):
         result = runner.invoke(app, ["skew", "AMZN", yymmdd, "--json"])
@@ -165,7 +165,7 @@ def test_skew_l1_md_output(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     yymmdd, iso = _future_yymmdd(30)
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         return_value=_chain_resp(iso),
     ):
         result = runner.invoke(app, ["skew", "AMZN", yymmdd, "--md"])
@@ -179,7 +179,7 @@ def test_skew_l1_symbol_is_uppercased(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     yymmdd, iso = _future_yymmdd(30)
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         return_value=_chain_resp(iso),
     ) as mock:
         result = runner.invoke(app, ["skew", "amzn", yymmdd])
@@ -193,7 +193,7 @@ def test_skew_l1_passes_strikes_through(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     yymmdd, iso = _future_yymmdd(30)
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         return_value=_chain_resp(iso),
     ) as mock:
         result = runner.invoke(app, ["skew", "AMZN", yymmdd, "--strikes", "10"])
@@ -217,7 +217,7 @@ def test_skew_term_fetches_per_expiry(monkeypatch, tmp_path):
         return _chain_resp(iso2, dte=40)
 
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=_fake_get_chain,
     ) as mock:
         result = runner.invoke(app, ["skew", "AMZN", "--term", y1, y2])
@@ -238,7 +238,7 @@ def test_skew_term_json_is_a_list_sorted_by_dte(monkeypatch, tmp_path):
         return _chain_resp(iso2, dte=40)
 
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=_fake_get_chain,
     ):
         # Pass expiries out of order — analytics layer sorts them.
@@ -264,7 +264,7 @@ def test_skew_term_partial_failure_continues(monkeypatch, tmp_path):
         return _chain_resp(iso1, dte=10)
 
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=_fake_get_chain,
     ):
         result = runner.invoke(app, ["skew", "AMZN", "--term", y1, y2])
@@ -304,7 +304,7 @@ def test_skew_dtes_picks_closest_expiries(monkeypatch, tmp_path):
         return _chain_resp(kwargs["from_date"].isoformat(), dte=kwargs["from_date"].toordinal() - today.toordinal())
 
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=_fake_get_chain,
     ) as mock:
         result = runner.invoke(app, ["skew", "AMZN", "--dtes", "7", "30"])
@@ -332,7 +332,7 @@ def test_skew_cross_fetches_per_symbol(monkeypatch, tmp_path):
         return _chain_resp(iso, symbol=symbol, dte=30)
 
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=_fake_get_chain,
     ):
         result = runner.invoke(
@@ -351,7 +351,7 @@ def test_skew_cross_json_returns_list_of_metrics(monkeypatch, tmp_path):
         return _chain_resp(iso, symbol=symbol, dte=30)
 
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=_fake_get_chain,
     ):
         result = runner.invoke(
@@ -415,7 +415,7 @@ def test_skew_cross_and_dtes_combined_is_allowed(monkeypatch, tmp_path):
         return _chain_resp(exp.isoformat(), symbol=symbol, dte=30)
 
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=_fake_get_chain,
     ) as mock:
         result = runner.invoke(
@@ -473,7 +473,7 @@ def test_skew_api_error_exits_non_zero(monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     yymmdd, _ = _future_yymmdd(30)
     with patch(
-        "schwab_cli.commands.skew.get_chain",
+        "schwab_cli.api.chains.get_chain",
         side_effect=ApiError("simulated outage"),
     ):
         result = runner.invoke(app, ["skew", "AMZN", yymmdd])

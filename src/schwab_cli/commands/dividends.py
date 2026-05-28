@@ -2,35 +2,13 @@ from __future__ import annotations
 
 import typer
 
-from schwab_cli import config as config_module
-from schwab_cli.api.client import ApiError, SchwabClient, SessionExpired
-from schwab_cli.api.quotes import get_quotes
-from schwab_cli.output.dividends import render_dividends
+from schwab_cli.commands._error import cli_errors
+from schwab_cli.output.dividends import render_dividends_result
 from schwab_cli.output.format import FormatError, pick_format
-from schwab_cli.session import load as load_session
-from schwab_cli.ticker import to_schwab_form
+from schwab_cli.service.dividends import DividendsService
 
 
-def _client() -> SchwabClient:
-    cfg = config_module.load()
-    if cfg is None:
-        typer.secho(
-            "No config found. Run `schwab_cli setup` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    session = load_session()
-    if session is None:
-        typer.secho(
-            "No session found. Run `schwab_cli auth` first.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    return SchwabClient(cfg, session)
-
-
+@cli_errors
 def run(
     symbols: list[str],
     *,
@@ -45,23 +23,12 @@ def run(
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    # Normalize class-share separators (BRK.B → BRK/B) and case up front
-    # so the renderer's per-symbol lookup matches the canonical keys
-    # Schwab returns.
-    symbols = [to_schwab_form(s) for s in symbols]
-
-    client = _client()
-    try:
-        payload = get_quotes(client, symbols, fields="all")
-    except (ApiError, SessionExpired) as e:
-        msg = str(e) if str(e) else type(e).__name__
-        typer.secho(msg, fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    result = DividendsService().get_dividends(symbols)
 
     upcoming_window = within_days if upcoming else None
     typer.echo(
-        render_dividends(
-            symbols, payload, fmt,
+        render_dividends_result(
+            result, fmt,
             upcoming_within_days=upcoming_window,
         )
     )

@@ -52,7 +52,7 @@ from schwab_cli.api.accounts import list_accounts
 from schwab_cli.api.client import SchwabClient
 from schwab_cli.api.history import get_history
 from schwab_cli.api.transactions_cache import fetch_cached as fetch_txns
-from schwab_cli.commands.history import _cache_api_response
+from schwab_cli.service.history import cache_api_response
 from schwab_cli.history_spec import RangeSpecError, parse_range
 from schwab_cli.session import load as load_session
 from schwab_cli.storage import ohlcv_history, vol_history
@@ -435,7 +435,7 @@ def _ensure_closes(
             except Exception:
                 progress.advance(task)
                 continue
-            _cache_api_response(sym, raw)
+            cache_api_response(sym, raw)
             with vol_history.connect() as conn:
                 rows = ohlcv_history.read_range(
                     conn, symbol=sym, start=start, end=end,
