@@ -293,6 +293,10 @@ class JobScheduler:
         self.fire_due()
         save_state(self._current_dir, self.snapshot())
 
+    def now(self) -> float:
+        """Return the scheduler's current time per its injected ``now`` seam."""
+        return self._now()
+
     def next_wakeup(self) -> float:
         """Return the soonest moment the loop should wake: min(next_run, watchdog)."""
         now = self._now()

@@ -46,6 +46,10 @@ from schwab_cli.commands._daemon import (
     resolve_log_file as _resolve_log_file,
 )
 from schwab_cli.server import maintenance
+from schwab_cli.server.jobs import runner as jobs_runner
+from schwab_cli.server.jobs import runtime as jobs_runtime
+from schwab_cli.server.jobs.scheduler import JobScheduler
+from schwab_cli.server.jobs.state import load_state, reconcile_orphans, save_state
 from schwab_cli.server.launchd import (
     DEFAULT_PLIST_PATH,
     LABEL,
@@ -122,40 +126,71 @@ def run(
         )
         raise SystemExit(1)
 
-    # A threading.Event is the stop signal AND the interruptible sleep.
-    # `Event.wait(interval)` returns immediately when the event is set,
-    # so a SIGTERM during the multi-hour idle wakes the loop at once —
-    # critical for graceful `launchctl unload` (plain `time.sleep` is
-    # NOT interruptible: per PEP 475 it resumes after the handler runs,
-    # which would make launchd SIGKILL us after its ~20s ExitTimeOut).
+    # Three coordinating events, all set by main-thread-only signal handlers:
+    #   stop_event  — SIGTERM/SIGINT → graceful shutdown
+    #   reload_event — SIGHUP → reload job config (no restart)
+    #   _wake       — wakes the jobs loop's interruptible sleep at once
+    # `Event.wait(timeout)` is the interruptible sleep — returns the instant a
+    # handler sets the event, so a SIGTERM during a long idle wakes us
+    # immediately (critical for graceful `launchctl unload`; plain time.sleep
+    # is NOT interruptible per PEP 475).
     stop_event = threading.Event()
+    reload_event = threading.Event()
+    wake = threading.Event()
 
-    def _handle_signal(signum, _frame) -> None:
+    def _handle_signal(_signum, _frame) -> None:
+        # Async-signal-safe: ONLY flip events here. The user-facing
+        # "stopping gracefully" message is emitted from the main loop's
+        # shutdown path below, never from inside the handler.
         stop_event.set()
-        typer.secho(
-            f"server: received signal {signum}, stopping gracefully...",
-            fg=typer.colors.YELLOW, err=True,
-        )
+        wake.set()
 
-    _install_signal_handlers(_handle_signal)
+    def _handle_hup(_signum, _frame) -> None:
+        reload_event.set()
+        wake.set()
+
+    _install_signal_handlers(_handle_signal, hup_handler=_handle_hup)
 
     notifier = _build_notifier()
 
-    typer.secho(
-        f"server: starting auth-maintenance loop "
-        f"(interval {interval_s}s)",
-        fg=typer.colors.CYAN, err=True,
-    )
-    maintenance.run_loop(
-        cfg,
-        stop=stop_event.is_set,
-        interval_s=interval_s,
-        # Event.wait(timeout) is the interruptible sleep — returns early
-        # the instant a signal handler sets the event.
-        sleep=stop_event.wait,
-        now=lambda: int(time.time()),
-        notifier=notifier,
-    )
+    # Jobs scheduler runs in its own daemon thread. The maintenance loop stays
+    # on the MAIN thread (as in Phase 2) so a SIGTERM that flips stop_event
+    # wakes its interruptible sleep and returns — driving the whole shutdown.
+    # Initialise to None BEFORE the try so the finally's _stop_jobs is safe
+    # (and never raises UnboundLocalError) if _start_jobs itself raises.
+    scheduler = None
+    jobs_thread = None
+    curr = None
+    try:
+        scheduler, jobs_thread, curr = _start_jobs(
+            cfg,
+            stop_event=stop_event,
+            reload_event=reload_event,
+            wake=wake,
+            renew=_jobs_renew(cfg),
+            notify=_jobs_notify(),
+        )
+
+        typer.secho(
+            f"server: starting auth-maintenance loop + job scheduler "
+            f"(interval {interval_s}s)",
+            fg=typer.colors.CYAN, err=True,
+        )
+        maintenance.run_loop(
+            cfg,
+            stop=stop_event.is_set,
+            interval_s=interval_s,
+            # Event.wait(timeout) is the interruptible sleep — returns early
+            # the instant a signal handler sets the event.
+            sleep=stop_event.wait,
+            now=lambda: int(time.time()),
+            notifier=notifier,
+        )
+    finally:
+        _stop_jobs(
+            scheduler, jobs_thread,
+            stop_event=stop_event, wake=wake, current=curr,
+        )
     typer.secho("server: stopped.", fg=typer.colors.CYAN, err=True)
     return 0
 
@@ -275,6 +310,8 @@ def _run_with_mcp(
     # The maintenance loop owns ongoing refresh-token renewal — start it
     # in a daemon thread.
     stop_event = threading.Event()
+    reload_event = threading.Event()
+    wake = threading.Event()
     maint = threading.Thread(
         target=maintenance.run_loop,
         args=(cfg,),
@@ -290,30 +327,54 @@ def _run_with_mcp(
     )
     maint.start()
 
-    logbook.info(
-        "daemon.start",
-        pid=os.getpid(),
-        transport="http",
-        bind=f"{mcp_host}:{mcp_port}",
-        maintenance=True,
-        interval_s=interval_s,
-        log_file=str(resolved_log_file) if resolved_log_file else None,
-    )
-    typer.secho(
-        f"server: starting MCP HTTP server on {mcp_host}:{mcp_port} "
-        f"+ auth-maintenance loop (interval {interval_s}s)",
-        fg=typer.colors.CYAN, err=True,
-    )
-    # --enable-rest mounts the REST PoC routes onto the MCP server's
-    # Starlette app so both share this single port.
-    extra_routes = None
-    if enable_rest:
-        from schwab_cli.server.rest import rest_routes
+    # Jobs scheduler thread. uvicorn owns SIGINT/SIGTERM (installed inside
+    # asyncio.run); we install ONLY SIGHUP on the main thread BEFORE asyncio.run
+    # so it survives uvicorn's handler install and drives a reload.
+    def _handle_hup(_signum, _frame) -> None:
+        reload_event.set()
+        wake.set()
 
-        extra_routes = rest_routes()
+    _install_sighup(_handle_hup)
 
+    # Initialise to None BEFORE the try so the finally's _stop_jobs is safe
+    # (never UnboundLocalError) if _start_jobs itself raises.
+    scheduler = None
+    jobs_thread = None
+    curr = None
     crashed = False
     try:
+        scheduler, jobs_thread, curr = _start_jobs(
+            cfg,
+            stop_event=stop_event,
+            reload_event=reload_event,
+            wake=wake,
+            renew=_jobs_renew(cfg),
+            notify=_jobs_notify(notifier),
+        )
+
+        logbook.info(
+            "daemon.start",
+            pid=os.getpid(),
+            transport="http",
+            bind=f"{mcp_host}:{mcp_port}",
+            maintenance=True,
+            interval_s=interval_s,
+            log_file=str(resolved_log_file) if resolved_log_file else None,
+        )
+        typer.secho(
+            f"server: starting MCP HTTP server on {mcp_host}:{mcp_port} "
+            f"+ auth-maintenance loop + job scheduler (interval {interval_s}s)",
+            fg=typer.colors.CYAN, err=True,
+        )
+        # --enable-rest mounts the REST PoC routes onto the MCP server's
+        # Starlette app so both share this single port. The /admin/jobs route
+        # is always added so the control plane is reachable in --enable-mcp.
+        extra_routes = [_jobs_admin_route(scheduler)]
+        if enable_rest:
+            from schwab_cli.server.rest import rest_routes
+
+            extra_routes = list(rest_routes()) + extra_routes
+
         asyncio.run(
             server.run_http(mcp_host, mcp_port, extra_routes=extra_routes)
         )
@@ -330,6 +391,10 @@ def _run_with_mcp(
             logbook.warning("daemon.maintenance_stop_timeout")
         elif not crashed:
             logbook.info("daemon.stop", reason="maintenance_stopped")
+        _stop_jobs(
+            scheduler, jobs_thread,
+            stop_event=stop_event, wake=wake, current=curr,
+        )
     typer.secho("server: stopped.", fg=typer.colors.CYAN, err=True)
     return 0
 
@@ -357,7 +422,6 @@ def _run_with_rest(
     service path only (auth/allowlisting is a deliberate later step).
     """
     from schwab_cli.mcp_server.logbook import LogBook
-    from schwab_cli.server.rest import build_rest_app
     from schwab_cli.session import load as load_session
 
     cfg = config_module.load()
@@ -410,6 +474,8 @@ def _run_with_rest(
     # The maintenance loop owns ongoing refresh-token renewal — start it
     # in a daemon thread, exactly as the --enable-mcp path does.
     stop_event = threading.Event()
+    reload_event = threading.Event()
+    wake = threading.Event()
     maint = threading.Thread(
         target=maintenance.run_loop,
         args=(cfg,),
@@ -425,44 +491,104 @@ def _run_with_rest(
     )
     maint.start()
 
-    typer.secho(
-        f"server: starting REST PoC (unauthenticated) on "
-        f"{rest_host}:{rest_port} + auth-maintenance loop "
-        f"(interval {interval_s}s)",
-        fg=typer.colors.CYAN, err=True,
-    )
+    # uvicorn owns SIGINT/SIGTERM; install ONLY SIGHUP on the main thread
+    # BEFORE asyncio.run so it survives and drives a job-config reload.
+    def _handle_hup(_signum, _frame) -> None:
+        reload_event.set()
+        wake.set()
 
-    async def _serve() -> None:
-        import uvicorn
+    _install_sighup(_handle_hup)
 
-        config = uvicorn.Config(
-            build_rest_app(),
-            host=rest_host,
-            port=rest_port,
-            log_level="warning",
-            loop="asyncio",
-        )
-        await uvicorn.Server(config).serve()
-
+    # Initialise to None BEFORE the try so the finally's _stop_jobs is safe
+    # (never UnboundLocalError) if _start_jobs itself raises.
+    scheduler = None
+    jobs_thread = None
+    curr = None
     try:
+        scheduler, jobs_thread, curr = _start_jobs(
+            cfg,
+            stop_event=stop_event,
+            reload_event=reload_event,
+            wake=wake,
+            renew=_jobs_renew(cfg),
+            notify=_jobs_notify(base_notifier),
+        )
+
+        typer.secho(
+            f"server: starting REST PoC (unauthenticated) on "
+            f"{rest_host}:{rest_port} + auth-maintenance loop + job scheduler "
+            f"(interval {interval_s}s)",
+            fg=typer.colors.CYAN, err=True,
+        )
+
+        async def _serve() -> None:
+            import uvicorn
+            from starlette.applications import Starlette
+            from schwab_cli.server.rest import rest_routes
+
+            app = Starlette(
+                routes=list(rest_routes()) + [_jobs_admin_route(scheduler)]
+            )
+            config = uvicorn.Config(
+                app,
+                host=rest_host,
+                port=rest_port,
+                log_level="warning",
+                loop="asyncio",
+            )
+            await uvicorn.Server(config).serve()
+
         asyncio.run(_serve())
     except KeyboardInterrupt:
         pass
     finally:
         stop_event.set()
         maint.join(timeout=5)
+        # Mirror _run_with_mcp's post-join observability check.
+        if maint.is_alive():
+            logbook.warning("daemon.maintenance_stop_timeout")
+        _stop_jobs(
+            scheduler, jobs_thread,
+            stop_event=stop_event, wake=wake, current=curr,
+        )
     typer.secho("server: stopped.", fg=typer.colors.CYAN, err=True)
     return 0
 
 
-def _install_signal_handlers(handler) -> None:
-    """Best-effort SIGTERM/SIGINT install (no-op off the main thread)."""
+def _install_signal_handlers(handler, *, hup_handler=None) -> None:
+    """Best-effort SIGTERM/SIGINT/SIGHUP install (no-op off the main thread).
+
+    Signals can only be installed on the main thread; off-thread (e.g. under a
+    test runner) :func:`signal.signal` raises ``ValueError`` which we swallow.
+    SIGTERM/SIGINT get ``handler`` (graceful stop); SIGHUP gets ``hup_handler``
+    if provided, otherwise ``handler`` too — the caller wires SIGHUP to a reload
+    so the daemon can pick up new job config without restarting.
+    """
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             signal.signal(sig, handler)
         except (ValueError, OSError):
             # Not on the main thread (e.g. under a test runner) — skip.
             pass
+    try:
+        signal.signal(signal.SIGHUP, hup_handler or handler)
+    except (ValueError, OSError, AttributeError):
+        # SIGHUP is absent on some platforms (Windows); off-main-thread raises
+        # ValueError — both are non-fatal.
+        pass
+
+
+def _install_sighup(hup_handler) -> None:
+    """Best-effort SIGHUP-only install (used by the asyncio modes).
+
+    The MCP / REST modes let uvicorn own SIGINT/SIGTERM; we only add SIGHUP on
+    the main thread BEFORE ``asyncio.run`` so it survives uvicorn's own handler
+    install and can drive a job-config reload.
+    """
+    try:
+        signal.signal(signal.SIGHUP, hup_handler)
+    except (ValueError, OSError, AttributeError):
+        pass
 
 
 def _build_notifier(notifier=None):
@@ -499,6 +625,181 @@ def _build_notifier(notifier=None):
             pass
 
     return _forward
+
+
+# ---- jobs scheduler wiring -------------------------------------------
+
+
+def _spawn_worker(cfg, log_path: Path):
+    """Adapter: the scheduler calls ``spawn(cfg, log_path)`` positionally, but
+    :func:`runner.spawn_worker` takes ``log_path`` keyword-only."""
+    return jobs_runner.spawn_worker(cfg, log_path=log_path)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if ``pid`` is a live process (``os.kill(pid, 0)`` probe)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by another user — still "alive" for our purposes.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _proc_start_unknown(_pid: int) -> float | None:
+    """Conservative, psutil-free process-start probe: always unknown (None).
+
+    With an unknown start time, :func:`reconcile_orphans` can never confirm a
+    pid/start-time match, so a stale recorded pid is marked interrupted WITHOUT
+    killing — the safe default (we never SIGTERM a reused, unrelated pid).
+    """
+    return None
+
+
+def _start_jobs(
+    cfg,
+    *,
+    stop_event: threading.Event,
+    reload_event: threading.Event,
+    wake: threading.Event,
+    renew,
+    notify,
+) -> tuple[JobScheduler, threading.Thread, Path]:
+    """Build the job scheduler once and start its poll loop in a daemon thread.
+
+    Reconciles any orphaned children left by a prior daemon, promotes + loads
+    the staged job configs, writes the server pidfile, and returns the live
+    ``(scheduler, thread, current_dir)``. The thread runs
+    :func:`runtime.run_scheduler_loop` driven by the shared ``stop_event`` /
+    ``reload_event`` / ``wake`` events. The returned ``current_dir`` is threaded
+    into :func:`_stop_jobs` so shutdown removes the same pidfile this resolved.
+    """
+    curr = jobs_runtime.current_dir()
+    stg = jobs_runtime.jobs_dir()
+
+    # Recover any children a previous daemon left marked-running.
+    state = load_state(curr)
+    state = reconcile_orphans(
+        state,
+        alive=_pid_alive,
+        proc_start=_proc_start_unknown,
+        killpg=lambda pgid: os.killpg(pgid, signal.SIGTERM),
+    )
+    save_state(curr, state)
+
+    scheduler = JobScheduler(
+        current_dir=curr,
+        jobs=[],
+        now=time.time,
+        spawn=_spawn_worker,
+        renew=renew,
+        notify=notify,
+    )
+    # Promote + load + schedule the staged configs.
+    jobs_runtime.apply_reload(stg, curr, scheduler)
+    # Persist initial state so it's visible immediately (no tick needed yet).
+    save_state(curr, scheduler.snapshot())
+
+    jobs_runtime.write_pidfile(curr)
+
+    def _wait(timeout: float) -> None:
+        wake.wait(timeout)
+        wake.clear()
+
+    def _reload_requested() -> bool:
+        if reload_event.is_set():
+            reload_event.clear()
+            return True
+        return False
+
+    thread = threading.Thread(
+        target=jobs_runtime.run_scheduler_loop,
+        args=(scheduler, stg, curr),
+        kwargs=dict(
+            stop=stop_event.is_set,
+            reload_requested=_reload_requested,
+            wait=_wait,
+        ),
+        daemon=True,
+        name="schwab-server-jobs",
+    )
+    thread.start()
+    return scheduler, thread, curr
+
+
+def _stop_jobs(
+    scheduler: JobScheduler | None,
+    thread: threading.Thread | None,
+    *,
+    stop_event: threading.Event,
+    wake: threading.Event,
+    current: Path | None = None,
+) -> None:
+    """Stop the job scheduler thread, terminate children, remove the pidfile.
+
+    ``current`` is the ``.current`` dir resolved by :func:`_start_jobs`; pass it
+    so shutdown removes the same pidfile rather than re-deriving it. Falls back
+    to :func:`runtime.current_dir` when not provided (e.g. None-safe callers).
+    """
+    stop_event.set()
+    wake.set()
+    if thread is not None:
+        thread.join(timeout=5)
+    if scheduler is not None:
+        scheduler.terminate_children()
+    jobs_runtime.remove_pidfile(
+        current if current is not None else jobs_runtime.current_dir()
+    )
+
+
+def _jobs_notify(notifier=None):
+    """Build a scheduler ``notify(event, **fields)`` callable over a Notifier.
+
+    The scheduler emits ``notify("scheduler.job_failed", job_id=..., ...)`` —
+    a different shape from the maintenance-tick forwarder — so it needs a
+    notifier whose ``emit`` is called directly. Returns ``None`` (silent) when
+    no notification stack can be constructed.
+    """
+    if notifier is None:
+        try:
+            from schwab_cli.notify import Notifier
+
+            notifier = Notifier.from_file()
+        except Exception:  # noqa: BLE001 — notifications are optional
+            return None
+
+    def _emit(event: str, **fields) -> None:
+        try:
+            notifier.emit(event, **fields)
+        except Exception:  # noqa: BLE001 — never break a tick
+            pass
+
+    return _emit
+
+
+def _jobs_admin_route(scheduler: JobScheduler):
+    """Build a ``GET /admin/jobs`` Starlette route returning the jobs snapshot."""
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def _admin_jobs(_request):
+        return JSONResponse(jobs_runtime.jobs_admin_payload(scheduler))
+
+    return Route("/admin/jobs", _admin_jobs, methods=["GET"])
+
+
+def _jobs_renew(cfg):
+    """Best-effort one-shot maintenance run used as the scheduler ``renew``."""
+    def _renew() -> None:
+        try:
+            maintenance.run_once(cfg)
+        except Exception:  # noqa: BLE001 — renew must never break a tick
+            pass
+    return _renew
 
 
 # ---- server install --------------------------------------------------
