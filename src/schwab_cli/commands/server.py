@@ -580,6 +580,24 @@ def run_install(
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=1)
+    # `launchctl load -w` registers the job, but RunAtLoad only fires the
+    # spawn reliably when loaded into the GUI/Aqua session. When `install`
+    # runs from a non-GUI context (SSH, an automation shell, a subprocess),
+    # the job loads with runs=0 and never starts until the next login.
+    # kickstart it explicitly so the daemon comes up immediately regardless
+    # of context. Best-effort: a failure here still leaves a loaded job that
+    # RunAtLoad will start at the next login.
+    kick = subprocess.run(
+        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"],
+        capture_output=True, text=True,
+    )
+    if kick.returncode != 0:
+        typer.secho(
+            "note: launchctl kickstart did not start the job now "
+            f"({(kick.stderr or kick.stdout or '').strip()}); it will start "
+            "at next login. Run `schwab server status` to check.",
+            fg=typer.colors.YELLOW, err=True,
+        )
     typer.echo(f"installed + loaded: {target}")
     typer.echo(
         f"Label: {LABEL} — running now and restarting on exit. "

@@ -67,6 +67,12 @@ class TestBuildPlistLabel:
         data = _parse(build_plist(ServerPlistSpec(binary_path="/usr/bin/schwab")))
         assert data["Label"] == LABEL
 
+    def test_process_type_is_interactive(self):
+        # Interactive => launchd spawns it promptly on load (parity with the
+        # pre-restructure mcp daemon; without it RunAtLoad is lazier).
+        data = _parse(build_plist(ServerPlistSpec(binary_path="/x")))
+        assert data["ProcessType"] == "Interactive"
+
     def test_label_is_exactly_com_schwab_cli_server(self):
         data = _parse(build_plist(ServerPlistSpec(binary_path="/x")))
         assert data["Label"] == "com.schwab-cli.server"

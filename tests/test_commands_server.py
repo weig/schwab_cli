@@ -205,6 +205,25 @@ class TestRunInstall:
             for c in subprocess_cmds
         )
 
+    def test_install_kickstarts_after_load(self, monkeypatch, tmp_path):
+        """install must kickstart the job after load so it starts now even
+        from a non-GUI context (RunAtLoad only fires in the GUI session)."""
+        plist_path = tmp_path / "com.schwab-cli.server.plist"
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/schwab")
+
+        cmds = []
+
+        def _fake_run(cmd, *a, **k):
+            cmds.append(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+        server_cmd.run_install(plist_path=str(plist_path), yes=True)
+
+        assert any(
+            "launchctl" in str(c) and "kickstart" in str(c) for c in cmds
+        ), f"no kickstart call in {cmds}"
+
     def test_install_output_includes_label(self, monkeypatch, tmp_path, capsys):
         plist_path = tmp_path / "com.schwab-cli.server.plist"
         monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/schwab")
