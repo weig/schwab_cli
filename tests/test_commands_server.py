@@ -89,6 +89,13 @@ class TestRunNoConfig:
 class TestRunWithConfig:
     """run() with config present delegates to maintenance.run_loop."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_config_dir(self, monkeypatch, tmp_path):
+        # Phase 3: the bare server path starts the job scheduler, which
+        # writes jobs/.current into config_dir(). Redirect it to a tmp dir
+        # so these tests never touch the real ~/.config/schwab_cli.
+        monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
+
     def test_run_calls_run_loop(self, monkeypatch):
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
         run_loop_calls = []
