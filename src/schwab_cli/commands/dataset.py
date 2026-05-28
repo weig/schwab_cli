@@ -51,9 +51,11 @@ def _check_fire_time_and_alert(notifier) -> bool:
 from schwab_cli.dataset.update import (
     run_indices_update, run_volatility_update,
 )
-from schwab_cli.dataset.launchd import (
-    DatasetPlistSpec, install_plist,
-)
+# ``install_plist`` is intentionally kept at module level even though the
+# deprecated ``cron install`` no longer calls it: the deprecation test
+# monkeypatches ``schwab_cli.commands.dataset.install_plist`` to assert it is
+# never invoked, so the name must resolve here.
+from schwab_cli.dataset.launchd import install_plist  # noqa: F401
 
 
 app = typer.Typer(
@@ -572,52 +574,26 @@ app.add_typer(cron_app, name="cron")
 
 @cron_app.command(
     "install",
-    help=("Install the unified Schwab Data Sync Service plist. "
-          "Idempotent: any pre-existing Schwab plists in "
-          "LaunchAgents are removed first so the scheduler is the "
-          "only registered cron after install."),
+    help=("DEPRECATED no-op. Scheduling now lives in `schwab server` "
+          "jobs. Run `schwab jobs migrate` to cut over, then start "
+          "`schwab server`."),
 )
 def cron_install(doc: bool = doc_option()) -> None:
-    import shutil
-    from schwab_cli.dataset.config import (
-        load_config_or_default, save_config, config_path,
+    # Deprecated NO-OP: the launchd scheduler has been replaced by jobs run
+    # in-process by `schwab server`. Do NOT install a plist; just point the
+    # operator at the new workflow. `install_plist` is intentionally left
+    # imported at module level but never called here.
+    typer.secho(
+        "`dataset cron install` is deprecated and no longer installs a "
+        "launchd scheduler.",
+        fg=typer.colors.YELLOW,
     )
-    from schwab_cli.dataset.launchd import (
-        SCHEDULER_CRON_LOCAL, uninstall_all_schwab_plists,
+    typer.echo(
+        "Scheduling now runs inside `schwab server`. To migrate:"
     )
-
-    cfg = load_config_or_default()
-    if not config_path().exists():
-        save_config(cfg)
-
-    # Clean slate — wipes the unified plist itself (so re-install
-    # picks up any spec change), every legacy per-job plist
-    # (indices / market-data / accounts), and the pre-rename
-    # `com.schwab-cli.dataset.volatility` plist if it's still there.
-    # ``uninstall_all_schwab_plists`` raises RuntimeError on a real
-    # launchctl failure; surface it as a typed CLI error rather than
-    # a raw Python traceback.
-    try:
-        removed = uninstall_all_schwab_plists()
-    except RuntimeError as e:
-        typer.secho(f"install aborted: {e}",
-                    fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    for path in removed:
-        typer.secho(f"removed → {path}", fg=typer.colors.YELLOW)
-
-    binary = (
-        shutil.which("schwab")
-        or shutil.which("schwab_cli")
-        or "schwab"
-    )
-    log_file = str(config_path().parent / "dataset.log")
-    spec = DatasetPlistSpec(
-        binary_path=binary, cron=SCHEDULER_CRON_LOCAL,
-        kind="scheduler", log_file=log_file,
-    )
-    path = install_plist(spec)
-    typer.secho(f"installed → {path}", fg=typer.colors.GREEN)
+    typer.echo("  1. schwab jobs migrate   # tear down legacy cron + seed defaults")
+    typer.echo("  2. schwab server         # run the scheduled jobs")
+    raise typer.Exit(0)
 
 
 @cron_app.command(
@@ -628,6 +604,11 @@ def cron_install(doc: bool = doc_option()) -> None:
 )
 def cron_uninstall(doc: bool = doc_option()) -> None:
     from schwab_cli.dataset.launchd import uninstall_all_schwab_plists
+    typer.secho(
+        "note: scheduling now lives in `schwab server` jobs; this only "
+        "tears down the legacy launchd scheduler.",
+        fg=typer.colors.YELLOW,
+    )
     try:
         removed = uninstall_all_schwab_plists()
     except RuntimeError as e:

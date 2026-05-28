@@ -642,6 +642,45 @@ def _check_data_sync_service() -> None:
     # wrote.
     _print_last_run_marker()
 
+    # Server-jobs observability (H3): loudly surface any scheduled job
+    # whose last run ended badly.
+    _print_jobs_status()
+
+
+_JOBS_FAIL_STATUSES = frozenset(
+    {"failed", "auth-failed", "timeout", "interrupted"}
+)
+
+
+def _print_jobs_status(*, config_dir: Path | None = None) -> None:
+    """Surface server-run jobs whose last run ended in a failure state.
+
+    Reads the scheduler state under the ``.current`` jobs directory. For any
+    job whose ``last_status`` is in :data:`_JOBS_FAIL_STATUSES`, prints a loud
+    failure block. Stays quiet when all jobs are healthy. All I/O is guarded:
+    a missing file or directory simply returns without output.
+    """
+    from schwab_cli.server.jobs.runtime import current_dir
+    from schwab_cli.server.jobs.state import load_state
+
+    try:
+        current = current_dir(config_dir)
+        state = load_state(current)
+    except (OSError, ValueError):
+        return
+
+    failing = [
+        (job_id, rs.last_status)
+        for job_id, rs in state.jobs.items()
+        if rs.last_status in _JOBS_FAIL_STATUSES
+    ]
+    if not failing:
+        return
+
+    typer.echo("    Scheduled Jobs")
+    for job_id, status in sorted(failing):
+        _bad(str(job_id), f"— {status}")
+
 
 def _print_scheduler_block(plist: Path) -> None:
     """Render the scheduler row: plist status + next-fire time +
