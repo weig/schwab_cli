@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -145,7 +146,6 @@ class FakeSpawner:
 
 def _fake_next_run(cron: str, tz: str, after_dt) -> "datetime":
     """Always schedule 300 seconds in the future."""
-    from datetime import datetime, timezone, timedelta
     return after_dt + timedelta(seconds=300)
 
 
