@@ -4,6 +4,7 @@ from schwab_cli._doc import doc_option
 from schwab_cli.commands import accounts as accounts_cmd
 from schwab_cli.commands import auth as auth_cmd
 from schwab_cli.commands import breadth as breadth_cmd
+from schwab_cli.commands import cert as cert_cmd
 from schwab_cli.commands import dataset as dataset_cmd
 from schwab_cli.commands import watch as watch_cmd
 from schwab_cli.commands import dividends as dividends_cmd
@@ -425,6 +426,7 @@ def skew(
 
 app.add_typer(dataset_cmd.app, name="dataset")
 app.add_typer(jobs_cmd.app, name="jobs")
+app.add_typer(cert_cmd.app, name="cert")
 
 
 watch_app = typer.Typer(
