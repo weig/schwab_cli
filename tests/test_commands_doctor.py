@@ -9,7 +9,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from schwab_cli.commands.doctor import _format_ohlcv_day, _format_relative_time
+import httpx
+
+from schwab_cli.commands import doctor as doc
+from schwab_cli.commands.doctor import (
+    _format_ohlcv_day,
+    _format_relative_time,
+    _health_ok,
+)
 
 
 _NOW = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
@@ -159,3 +166,38 @@ def test_print_data_freshness_renders_ohlcv_latest_day(monkeypatch, capsys):
     # The OHLCV line must NOT use the write-time "last write" phrasing.
     ohlcv_line = next(line for line in out.splitlines() if "OHLCV" in line)
     assert "last write" not in ohlcv_line
+
+
+# ---- _health_ok (Server section liveness probe) -----------------------
+
+
+class _FakeResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_health_ok_true_when_ok_payload(monkeypatch):
+    monkeypatch.setattr(doc.httpx, "get", lambda *a, **k: _FakeResp(200, {"ok": True}))
+    assert _health_ok() is True
+
+
+def test_health_ok_false_on_not_ok_payload(monkeypatch):
+    monkeypatch.setattr(doc.httpx, "get", lambda *a, **k: _FakeResp(200, {"ok": False}))
+    assert _health_ok() is False
+
+
+def test_health_ok_false_on_non_200(monkeypatch):
+    monkeypatch.setattr(doc.httpx, "get", lambda *a, **k: _FakeResp(503, {}))
+    assert _health_ok() is False
+
+
+def test_health_ok_false_on_connection_error(monkeypatch):
+    def _boom(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(doc.httpx, "get", _boom)
+    assert _health_ok() is False
