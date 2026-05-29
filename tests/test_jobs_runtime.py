@@ -718,3 +718,78 @@ class TestJobsAdminPayload:
         payload = runtime_mod.jobs_admin_payload(sched)
         assert payload["jobs"] == {}
         assert json.dumps(payload)  # still serializable
+
+
+# ---------------------------------------------------------------------------
+# status_payload + liveness helpers (moved here from commands.jobs)
+# ---------------------------------------------------------------------------
+
+
+def _write_promoted_config(current: Path, job_id: str, *, enabled: bool = True) -> None:
+    """Write a promoted job config so status_payload lists it as a job."""
+    current.mkdir(parents=True, exist_ok=True)
+    (current / f"{job_id}.json").write_text(
+        json.dumps(
+            {
+                "name": job_id,
+                "enabled": enabled,
+                "cron": "0 17 * * *",
+                "timezone": "America/New_York",
+                "type": "command",
+                "command": ["schwab", "dataset", "sync"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.skipif(not _RUNTIME_AVAILABLE, reason="runtime module not importable")
+class TestStatusPayload:
+    """``runtime.status_payload`` is the relocated jobs-status gatherer."""
+
+    def test_returns_documented_shape(self, tmp_path):
+        current = tmp_path / "jobs" / ".current"
+        _write_promoted_config(current, "sync-equity")
+
+        payload = runtime_mod.status_payload(config_dir=tmp_path)
+
+        assert isinstance(payload, dict)
+        assert set(payload) == {"jobs", "server_running"}
+        assert isinstance(payload["server_running"], bool)
+        assert isinstance(payload["jobs"], list)
+        job = payload["jobs"][0]
+        for key in (
+            "id", "name", "enabled", "cron", "timezone", "state",
+            "next_run_at", "last_run_at", "last_status", "last_exit_code",
+            "running_pid", "outdated", "edit_error",
+        ):
+            assert key in job, f"missing key {key!r}"
+        assert job["id"] == "sync-equity"
+        # No state.json / no pidfile → idle, not running.
+        assert job["state"] == "idle"
+        # JSON-serialisable.
+        assert isinstance(json.dumps(payload), str)
+
+    def test_empty_when_no_promoted_jobs(self, tmp_path):
+        payload = runtime_mod.status_payload(config_dir=tmp_path)
+        assert payload == {"jobs": [], "server_running": False}
+
+    def test_server_running_false_without_pidfile(self, tmp_path):
+        assert runtime_mod.server_running(tmp_path) is False
+
+    def test_pid_alive_for_current_process(self):
+        assert runtime_mod.pid_alive(os.getpid()) is True
+
+    def test_derive_job_state(self):
+        assert runtime_mod.derive_job_state(
+            enabled=True, running_pid=123, next_run_at=None
+        ) == "running"
+        assert runtime_mod.derive_job_state(
+            enabled=False, running_pid=None, next_run_at=None
+        ) == "disabled"
+        assert runtime_mod.derive_job_state(
+            enabled=True, running_pid=None, next_run_at=1.0
+        ) == "scheduled"
+        assert runtime_mod.derive_job_state(
+            enabled=True, running_pid=None, next_run_at=None
+        ) == "idle"

@@ -5,7 +5,10 @@ Surfaces install / config / runtime state across:
   • Global install (binary on PATH)
   • MCP server (running, autostart, transport, claude-code, launchd)
   • Schwab auth (config, auto-login, session validity)
-  • Dataset (subscriptions per source, tier counts, last run, cron jobs)
+  • Dataset (subscriptions per source, tier counts, market-data stats)
+  • Data Sync Service — scheduled jobs run in-process by `schwab server`,
+    config in ``~/.config/schwab_cli/jobs/<id>.json`` (promoted to
+    ``jobs/.current/``), run state in ``jobs/.current/state.json``
 
 For each item that is missing or inactive, prints the exact command
 you'd run to fix it. Pure read-only — never mutates state.
@@ -13,11 +16,10 @@ you'd run to fix it. Pure read-only — never mutates state.
 from __future__ import annotations
 
 import json
-import plistlib
 import shutil
 import subprocess
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,32 +28,6 @@ import typer
 
 
 _NY_TZ = ZoneInfo("America/New_York")
-_TARGET_NY_HOUR = 17  # market-data cron anchor — see sleep_until_ny
-
-
-def _check_market_data_fire_time(plist_path: Path) -> tuple[bool, str]:
-    """Verify the plist's next fire lands before NY 17:00 so that
-    ``sleep_until_ny`` actually waits. Returns ``(ok, message)``.
-
-    Drift after a system-TZ change is the main thing this catches.
-    """
-    nxt_utc = _next_calendar_interval_run(plist_path)
-    if nxt_utc is None:
-        return True, "(no upcoming fire — plist absent or unparseable)"
-    nxt_ny = nxt_utc.astimezone(_NY_TZ)
-    if nxt_ny.hour >= _TARGET_NY_HOUR:
-        return False, (
-            f"next fire is {nxt_ny.strftime('%H:%M %Z on %Y-%m-%d')} "
-            f"— AFTER {_TARGET_NY_HOUR:02d}:00 ET; sleep_until_ny "
-            f"will NO-OP and the cron will run immediately at the "
-            f"wrong chain-snapshot moment. Likely cause: system "
-            f"timezone changed since `dataset cron install` was run. "
-            f"Fix: schwab_cli dataset cron install --group volatility"
-        )
-    return True, (
-        f"next fire at {nxt_ny.strftime('%H:%M %Z on %Y-%m-%d')} "
-        f"(before 17:00 ET ✓)"
-    )
 
 
 # ---- printing helpers --------------------------------------------------
@@ -127,199 +103,10 @@ def _format_relative_time(
     return local.strftime("%Y-%m-%d %H:%M %Z").rstrip()
 
 
-def _next_calendar_interval_run(
-    plist_path: Path, *, now: datetime | None = None,
-) -> datetime | None:
-    """Parse a launchd plist and return the next firing datetime in
-    UTC, or ``None`` if the plist is missing / unparseable / contains
-    no future match within 7 days.
-    """
-    if not plist_path.exists():
+def _ms_to_dt(ms: int | None) -> datetime | None:
+    if ms is None:
         return None
-    try:
-        spec = plistlib.loads(plist_path.read_bytes())
-    except Exception:
-        return None
-    intervals = spec.get("StartCalendarInterval")
-    if not intervals:
-        return None
-    if isinstance(intervals, dict):       # single-entry sugar form
-        intervals = [intervals]
-
-    now = (now or datetime.now(tz=timezone.utc)).astimezone()
-    candidates: list[datetime] = []
-    for entry in intervals:
-        nxt = _next_match_for_entry(entry, now)
-        if nxt is not None:
-            candidates.append(nxt)
-    if not candidates:
-        return None
-    return min(candidates).astimezone(timezone.utc)
-
-
-def _next_match_for_entry(
-    entry: dict, now: datetime,
-) -> datetime | None:
-    """Walk minute-by-minute up to 7 days; return first match.
-
-    launchd's Weekday convention: 0 = Sunday, 6 = Saturday. Python's
-    ``isoweekday()`` returns 1=Mon … 7=Sun, so ``isoweekday() % 7``
-    matches launchd's numbering.
-    """
-    cur = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
-    for _ in range(7 * 24 * 60):
-        if _matches_calendar_entry(cur, entry):
-            return cur
-        cur += timedelta(minutes=1)
-    return None
-
-
-def _matches_calendar_entry(dt: datetime, entry: dict) -> bool:
-    if "Minute" in entry and dt.minute != entry["Minute"]:
-        return False
-    if "Hour" in entry and dt.hour != entry["Hour"]:
-        return False
-    if "Day" in entry and dt.day != entry["Day"]:
-        return False
-    if "Month" in entry and dt.month != entry["Month"]:
-        return False
-    if "Weekday" in entry:
-        if (dt.isoweekday() % 7) != entry["Weekday"]:
-            return False
-    return True
-
-
-def _last_market_data_run_at(conn) -> datetime | None:
-    """Latest captured_at_ms across vol_snapshots — proxy for "last
-    successful volatility cron run". A live ``vol`` invocation also
-    counts, which is fine: both are proof the writer side works."""
-    row = conn.execute(
-        "SELECT MAX(captured_at_ms) FROM vol_snapshots"
-    ).fetchone()
-    if not row or row[0] is None:
-        return None
-    return datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
-
-
-import re as _re
-
-
-_INDICES_DELTA_RE = _re.compile(
-    r"^(?P<ts>\S+)\s+\[indices\]\s+(?P<sym>[A-Za-z0-9._-]+):\s+"
-    r"total=(?P<total>\d+)\s+\+(?P<added>\d+)\s+-(?P<removed>\d+)\s*$"
-)
-_INDICES_FINISHED_RE = _re.compile(
-    r"^(?P<ts>\S+)\s+\[indices\]\s+finished,\s+(?P<processed>\d+)\s+"
-    r"indices processed,\s+(?P<errored>\d+)\s+errored"
-    r"(?:\s+\((?P<note>[^)]+)\))?"
-)
-_INDICES_START_RE = _re.compile(r"^\S+\s+\[indices\]\s+start\b")
-
-
-def _parse_last_indices_run() -> dict | None:
-    """Find the most recent ``[indices] finished`` block in the audit
-    log and return its timestamp + per-index deltas.
-
-    Returns ``{"finished_at": datetime, "errored": int,
-               "deltas": [(symbol, added, removed, total), ...]}``
-    or ``None`` when no completed indices run is on file.
-
-    Authoritative source for "last indices run" — supersedes the old
-    ``MAX(subscribed_at) WHERE source='indices'`` proxy that stayed
-    stale when the upstream member set was unchanged across runs.
-    """
-    from schwab_cli.dataset.audit_log import audit_log_path
-    # RotatingFileHandler rolls scheduler.log → .1 → .2 → .3. If the
-    # active file has no [indices] finished line (e.g. just rotated),
-    # fall through to the backups newest-first so we still surface a
-    # stale-but-real last run instead of showing "—".
-    active = audit_log_path()
-    candidates = [active, *(active.with_name(active.name + f".{i}")
-                            for i in range(1, 4))]
-
-    finished_idx = -1
-    finished_match = None
-    lines: list[str] = []
-    for path in candidates:
-        try:
-            lines = path.read_text().splitlines()
-        except (FileNotFoundError, OSError):
-            continue
-        for i in range(len(lines) - 1, -1, -1):
-            m = _INDICES_FINISHED_RE.match(lines[i])
-            if m:
-                finished_idx = i
-                finished_match = m
-                break
-        if finished_match is not None:
-            break
-    if finished_match is None:
-        return None
-
-    finished_at = datetime.strptime(
-        finished_match.group("ts"), "%Y-%m-%dT%H:%M:%SZ"
-    ).replace(tzinfo=timezone.utc)
-    errored = int(finished_match.group("errored"))
-    processed = int(finished_match.group("processed"))
-    note = finished_match.group("note")  # e.g. "skipped: within max-age threshold"
-
-    deltas: list[tuple[str, int, int, int]] = []
-    for j in range(finished_idx - 1, -1, -1):
-        if _INDICES_START_RE.match(lines[j]):
-            break  # crossed into the previous run's block
-        m = _INDICES_DELTA_RE.match(lines[j])
-        if m:
-            deltas.append((
-                m.group("sym"),
-                int(m.group("added")),
-                int(m.group("removed")),
-                int(m.group("total")),
-            ))
-            if len(deltas) >= processed:
-                break
-    deltas.reverse()
-    return {
-        "finished_at": finished_at,
-        "errored":     errored,
-        "deltas":      deltas,
-        "note":        note,
-    }
-
-
-def _last_indices_run_at(conn=None) -> datetime | None:
-    """Datetime of the most recent successful indices run.
-
-    Backed by the audit log so it advances on every run, not just on
-    constituent changes. The ``conn`` parameter is kept for legacy
-    callers but ignored.
-    """
-    info = _parse_last_indices_run()
-    return info["finished_at"] if info else None
-
-
-def _format_indices_deltas(deltas: list[tuple[str, int, int, int]]) -> str:
-    """Render the per-index delta summary as a git-style colored
-    ``[SPX: +2 -2, NQ: 0, DJI: +1]`` string.
-
-    ``+N`` green, ``-N`` red, ``0`` (no change either way) dim. When
-    both ``added`` and ``removed`` are zero, collapse to ``0`` instead
-    of ``+0 -0`` so the eye lands on the changes.
-    """
-    if not deltas:
-        return ""
-    parts: list[str] = []
-    for sym, added, removed, _total in deltas:
-        if added == 0 and removed == 0:
-            chunk = typer.style("0", dim=True)
-        else:
-            pieces: list[str] = []
-            if added:
-                pieces.append(typer.style(f"+{added}", fg=typer.colors.GREEN))
-            if removed:
-                pieces.append(typer.style(f"-{removed}", fg=typer.colors.RED))
-            chunk = " ".join(pieces)
-        parts.append(f"{sym}: {chunk}")
-    return "[" + ", ".join(parts) + "]"
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
 # ---- 1. Global install ------------------------------------------------
@@ -469,8 +256,6 @@ def _check_auth() -> None:
     else:
         _bad("Refresh token expired")
         _hint("schwab_cli auth --force")
-
-
 
 
 # ---- 4. Telegram notifications ----------------------------------------
@@ -623,231 +408,147 @@ def _check_dataset() -> None:
     _print_market_data_stat(ohlcv_longest, vol_longest_rows)
 
 
-def _check_data_sync_service() -> None:
-    """Top-level section showing the unified scheduler plist + each
-    child task's last/next run. Replaces the prior per-task cron
-    rows; the tasks aren't independent cron jobs anymore, they're
-    children pspawned by the one scheduler."""
-    _section("Data Sync Service")
-
-    typer.echo("    Scheduler")
-    _print_scheduler_block(_SCHEDULER_PLIST)
-
-    typer.echo("    Sync Scope")
-    _print_sync_scope()
-
-    # Last-run marker from the unified scheduler. ``last_run.json``
-    # captures per-job exit codes so a Telegram-down failure is
-    # still visible offline. Surface whatever the most recent run
-    # wrote.
-    _print_last_run_marker()
-
-    # Server-jobs observability (H3): loudly surface any scheduled job
-    # whose last run ended badly.
-    _print_jobs_status()
-
-
+# Job last_status values that mean the run ended badly; plus the
+# coarse display states that signal a problem. Surfaced loudly.
 _JOBS_FAIL_STATUSES = frozenset(
     {"failed", "auth-failed", "timeout", "interrupted"}
 )
+_JOBS_FAIL_STATES = frozenset({"error"})
 
 
-def _print_jobs_status(*, config_dir: Path | None = None) -> None:
-    """Surface server-run jobs whose last run ended in a failure state.
+def _check_data_sync_service() -> None:
+    """Scheduled jobs section.
 
-    Reads the scheduler state under the ``.current`` jobs directory. For any
-    job whose ``last_status`` is in :data:`_JOBS_FAIL_STATUSES`, prints a loud
-    failure block. Stays quiet when all jobs are healthy. All I/O is guarded:
-    a missing file or directory simply returns without output.
+    Jobs are config files under ``~/.config/schwab_cli/jobs`` that the
+    ``schwab server`` daemon runs in-process at their own cron times
+    (state in ``jobs/.current/state.json``). This renders: the runner
+    (the server), any leftover legacy scheduler, the per-job status,
+    and a data-freshness read straight off the DB. Read-only.
     """
-    from schwab_cli.server.jobs.runtime import current_dir
-    from schwab_cli.server.jobs.state import load_state
+    _section("Data Sync Service")
+
+    _print_runner()
+    _print_legacy_leftover()
+    _print_jobs_block()
+    _print_data_freshness()
+
+
+def _print_runner() -> None:
+    """Jobs fire inside the ``schwab server`` daemon — confirm it's up."""
+    if _launchctl_loaded(_MCP_LAUNCHD_LABEL):
+        _ok("Runner", "jobs run by `schwab server` (com.schwab-cli.server)")
+    else:
+        _bad("Runner", "`schwab server` not running — scheduled jobs will NOT fire")
+        _hint("schwab server install --enable-mcp")
+
+
+def _print_legacy_leftover() -> None:
+    """Warn only if the retired launchd scheduler is still installed."""
+    if _SCHEDULER_PLIST.exists() or _launchctl_loaded("com.schwab-cli.scheduler"):
+        _bad(
+            "Legacy scheduler still present",
+            "com.schwab-cli.scheduler is deprecated — remove it to "
+            "avoid double runs",
+        )
+        _hint("schwab dataset cron uninstall")
+
+
+def _job_is_failing(job: dict) -> bool:
+    """True when a job's last run or display state signals a problem."""
+    return (
+        job.get("last_status") in _JOBS_FAIL_STATUSES
+        or job.get("state") in _JOBS_FAIL_STATES
+    )
+
+
+def _print_jobs_block(*, config_dir: Path | None = None) -> None:
+    """Render one stanza per promoted job from :func:`status_payload`.
+
+    Failing jobs (bad ``last_status`` or ``error`` state) get a loud
+    ``_bad`` header; healthy ones a plain/``_ok`` header. All I/O is
+    guarded — any failure simply yields no jobs.
+    """
+    from schwab_cli.server.jobs.runtime import status_payload
 
     try:
-        current = current_dir(config_dir)
-        state = load_state(current)
+        payload = status_payload(config_dir=config_dir)
     except (OSError, ValueError):
+        payload = {"jobs": [], "server_running": False}
+
+    jobs = payload.get("jobs") or []
+    typer.echo("    Jobs")
+    if not jobs:
+        _info("Jobs", "(none configured)")
+        _hint("schwab jobs init")
         return
 
-    failing = [
-        (job_id, rs.last_status)
-        for job_id, rs in state.jobs.items()
-        if rs.last_status in _JOBS_FAIL_STATUSES
-    ]
-    if not failing:
-        return
-
-    typer.echo("    Scheduled Jobs")
-    for job_id, status in sorted(failing):
-        _bad(str(job_id), f"— {status}")
-
-
-def _print_scheduler_block(plist: Path) -> None:
-    """Render the scheduler row: plist status + next-fire time +
-    drift check inline. No per-task data here — the tasks are
-    listed separately under Sync Scope."""
-    if not plist.exists():
-        typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
-        typer.echo("not installed")
-        _hint("schwab dataset cron install")
-        return
-    if not _launchctl_loaded("com.schwab-cli.scheduler"):
-        typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
-        typer.echo("plist present but not loaded")
-        typer.secho(f"        → launchctl load -w {plist}",
-                    fg=typer.colors.YELLOW)
-        return
-
-    typer.secho("      ✓ ", fg=typer.colors.GREEN, nl=False)
-    typer.echo(f"{plist.name}")
     now = datetime.now(tz=timezone.utc)
-    next_run = _next_calendar_interval_run(plist, now=now)
-    typer.echo(
-        f"          next fire   "
-        f"{_format_relative_time(next_run, now=now)}"
-    )
-    # Inline fire-time drift check — when the system TZ changes
-    # after install, the plist's UTC+old-tz fire hour ends up firing
-    # at a different NY-clock moment. sleep_until_ny can recover
-    # from "fire early" but not "fire AFTER target" (silent no-op).
-    md_ok, md_msg = _check_market_data_fire_time(plist)
-    if md_ok:
-        typer.secho(f"                      ✓ {md_msg}",
-                    fg=typer.colors.GREEN)
-    else:
-        typer.secho(f"                      ✗ {md_msg}",
-                    fg=typer.colors.RED)
+    # "unloaded" is the only state with no live config behind it, so it
+    # carries no cron/timezone to show.
+    for job in sorted(jobs, key=lambda j: str(j.get("id"))):
+        job_id = str(job.get("id"))
+        state = str(job.get("state"))
+        detail = f"— {state}"
+        if state != "unloaded" and job.get("cron"):
+            detail += f' cron "{job["cron"]}" {job.get("timezone", "")}'.rstrip()
+
+        if _job_is_failing(job):
+            _bad(job_id, detail)
+        elif state == "scheduled":
+            _ok(job_id, detail)
+        else:
+            typer.echo(f"    {job_id:<32} {detail}")
+
+        last_dt = _ms_to_dt_epoch(job.get("last_run_at"))
+        last_status = job.get("last_status") or "never"
+        typer.echo(
+            f"        last run {_format_relative_time(last_dt, now=now)} "
+            f"({last_status})"
+        )
+        if state == "scheduled":
+            next_dt = _ms_to_dt_epoch(job.get("next_run_at"))
+            typer.echo(
+                f"        next run {_format_relative_time(next_dt, now=now)}"
+            )
+        if job.get("outdated"):
+            typer.secho(
+                f"        ⚠ staged edit invalid: {job.get('edit_error')}",
+                fg=typer.colors.YELLOW,
+            )
 
 
-# Each scheduler child anchors to a NY hour internally via
-# sleep_until_ny. ``next run`` for the child is the next time that
-# hour passes — not when launchd fires the scheduler.
-_TASK_ANCHOR_HOUR = {
-    "OHLCV":      17,
-    "Volatility": 17,
-    "Indices":    18,
-    "Account":    17,
-}
+def _ms_to_dt_epoch(ts: float | None) -> datetime | None:
+    """Convert an epoch-seconds float (job timestamps) to aware UTC."""
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
-def _print_sync_scope() -> None:
-    """One row per data-sync task: last write to the relevant table
-    + next NY-anchored run time."""
+def _print_data_freshness() -> None:
+    """Last write per DB table — a data-staleness signal independent of
+    how sync runs. Drawn straight off ``vol_history``; guarded."""
+    from schwab_cli.dataset import store
     from schwab_cli.storage import vol_history
 
-    last_by_task: dict[str, datetime | None] = {
-        "OHLCV": None, "Volatility": None,
-        "Indices": None, "Account": None,
-    }
+    typer.echo("    Data Freshness")
     try:
         with vol_history.connect() as conn:
-            ohlcv_ms = conn.execute(
-                "SELECT MAX(captured_at_ms) FROM ohlcv_daily"
-            ).fetchone()[0]
-            vol_ms = conn.execute(
-                "SELECT MAX(captured_at_ms) FROM vol_snapshots"
-            ).fetchone()[0]
-            acct_ms = conn.execute(
-                "SELECT MAX(captured_at_ms) FROM account_nav_daily"
-            ).fetchone()[0]
-            last_by_task["OHLCV"] = _ms_to_dt(ohlcv_ms)
-            last_by_task["Volatility"] = _ms_to_dt(vol_ms)
-            last_by_task["Account"] = _ms_to_dt(acct_ms)
+            freshness = store.read_dataset_freshness(conn)
     except Exception as e:
-        _bad("Sync Scope: DB unreachable", str(e))
+        _bad("Data Freshness: DB unreachable", str(e))
         return
-
-    indices_run = _parse_last_indices_run()
-    last_by_task["Indices"] = (
-        indices_run["finished_at"] if indices_run else None
-    )
 
     now = datetime.now(tz=timezone.utc)
-    for task, hour in _TASK_ANCHOR_HOUR.items():
-        last = last_by_task[task]
-        next_run = _next_ny_hour(hour, now=now)
-        suffix = ""
-        if task == "Indices" and indices_run:
-            if indices_run.get("note"):
-                # Skip sentinel — no deltas to render. Show the reason
-                # in dim so it's clear the run completed without
-                # hitting the upstream provider.
-                suffix = ", " + typer.style(
-                    indices_run["note"], dim=True,
-                )
-            else:
-                deltas_str = _format_indices_deltas(indices_run["deltas"])
-                if deltas_str:
-                    suffix = f", {deltas_str}"
-                if indices_run["errored"]:
-                    suffix += typer.style(
-                        f" ({indices_run['errored']} errored)",
-                        fg=typer.colors.RED,
-                    )
-        typer.echo(
-            f"      {task:<13} last run "
-            f"{_format_relative_time(last, now=now)}{suffix}"
-        )
-        typer.echo(
-            f"                    next run {_format_relative_time(next_run, now=now)}"
-        )
-
-
-def _ms_to_dt(ms: int | None) -> datetime | None:
-    if ms is None:
-        return None
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-
-
-def _next_ny_hour(hour: int, *, now: datetime) -> datetime:
-    """Next occurrence of NY hour ``H:00`` strictly after ``now``.
-    Used for per-task next-run estimates — each scheduler child
-    sleep_until_ny to its anchor hour, so the actual work time is
-    independent of when launchd fires the scheduler."""
-    from zoneinfo import ZoneInfo
-    ny = ZoneInfo("America/New_York")
-    now_ny = now.astimezone(ny)
-    target = now_ny.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if target <= now_ny:
-        target += timedelta(days=1)
-    return target.astimezone(timezone.utc)
-
-
-def _print_last_run_marker() -> None:
-    """Read the offline failure marker the scheduler writes after
-    each run and surface its per-job status. Quiet on success, loud
-    on failure — this is the backstop when Telegram alerts didn't
-    land."""
-    import json as _json
-
-    from schwab_cli.dataset.sync_scheduler import _last_run_path
-    try:
-        path = _last_run_path()
-    except Exception:
-        return
-    if not path.exists():
-        return
-    try:
-        payload = _json.loads(path.read_text())
-    except (OSError, _json.JSONDecodeError):
-        return
-    if payload.get("overall_succeeded"):
-        return  # quiet path — failure marker is the interesting one
-    failed = [
-        j for j in (payload.get("jobs") or [])
-        if j.get("returncode") not in (0, None) or j.get("timed_out")
-    ]
-    if not failed:
-        return
-    finished = payload.get("finished_at", "")
-    _bad(
-        f"last scheduler run had failures ({finished})",
-        "see ~/.config/schwab_cli/last_run.json for per-job tails",
+    rows = (
+        ("OHLCV", _ms_to_dt(freshness.ohlcv_ms)),
+        ("Volatility", _ms_to_dt(freshness.volatility_ms)),
+        ("Account", _ms_to_dt(freshness.account_ms)),
     )
-    for j in failed:
-        outcome = "timeout" if j.get("timed_out") else f"exit {j['returncode']}"
-        typer.secho(f"        ✗ {j['name']} — {outcome}",
-                    fg=typer.colors.RED)
+    for task, last in rows:
+        typer.echo(
+            f"      {task:<13} last write "
+            f"{_format_relative_time(last, now=now)}"
+        )
 
 
 def _vol_leader_with_unique_days(conn, row):
@@ -906,52 +607,6 @@ def _print_market_data_stat(ohlcv_row, vol_rows) -> None:
             )
     if not any_row:
         _info("(no samples yet)", "")
-
-
-def _print_dataset_cron(
-    label_text: str,
-    *,
-    plist: Path,
-    label: str,
-    needed: bool,
-    not_needed_msg: str,
-    install_cmd: str,
-    last_run: datetime | None = None,
-    products: str | None = None,
-) -> None:
-    """Render one cron-job row at the Dataset-subsection indent level.
-
-    When ``products`` is provided (market-data row), it renders as a
-    separate ``group`` sub-line below the title so the plist filename
-    column stays vertically aligned with the indices row above.
-    """
-    if plist.exists():
-        if _launchctl_loaded(label):
-            typer.secho("      ✓ ", fg=typer.colors.GREEN, nl=False)
-            typer.echo(f"{label_text:<28} {plist.name}")
-            if products:
-                typer.echo(f"          group     {products}")
-            now = datetime.now(tz=timezone.utc)
-            next_run = _next_calendar_interval_run(plist, now=now)
-            typer.echo(
-                f"          last run  "
-                f"{_format_relative_time(last_run, now=now)}"
-            )
-            typer.echo(
-                f"          next run  "
-                f"{_format_relative_time(next_run, now=now)}"
-            )
-        else:
-            typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
-            typer.echo(f"{label_text:<28} plist present but not loaded")
-            typer.secho(f"        → launchctl load -w {plist}",
-                        fg=typer.colors.YELLOW)
-    elif needed:
-        typer.secho("      ✗ ", fg=typer.colors.RED, nl=False)
-        typer.echo(f"{label_text:<28} not installed")
-        typer.secho(f"        → {install_cmd}", fg=typer.colors.YELLOW)
-    else:
-        typer.echo(f"      · {label_text:<28} {not_needed_msg}")
 
 
 # ---- entry point ------------------------------------------------------

@@ -11,6 +11,8 @@ import pytest
 
 from schwab_cli.storage import vol_history
 from schwab_cli.dataset.store import (
+    DatasetFreshness,
+    read_dataset_freshness,
     subscribe_equity,
     unsubscribe_equity,
     list_active_subscriptions,
@@ -22,6 +24,48 @@ def conn(monkeypatch, tmp_path):
     monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
     with vol_history.connect() as c:
         yield c
+
+
+# ---- read_dataset_freshness -------------------------------------------
+
+
+def test_read_dataset_freshness_empty_db(conn):
+    """An empty DB yields all-None — MAX over no rows is NULL."""
+    fresh = read_dataset_freshness(conn)
+    assert fresh == DatasetFreshness(
+        ohlcv_ms=None, volatility_ms=None, account_ms=None
+    )
+
+
+def test_read_dataset_freshness_returns_max_per_table(conn):
+    """Returns the latest captured_at_ms per tracked table."""
+    conn.execute(
+        "INSERT INTO ohlcv_daily "
+        "(symbol, day, open, high, low, close, volume, captured_at_ms) "
+        "VALUES ('AAPL', '2026-01-02', 1, 2, 0, 1, 10, 111)"
+    )
+    conn.execute(
+        "INSERT INTO ohlcv_daily "
+        "(symbol, day, open, high, low, close, volume, captured_at_ms) "
+        "VALUES ('AAPL', '2026-01-03', 1, 2, 0, 1, 10, 222)"
+    )
+    conn.execute(
+        "INSERT INTO vol_snapshots "
+        "(captured_at_ms, symbol, spot, atm_iv, atm_strike, atm_expiry, atm_dte) "
+        "VALUES (333, 'AAPL', 100, 0.2, 100, '2026-02-20', 30)"
+    )
+    conn.execute(
+        "INSERT INTO account_nav_daily "
+        "(account_hash, day, market_value, cash, total_value, captured_at_ms) "
+        "VALUES ('abcd', '2026-01-02', 100, 10, 110, 444)"
+    )
+
+    fresh = read_dataset_freshness(conn)
+
+    assert isinstance(fresh, DatasetFreshness)
+    assert fresh.ohlcv_ms == 222
+    assert fresh.volatility_ms == 333
+    assert fresh.account_ms == 444
 
 
 def test_subscribe_equity_inserts_row(conn):

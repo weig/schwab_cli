@@ -8,8 +8,40 @@ context manager) is responsible.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+
+@dataclass(frozen=True)
+class DatasetFreshness:
+    """Most-recent write (epoch ms) per dataset table; ``None`` when empty."""
+
+    ohlcv_ms: int | None
+    volatility_ms: int | None
+    account_ms: int | None
+
+
+def read_dataset_freshness(conn: sqlite3.Connection) -> DatasetFreshness:
+    """Return the latest ``captured_at_ms`` per tracked dataset table.
+
+    A staleness signal independent of how sync runs. The caller owns the
+    connection/transaction boundary (mirrors :func:`read_status_rows`).
+    """
+    ohlcv_ms = conn.execute(
+        "SELECT MAX(captured_at_ms) FROM ohlcv_daily"
+    ).fetchone()[0]
+    volatility_ms = conn.execute(
+        "SELECT MAX(captured_at_ms) FROM vol_snapshots"
+    ).fetchone()[0]
+    account_ms = conn.execute(
+        "SELECT MAX(captured_at_ms) FROM account_nav_daily"
+    ).fetchone()[0]
+    return DatasetFreshness(
+        ohlcv_ms=ohlcv_ms,
+        volatility_ms=volatility_ms,
+        account_ms=account_ms,
+    )
 
 
 def _now_ms() -> int:

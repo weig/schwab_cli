@@ -22,11 +22,13 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from schwab_cli import paths
+from schwab_cli.server.jobs import config
 from schwab_cli.server.jobs.config import load_jobs, promote
 from schwab_cli.server.jobs.scheduler import JobScheduler, Transition
+from schwab_cli.server.jobs.state import load_state
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +117,111 @@ def remove_pidfile(current: Path) -> None:
         pass
     except OSError as exc:  # noqa: BLE001 — best-effort cleanup
         log.debug("could not remove pidfile %s: %s", path, exc)
+
+
+# ---------------------------------------------------------------------------
+# Process liveness + status gathering
+# ---------------------------------------------------------------------------
+
+
+def pid_alive(pid: int) -> bool:
+    """Return True if ``pid`` is a live process.
+
+    ``os.kill(pid, 0)`` raises ``ProcessLookupError`` for a dead pid and
+    ``PermissionError`` for a live process we may not signal (still alive).
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def server_running(current: Path) -> bool:
+    """True when a pidfile exists under ``current`` and names a live process."""
+    info = read_pidfile(current)
+    if not info:
+        return False
+    pid = info.get("pid")
+    if not isinstance(pid, int):
+        return False
+    return pid_alive(pid)
+
+
+def derive_job_state(
+    *, enabled: bool, running_pid: int | None, next_run_at: float | None
+) -> str:
+    """Map raw state fields to a coarse display state."""
+    if running_pid is not None:
+        return "running"
+    if not enabled:
+        return "disabled"
+    if next_run_at is not None:
+        return "scheduled"
+    return "idle"
+
+
+def status_payload(*, config_dir: Path | None = None) -> dict[str, Any]:
+    """Merge active configs, persisted state and staging errors into a status view.
+
+    Returns a JSON-serialisable dict of the shape::
+
+        {
+            "jobs": [
+                {
+                    "id": str, "name": str, "enabled": bool, "cron": str,
+                    "timezone": str, "state": str, "next_run_at": float | None,
+                    "last_run_at": float | None, "last_status": str | None,
+                    "last_exit_code": int | None, "running_pid": int | None,
+                    "outdated": bool, "edit_error": str | None,
+                },
+                ...
+            ],
+            "server_running": bool,
+        }
+    """
+    current = current_dir(config_dir)
+    valid, _current_errors = config.load_jobs(current)
+    _staging_valid, staging_errors = config.load_jobs(jobs_dir(config_dir))
+    scheduler_state = load_state(current)
+
+    jobs: list[dict] = []
+    for cfg in valid:
+        run_state = scheduler_state.jobs.get(cfg.id)
+        running_pid = run_state.running_pid if run_state else None
+        next_run_at = run_state.next_run_at if run_state else None
+        last_run_at = run_state.last_run_at if run_state else None
+        last_status = run_state.last_status if run_state else None
+        last_exit_code = run_state.last_exit_code if run_state else None
+
+        edit_error = staging_errors.get(cfg.id)
+        outdated = edit_error is not None
+
+        jobs.append(
+            {
+                "id": cfg.id,
+                "name": cfg.name,
+                "enabled": cfg.enabled,
+                "cron": cfg.cron,
+                "timezone": cfg.timezone,
+                "state": derive_job_state(
+                    enabled=cfg.enabled,
+                    running_pid=running_pid,
+                    next_run_at=next_run_at,
+                ),
+                "next_run_at": next_run_at,
+                "last_run_at": last_run_at,
+                "last_status": last_status,
+                "last_exit_code": last_exit_code,
+                "running_pid": running_pid,
+                "outdated": outdated,
+                "edit_error": edit_error,
+            }
+        )
+
+    return {"jobs": jobs, "server_running": server_running(current)}
 
 
 # ---------------------------------------------------------------------------
