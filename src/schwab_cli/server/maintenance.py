@@ -29,13 +29,17 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import schwab_cli.auth_flows as auth_flows
 import schwab_cli.service.auth as service_auth
 import schwab_cli.session as session_module
 from schwab_cli.api.client import SessionExpired
 from schwab_cli.service import ServiceError
+
+if TYPE_CHECKING:
+    from schwab_cli.config import Config
+    from schwab_cli.session import Session
 
 
 # One maintenance cycle. Renewal fires when the refresh token has <= this
@@ -77,7 +81,20 @@ DEFAULT_ENSURE_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF_S = 2.0
 
 
-def _renewed_tick(new_session, *, now: Callable[[], int], detail_prefix: str) -> MaintenanceTick:
+def _retry_suffix(attempt: int) -> str:
+    """Human-readable '(after N retries)' suffix for a success on attempt N."""
+    if attempt == 1:
+        return ""
+    n = attempt - 1
+    return f" (after {n} retr{'y' if n == 1 else 'ies'})"
+
+
+def _renewed_tick(
+    new_session: "Session | None",
+    *,
+    now: Callable[[], int],
+    detail_prefix: str,
+) -> MaintenanceTick:
     new_ttl_h = (
         (new_session.refresh_token_expires_at - now()) // 3600
         if new_session is not None
@@ -143,7 +160,7 @@ def run_once(
 
 
 def _ensure_token(
-    cfg,
+    cfg: "Config",
     *,
     now: Callable[[], int],
     ttl: int,
@@ -158,20 +175,21 @@ def _ensure_token(
     re-auth fallback recovered, or a ``token_failed`` tick when both the
     retried mint and the fallback failed (all non-fatal — never raises).
     """
+    bounded = max(1, attempts)
     last_err: Exception | None = None
-    for attempt in range(1, max(1, attempts) + 1):
+    for attempt in range(1, bounded + 1):
         try:
             service_auth.get_session(cfg)
-            suffix = "" if attempt == 1 else f" (after {attempt - 1} retr{'y' if attempt == 2 else 'ies'})"
             return MaintenanceTick(
                 "token_ensured",
-                f"access token ensured; refresh TTL ~{ttl // 3600}h{suffix}",
+                f"access token ensured; refresh TTL ~{ttl // 3600}h"
+                f"{_retry_suffix(attempt)}",
             )
         except (SessionExpired, ServiceError) as e:
             # SessionExpired (dead refresh) or a service-layer auth error
             # (e.g. NotAuthenticated if the session file vanished mid-tick).
             last_err = e
-            if attempt < max(1, attempts):
+            if attempt < bounded:
                 retry_sleep(backoff_s)
 
     # Retries exhausted — the refresh token won't mint an access token even
@@ -184,14 +202,14 @@ def _ensure_token(
             new_session,
             now=now,
             detail_prefix=(
-                f"recovered via auto-login after {max(1, attempts)} "
+                f"recovered via auto-login after {bounded} "
                 f"refresh failure(s) ({err_name})"
             ),
         )
     except Exception as e2:  # noqa: BLE001 — non-fatal, surfaced as tick
         return MaintenanceTick(
             "token_failed",
-            f"session error after {max(1, attempts)} attempt(s): "
+            f"session error after {bounded} attempt(s): "
             f"{err_name}: {last_err}; auto-login fallback failed: "
             f"{type(e2).__name__}: {e2}",
         )

@@ -348,6 +348,7 @@ class TestRunOnceFailurePaths:
 
         good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
         calls = {"get_session": 0}
+        sleeps: list[float] = []
 
         monkeypatch.setattr("schwab_cli.session.load", lambda: good_ttl)
 
@@ -363,10 +364,12 @@ class TestRunOnceFailurePaths:
             )
             run_once(
                 _CFG, now=lambda: _NOW, ensure_attempts=5,
-                retry_sleep=lambda _s: None,
+                retry_sleep=sleeps.append,
             )
 
         assert calls["get_session"] == 5
+        # 5 attempts → 4 backoffs (one between each pair, none after the last).
+        assert len(sleeps) == 4
 
 
 class TestMaintenanceTickDataclass:
