@@ -152,10 +152,12 @@ def _check_install() -> None:
         _hint("uv tool install --editable .")
 
 
-# ---- 2. MCP server ----------------------------------------------------
+# ---- 2. Server --------------------------------------------------------
 
 
-_MCP_DEFAULT_URL = "http://127.0.0.1:7234"
+_MCP_HOST = "127.0.0.1"
+_MCP_PORT = 7234
+_MCP_DEFAULT_URL = f"http://{_MCP_HOST}:{_MCP_PORT}"
 # `schwab server` is the only daemon now (PR #52); MCP runs under it via
 # `--enable-mcp`, so the launchd job to look for is the server's.
 _MCP_LAUNCHD_LABEL = "com.schwab-cli.server"
@@ -200,17 +202,17 @@ def _claude_code_has_schwab() -> bool:
 
 
 def _check_mcp() -> None:
-    _section("MCP server")
+    _section("Server")
     status = _mcp_status()
     if status:
         uptime_h = (status.get("uptime_sec", 0) or 0) / 3600
         _ok(
             "Running",
-            f"pid={status.get('pid')} uptime={uptime_h:.1f}h "
-            f"transport={status.get('transport', '?')}",
+            f"pid={status.get('pid')} bind={_MCP_HOST}:{_MCP_PORT} "
+            f"uptime={uptime_h:.1f}h transport={status.get('transport', '?')}",
         )
     else:
-        _bad("Not running")
+        _bad("Not running", f"(expected on {_MCP_HOST}:{_MCP_PORT})")
         _hint("schwab server --enable-mcp  (the MCP server runs under `server`)")
 
     plist_loaded = _launchctl_loaded(_MCP_LAUNCHD_LABEL)
