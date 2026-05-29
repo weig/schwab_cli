@@ -27,9 +27,19 @@ from schwab_cli.server.jobs.runner import execute_job
 from schwab_cli.server.jobs.runtime import (
     current_dir,
     jobs_dir,
+    pid_alive,
     read_pidfile,
+    server_running,
+    status_payload,
 )
 from schwab_cli.server.jobs.state import load_state
+
+__all__ = [
+    "app",
+    "pid_alive",
+    "server_running",
+    "status_payload",
+]
 
 app = typer.Typer(
     help="Run promoted scheduled jobs by id (used by the scheduler and manually).",
@@ -81,111 +91,8 @@ def run(job_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Process liveness
+# Rendering helpers
 # ---------------------------------------------------------------------------
-
-
-def _pid_alive(pid: int) -> bool:
-    """Return True if ``pid`` is a live process.
-
-    ``os.kill(pid, 0)`` raises ``ProcessLookupError`` for a dead pid and
-    ``PermissionError`` for a live process we may not signal (still alive).
-    """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers
-# ---------------------------------------------------------------------------
-
-
-def _server_running(current: Path) -> bool:
-    """True when a pidfile exists under ``current`` and names a live process."""
-    info = read_pidfile(current)
-    if not info:
-        return False
-    pid = info.get("pid")
-    if not isinstance(pid, int):
-        return False
-    return _pid_alive(pid)
-
-
-def _derive_state(*, enabled: bool, running_pid: int | None, next_run_at: float | None) -> str:
-    """Map raw state fields to a coarse display state."""
-    if running_pid is not None:
-        return "running"
-    if not enabled:
-        return "disabled"
-    if next_run_at is not None:
-        return "scheduled"
-    return "idle"
-
-
-def status_payload(*, config_dir: Path | None = None) -> dict[str, Any]:
-    """Merge active configs, persisted state and staging errors into a status view.
-
-    Returns a JSON-serialisable dict of the shape::
-
-        {
-            "jobs": [
-                {
-                    "id": str, "name": str, "enabled": bool, "cron": str,
-                    "timezone": str, "state": str, "next_run_at": float | None,
-                    "last_run_at": float | None, "last_status": str | None,
-                    "last_exit_code": int | None, "running_pid": int | None,
-                    "outdated": bool, "edit_error": str | None,
-                },
-                ...
-            ],
-            "server_running": bool,
-        }
-    """
-    current = current_dir(config_dir)
-    valid, _current_errors = config.load_jobs(current)
-    _staging_valid, staging_errors = config.load_jobs(jobs_dir(config_dir))
-    scheduler_state = load_state(current)
-
-    jobs: list[dict] = []
-    for cfg in valid:
-        run_state = scheduler_state.jobs.get(cfg.id)
-        running_pid = run_state.running_pid if run_state else None
-        next_run_at = run_state.next_run_at if run_state else None
-        last_run_at = run_state.last_run_at if run_state else None
-        last_status = run_state.last_status if run_state else None
-        last_exit_code = run_state.last_exit_code if run_state else None
-
-        edit_error = staging_errors.get(cfg.id)
-        outdated = edit_error is not None
-
-        jobs.append(
-            {
-                "id": cfg.id,
-                "name": cfg.name,
-                "enabled": cfg.enabled,
-                "cron": cfg.cron,
-                "timezone": cfg.timezone,
-                "state": _derive_state(
-                    enabled=cfg.enabled,
-                    running_pid=running_pid,
-                    next_run_at=next_run_at,
-                ),
-                "next_run_at": next_run_at,
-                "last_run_at": last_run_at,
-                "last_status": last_status,
-                "last_exit_code": last_exit_code,
-                "running_pid": running_pid,
-                "outdated": outdated,
-                "edit_error": edit_error,
-            }
-        )
-
-    return {"jobs": jobs, "server_running": _server_running(current)}
 
 
 def _fmt_ts(ts: float | None) -> str:
@@ -315,7 +222,7 @@ def _reload_impl() -> None:
     valid, errs = config.load_jobs(jobs_dir())
 
     info = read_pidfile(current)
-    alive = bool(info) and isinstance(info.get("pid"), int) and _pid_alive(info["pid"])
+    alive = bool(info) and isinstance(info.get("pid"), int) and pid_alive(info["pid"])
 
     if not alive:
         typer.echo("server not running; staged configs will apply on next start.")
@@ -429,7 +336,7 @@ def _set_enabled(job_id: str, enabled: bool) -> None:
     # localhost daemon — mirrors the note in state.reconcile_orphans.
     current = current_dir()
     info = read_pidfile(current)
-    if info and isinstance(info.get("pid"), int) and _pid_alive(info["pid"]):
+    if info and isinstance(info.get("pid"), int) and pid_alive(info["pid"]):
         os.kill(info["pid"], signal.SIGHUP)
 
 
