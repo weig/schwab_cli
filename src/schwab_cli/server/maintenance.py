@@ -49,11 +49,14 @@ class MaintenanceTick:
 
     ``action`` is one of:
 
-    * ``"renewed"`` — full re-auth fired and succeeded.
-    * ``"token_ensured"`` — access token confirmed fresh (no re-auth).
+    * ``"renewed"`` — full re-auth fired and succeeded. Also covers the
+      ensure-token fallback: the access-token mint kept failing, so a full
+      re-auth was triggered and recovered.
+    * ``"token_ensured"`` — access token confirmed fresh (no re-auth),
+      possibly after one or more transient-failure retries.
     * ``"renew_failed"`` — full re-auth raised (non-fatal).
-    * ``"token_failed"`` — service-layer token mint raised SessionExpired
-      (non-fatal).
+    * ``"token_failed"`` — the access-token mint kept failing across all
+      retries AND the full-auth fallback also failed (non-fatal).
     """
 
     action: str
@@ -64,18 +67,46 @@ def _default_now() -> int:
     return int(time.time())
 
 
+# Ensure-token retry policy. A single transient refresh blip (network hiccup,
+# Schwab 5xx) used to surface immediately as a ``token_failed`` alert. We now
+# retry a few times with a short backoff before declaring failure, then — if
+# the refresh genuinely won't mint — escalate to a full re-auth as a recovery
+# fallback (covers a refresh token Schwab invalidated *before* its nominal
+# expiry, which the TTL gate alone would never catch).
+DEFAULT_ENSURE_ATTEMPTS = 3
+DEFAULT_RETRY_BACKOFF_S = 2.0
+
+
+def _renewed_tick(new_session, *, now: Callable[[], int], detail_prefix: str) -> MaintenanceTick:
+    new_ttl_h = (
+        (new_session.refresh_token_expires_at - now()) // 3600
+        if new_session is not None
+        else 0
+    )
+    return MaintenanceTick("renewed", f"{detail_prefix}; new TTL ~{new_ttl_h}h")
+
+
 def run_once(
     cfg,
     *,
     now: Callable[[], int] = _default_now,
     notifier: Callable[[MaintenanceTick], None] | None = None,
     audit=None,
+    ensure_attempts: int = DEFAULT_ENSURE_ATTEMPTS,
+    retry_sleep: Callable[[float], None] = time.sleep,
+    retry_backoff_s: float = DEFAULT_RETRY_BACKOFF_S,
 ) -> MaintenanceTick:
     """Run one maintenance cycle and return a :class:`MaintenanceTick`.
 
     Never raises for the expected auth-failure cases (a failed re-auth or
     an expired refresh token) — those surface as ``renew_failed`` /
     ``token_failed`` ticks so the loop keeps running.
+
+    The ensure-token path (refresh TTL above the renewal window) retries a
+    transient failure ``ensure_attempts`` times with ``retry_backoff_s``
+    between tries before giving up, and on persistent failure escalates to a
+    full re-auth so a prematurely-invalidated refresh token still recovers
+    instead of merely alerting. ``retry_sleep`` is injectable for tests.
     """
     current = now()
     session = session_module.load()
@@ -89,14 +120,8 @@ def run_once(
     if ttl <= DEFAULT_INTERVAL_S:
         try:
             new_session = auth_flows.perform_full_auth(cfg)
-            new_ttl_h = (
-                (new_session.refresh_token_expires_at - now()) // 3600
-                if new_session is not None
-                else 0
-            )
-            tick = MaintenanceTick(
-                "renewed",
-                f"refresh token renewed; new TTL ~{new_ttl_h}h",
+            tick = _renewed_tick(
+                new_session, now=now, detail_prefix="refresh token renewed",
             )
         except Exception as e:  # noqa: BLE001 — non-fatal, surfaced as tick
             tick = MaintenanceTick(
@@ -104,23 +129,72 @@ def run_once(
                 f"full re-auth failed: {type(e).__name__}: {e}",
             )
     else:
+        tick = _ensure_token(
+            cfg,
+            now=now,
+            ttl=ttl,
+            attempts=ensure_attempts,
+            retry_sleep=retry_sleep,
+            backoff_s=retry_backoff_s,
+        )
+
+    _emit(tick, notifier=notifier, audit=audit)
+    return tick
+
+
+def _ensure_token(
+    cfg,
+    *,
+    now: Callable[[], int],
+    ttl: int,
+    attempts: int,
+    retry_sleep: Callable[[float], None],
+    backoff_s: float,
+) -> MaintenanceTick:
+    """Ensure a fresh access token with bounded retry + full-auth fallback.
+
+    Returns a ``token_ensured`` tick on success (possibly after a retry), a
+    ``renewed`` tick when the access-token mint kept failing but the full
+    re-auth fallback recovered, or a ``token_failed`` tick when both the
+    retried mint and the fallback failed (all non-fatal — never raises).
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
         try:
             service_auth.get_session(cfg)
-            tick = MaintenanceTick(
+            suffix = "" if attempt == 1 else f" (after {attempt - 1} retr{'y' if attempt == 2 else 'ies'})"
+            return MaintenanceTick(
                 "token_ensured",
-                f"access token ensured; refresh TTL ~{ttl // 3600}h",
+                f"access token ensured; refresh TTL ~{ttl // 3600}h{suffix}",
             )
         except (SessionExpired, ServiceError) as e:
             # SessionExpired (dead refresh) or a service-layer auth error
             # (e.g. NotAuthenticated if the session file vanished mid-tick).
-            # Non-fatal: surface as a tick so the loop keeps running.
-            tick = MaintenanceTick(
-                "token_failed",
-                f"session error: {type(e).__name__}: {e}",
-            )
+            last_err = e
+            if attempt < max(1, attempts):
+                retry_sleep(backoff_s)
 
-    _emit(tick, notifier=notifier, audit=audit)
-    return tick
+    # Retries exhausted — the refresh token won't mint an access token even
+    # though its nominal TTL is still above the renewal window. Escalate to a
+    # full re-auth so a prematurely-invalidated refresh token recovers.
+    err_name = type(last_err).__name__ if last_err is not None else "unknown"
+    try:
+        new_session = auth_flows.perform_full_auth(cfg)
+        return _renewed_tick(
+            new_session,
+            now=now,
+            detail_prefix=(
+                f"recovered via auto-login after {max(1, attempts)} "
+                f"refresh failure(s) ({err_name})"
+            ),
+        )
+    except Exception as e2:  # noqa: BLE001 — non-fatal, surfaced as tick
+        return MaintenanceTick(
+            "token_failed",
+            f"session error after {max(1, attempts)} attempt(s): "
+            f"{err_name}: {last_err}; auto-login fallback failed: "
+            f"{type(e2).__name__}: {e2}",
+        )
 
 
 def _emit(
