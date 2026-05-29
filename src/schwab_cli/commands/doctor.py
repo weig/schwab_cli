@@ -175,6 +175,15 @@ def _mcp_status() -> dict | None:
     return None
 
 
+def _health_ok() -> bool:
+    """True iff the daemon's ``/health`` endpoint returns ``{"ok": true}``."""
+    try:
+        resp = httpx.get(f"{_MCP_DEFAULT_URL}/health", timeout=2.0)
+        return resp.status_code == 200 and bool(resp.json().get("ok"))
+    except (httpx.HTTPError, json.JSONDecodeError):
+        return False
+
+
 def _launchctl_loaded(label: str) -> bool:
     """True if launchctl reports the label loaded."""
     try:
@@ -206,10 +215,14 @@ def _check_mcp() -> None:
     status = _mcp_status()
     if status:
         uptime_h = (status.get("uptime_sec", 0) or 0) / 3600
+        # Probe /health on top of /admin/status so the line reflects the
+        # daemon's own liveness check: "healthy" or "gone".
+        health = "healthy" if _health_ok() else "gone"
         _ok(
             "Running",
             f"pid={status.get('pid')} bind={_MCP_HOST}:{_MCP_PORT} "
-            f"uptime={uptime_h:.1f}h transport={status.get('transport', '?')}",
+            f"uptime={uptime_h:.1f}h transport={status.get('transport', '?')} "
+            f"{health}",
         )
     else:
         _bad("Not running", f"(expected on {_MCP_HOST}:{_MCP_PORT})")
