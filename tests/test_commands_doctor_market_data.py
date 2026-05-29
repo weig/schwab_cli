@@ -32,6 +32,10 @@ def _stub_db(monkeypatch):
             # NULL/0 row; mimic that so callers can do `[0]`.
             if "GROUP BY symbol" in self._sql or "ROW_NUMBER" in self._sql:
                 return None
+            # OHLCV freshness is coverage-based (MAX(day)); hand back a real
+            # trading day so the Data Freshness block renders "latest day".
+            if "MAX(day)" in self._sql:
+                return ["2026-05-28"]
             return [0]
 
     @contextlib.contextmanager
@@ -42,8 +46,8 @@ def _stub_db(monkeypatch):
 
 
 def test_data_freshness_block_renders_per_table(capsys, monkeypatch):
-    """The Data Sync Service section carries a Data Freshness block with
-    one ``last write`` row per tracked DB table."""
+    """The Data Sync Service section carries a Data Freshness block: OHLCV by
+    latest trading day (coverage-based), Volatility/Account by last write."""
     _stub_db(monkeypatch)
     # Don't depend on real launchd / jobs state; keep it quiet.
     monkeypatch.setattr(doc, "_launchctl_loaded", lambda _label: False)
@@ -56,7 +60,9 @@ def test_data_freshness_block_renders_per_table(capsys, monkeypatch):
     assert "Data Freshness" in out
     for task in ("OHLCV", "Volatility", "Account"):
         assert task in out
-    assert out.count("last write") >= 3
+    # OHLCV is coverage-based (latest trading day); vol/account are write-time.
+    assert "latest day 2026-05-28" in out
+    assert out.count("last write") >= 2
     # Legacy scheduler / sync-scope artefacts are gone.
     assert "Sync Scope" not in out
     assert "next fire" not in out
