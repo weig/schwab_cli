@@ -349,6 +349,10 @@ def _compute_ivp_state(
     Also carries ``observed`` / ``synthetic`` counts so the renderer
     can annotate the source breakdown.
     """
+    # Defense-in-depth: drop any non-positive IV (e.g. the -9.99 stored
+    # form of Schwab's -999.0 sentinel) before computing any stats, so a
+    # bad value that bypassed the read filter can't skew the range/count.
+    series_tagged = [(iv, src) for iv, src in series_tagged if iv > 0]
     n = len(series_tagged)
     observed = sum(1 for _, src in series_tagged if src == SOURCE_OBSERVED)
     synthetic = n - observed

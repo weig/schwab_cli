@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -285,6 +285,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             """
         )
 
+    # v5 → v6: one-time purge of historical rows that stored Schwab's
+    # `-999` "IV unavailable" sentinel (as a -9.99 atm_iv) or any other
+    # non-positive IV. The ingestion guard in `flatten_chain` now drops
+    # these at the source; this sweep clears legacy junk so IVR/IVP ranges
+    # aren't skewed. Skipped on fresh DBs (current is None → no rows yet).
+    if current is not None and current < 6:
+        delete_implausible_iv_snapshots(conn)
+
     if current is None:
         conn.execute(
             "INSERT INTO schema_version VALUES (?)", (_SCHEMA_VERSION,)
@@ -333,6 +341,18 @@ def record_snapshot(
             atm_strike, atm_expiry, atm_dte, source,
         ),
     )
+
+
+def delete_implausible_iv_snapshots(conn: sqlite3.Connection) -> int:
+    """Delete vol_snapshots rows with a non-positive atm_iv (Schwab's
+    -999 'IV unavailable' sentinel stored as -9.99, or other junk).
+    Returns the number of rows deleted.
+
+    Like :func:`record_snapshot`, this does not commit — the ``connect()``
+    context manager commits on clean exit.
+    """
+    cur = conn.execute("DELETE FROM vol_snapshots WHERE atm_iv <= 0")
+    return cur.rowcount
 
 
 def count_snapshots(conn: sqlite3.Connection, *, symbol: str) -> int:
@@ -407,7 +427,7 @@ def _recent_rows(conn: sqlite3.Connection, *, symbol: str) -> list[sqlite3.Row]:
         """
         SELECT captured_at_ms, atm_iv, source
         FROM vol_snapshots
-        WHERE symbol = ?
+        WHERE symbol = ? AND atm_iv > 0
         ORDER BY captured_at_ms ASC
         """,
         (symbol,),

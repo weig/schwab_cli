@@ -35,7 +35,7 @@ def test_v3_schema_version_bumped(monkeypatch, tmp_path):
     monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
     with vol_history.connect() as conn:
         v = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert v == 3
+    assert v == vol_history._SCHEMA_VERSION
 
 
 import pytest

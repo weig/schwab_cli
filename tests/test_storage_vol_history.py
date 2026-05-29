@@ -16,9 +16,13 @@ import pytest
 
 from schwab_cli.storage import storage_dir
 from schwab_cli.storage.vol_history import (
+    _SCHEMA_VERSION,
+    SOURCE_OBSERVED,
+    SOURCE_SYNTHETIC,
     connect,
     db_path,
     read_recent_per_day,
+    read_recent_per_day_with_source,
     record_snapshot,
 )
 
@@ -237,8 +241,8 @@ def test_v1_to_v2_migration_adds_source_column(monkeypatch, tmp_path):
         version = c.execute("SELECT version FROM schema_version").fetchone()[0]
 
     assert row["source"] == "observed"
-    # v3→v4 (mirror volatility→ohlcv) auto-runs on every open.
-    assert version == 4
+    # Reopening always migrates up to the current schema version.
+    assert version == _SCHEMA_VERSION
 
 
 def test_read_isolates_by_symbol(monkeypatch, tmp_path):
@@ -258,3 +262,253 @@ def test_read_isolates_by_symbol(monkeypatch, tmp_path):
         aapl = read_recent_per_day(conn, symbol="AAPL", lookback_days=252)
     assert nvda == [pytest.approx(0.35)]
     assert aapl == [pytest.approx(0.99)]
+
+
+# ---- read path: non-positive atm_iv must be excluded -------------------
+#
+# When a -999.0 sentinel (or any non-positive value) slips into storage
+# (e.g. via an earlier version of flatten_chain that didn't guard it),
+# read_recent_per_day and read_recent_per_day_with_source must exclude
+# those rows.  They are inserted here via direct SQL so the test
+# exercises the READ filter independently of any guard that may later be
+# added to record_snapshot itself.
+
+
+def test_read_recent_per_day_excludes_non_positive_atm_iv(monkeypatch, tmp_path):
+    """read_recent_per_day must skip rows where atm_iv <= 0.
+
+    Uses direct SQL insert to place a -9.99 row (the stored form of the
+    -999.0 sentinel after /100) without relying on record_snapshot's
+    future validation.
+    """
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    t_bad  = _ms_at(2026, 4, 20)
+    t_good1 = _ms_at(2026, 4, 21)
+    t_good2 = _ms_at(2026, 4, 22)
+
+    with connect() as conn:
+        # Insert a "dirty" row that simulates the pre-fix bug: -9.99 in atm_iv.
+        conn.execute(
+            """
+            INSERT INTO vol_snapshots
+                (captured_at_ms, symbol, spot, atm_iv,
+                 atm_strike, atm_expiry, atm_dte, source)
+            VALUES (?, 'NVDA', 200.0, -9.99, 200.0, '2026-07-18', 79, 'observed')
+            """,
+            (t_bad,),
+        )
+        record_snapshot(
+            conn, symbol="NVDA", spot=201.0, atm_iv=0.30,
+            atm_strike=200.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=t_good1,
+        )
+        record_snapshot(
+            conn, symbol="NVDA", spot=202.0, atm_iv=0.35,
+            atm_strike=200.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=t_good2,
+        )
+        series = read_recent_per_day(conn, symbol="NVDA", lookback_days=252)
+
+    # Only the two positive values must appear — -9.99 is excluded.
+    assert pytest.approx([0.30, 0.35]) == series
+
+
+def test_read_recent_per_day_with_source_excludes_non_positive_atm_iv(
+    monkeypatch, tmp_path
+):
+    """read_recent_per_day_with_source must also skip atm_iv <= 0 rows."""
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    t_bad   = _ms_at(2026, 4, 20)
+    t_good1 = _ms_at(2026, 4, 21)
+
+    with connect() as conn:
+        # Dirty row with the stored sentinel value.
+        conn.execute(
+            """
+            INSERT INTO vol_snapshots
+                (captured_at_ms, symbol, spot, atm_iv,
+                 atm_strike, atm_expiry, atm_dte, source)
+            VALUES (?, 'SPY', 500.0, -9.99, 500.0, '2026-07-18', 79, 'observed')
+            """,
+            (t_bad,),
+        )
+        record_snapshot(
+            conn, symbol="SPY", spot=502.0, atm_iv=0.18,
+            atm_strike=500.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=t_good1,
+        )
+        tagged = read_recent_per_day_with_source(
+            conn, symbol="SPY", lookback_days=252
+        )
+
+    # Must only return the valid positive row, with its source tag.
+    assert len(tagged) == 1
+    iv, src = tagged[0]
+    assert iv == pytest.approx(0.18)
+    assert src == SOURCE_OBSERVED
+
+
+def test_read_recent_per_day_excludes_zero_atm_iv(monkeypatch, tmp_path):
+    """Zero IV (non-positive) must also be excluded from the read path."""
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    t_zero = _ms_at(2026, 4, 20)
+    t_good = _ms_at(2026, 4, 21)
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO vol_snapshots
+                (captured_at_ms, symbol, spot, atm_iv,
+                 atm_strike, atm_expiry, atm_dte, source)
+            VALUES (?, 'QQQ', 400.0, 0.0, 400.0, '2026-07-18', 79, 'observed')
+            """,
+            (t_zero,),
+        )
+        record_snapshot(
+            conn, symbol="QQQ", spot=401.0, atm_iv=0.22,
+            atm_strike=400.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=t_good,
+        )
+        series = read_recent_per_day(conn, symbol="QQQ", lookback_days=252)
+
+    assert series == [pytest.approx(0.22)]
+
+
+# ---- delete_implausible_iv_snapshots -----------------------------------
+#
+# Implementer note: add `delete_implausible_iv_snapshots(conn) -> int`
+# to schwab_cli/storage/vol_history.py.  It must:
+#   - DELETE all vol_snapshots rows where atm_iv <= 0
+#   - Return the count of rows deleted
+#   - Leave rows with atm_iv > 0 untouched
+#
+# This function is needed as a one-time cleanup for existing databases
+# that were polluted by the pre-fix code path.
+
+
+def test_delete_implausible_iv_snapshots_removes_non_positive_rows(
+    monkeypatch, tmp_path
+):
+    """delete_implausible_iv_snapshots must remove all atm_iv <= 0 rows
+    across all symbols and return the count deleted."""
+    # Import here so the test fails with ImportError (not AttributeError)
+    # when the function hasn't been implemented yet — clear RED signal.
+    from schwab_cli.storage.vol_history import delete_implausible_iv_snapshots
+
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+
+    with connect() as conn:
+        # Insert 3 valid rows across two symbols.
+        record_snapshot(
+            conn, symbol="NVDA", spot=200.0, atm_iv=0.30,
+            atm_strike=200.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=_ms_at(2026, 4, 21),
+        )
+        record_snapshot(
+            conn, symbol="NVDA", spot=201.0, atm_iv=0.35,
+            atm_strike=200.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=_ms_at(2026, 4, 22),
+        )
+        record_snapshot(
+            conn, symbol="SPY", spot=500.0, atm_iv=0.18,
+            atm_strike=500.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=_ms_at(2026, 4, 21),
+        )
+        # Insert 2 dirty rows (one per symbol) via direct SQL.
+        conn.execute(
+            """
+            INSERT INTO vol_snapshots
+                (captured_at_ms, symbol, spot, atm_iv,
+                 atm_strike, atm_expiry, atm_dte, source)
+            VALUES (?, 'NVDA', 200.0, -9.99, 200.0, '2026-07-18', 79, 'observed')
+            """,
+            (_ms_at(2026, 4, 20),),
+        )
+        conn.execute(
+            """
+            INSERT INTO vol_snapshots
+                (captured_at_ms, symbol, spot, atm_iv,
+                 atm_strike, atm_expiry, atm_dte, source)
+            VALUES (?, 'SPY', 500.0, -9.99, 500.0, '2026-07-18', 79, 'observed')
+            """,
+            (_ms_at(2026, 4, 20),),
+        )
+
+        # Must delete the 2 bad rows and return 2.
+        deleted = delete_implausible_iv_snapshots(conn)
+
+    assert deleted == 2
+
+    # Confirm only the 3 valid rows remain.
+    with connect() as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM vol_snapshots"
+        ).fetchone()[0]
+        bad_remaining = conn.execute(
+            "SELECT COUNT(*) FROM vol_snapshots WHERE atm_iv <= 0"
+        ).fetchone()[0]
+
+    assert remaining == 3
+    assert bad_remaining == 0
+
+
+def test_delete_implausible_iv_snapshots_returns_zero_when_no_bad_rows(
+    monkeypatch, tmp_path
+):
+    """Returns 0 and leaves the DB untouched when all rows are valid."""
+    from schwab_cli.storage.vol_history import delete_implausible_iv_snapshots
+
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+
+    with connect() as conn:
+        record_snapshot(
+            conn, symbol="NVDA", spot=200.0, atm_iv=0.30,
+            atm_strike=200.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=_ms_at(2026, 4, 21),
+        )
+        deleted = delete_implausible_iv_snapshots(conn)
+
+    assert deleted == 0
+
+    with connect() as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM vol_snapshots"
+        ).fetchone()[0]
+    assert remaining == 1
+
+
+def test_migration_v5_to_v6_purges_non_positive_iv(monkeypatch, tmp_path):
+    """Opening a pre-v6 DB that contains the -999 sentinel (atm_iv <= 0)
+    auto-purges those rows via the v5->v6 migration and bumps the version."""
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+
+    # First connect creates a fresh DB (already at the current version);
+    # seed a valid row + a dirty sentinel row, then roll the recorded
+    # schema version back to 5 to simulate an older store.
+    with connect() as conn:
+        record_snapshot(
+            conn, symbol="NVDA", spot=200.0, atm_iv=0.30,
+            atm_strike=200.0, atm_expiry="2026-07-18", atm_dte=79,
+            captured_at_ms=_ms_at(2026, 4, 21),
+        )
+        conn.execute(
+            """
+            INSERT INTO vol_snapshots
+                (captured_at_ms, symbol, spot, atm_iv,
+                 atm_strike, atm_expiry, atm_dte, source)
+            VALUES (?, 'NVDA', 200.0, -9.99, 200.0, '2026-07-18', 79, 'observed')
+            """,
+            (_ms_at(2026, 4, 20),),
+        )
+        conn.execute("UPDATE schema_version SET version = 5")
+
+    # Reconnecting runs _migrate: v5 -> v6 cleanup purges the sentinel row.
+    with connect() as conn:
+        version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+        rows = conn.execute(
+            "SELECT atm_iv FROM vol_snapshots WHERE symbol = 'NVDA'"
+        ).fetchall()
+
+    assert version == 6
+    assert len(rows) == 1
+    assert rows[0]["atm_iv"] > 0
