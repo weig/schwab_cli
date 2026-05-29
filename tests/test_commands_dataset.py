@@ -209,29 +209,10 @@ def test_update_requires_indices_or_group(runner):
     assert result.exit_code != 0
 
 
-def test_cron_install_writes_scheduler_plist(runner, monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(
-        "schwab_cli.dataset.launchd.uninstall_all_schwab_plists",
-        lambda: [],
-    )
-    calls = []
-    def fake_install(spec):
-        calls.append((spec.kind, spec.cron, spec.binary_path))
-        spec.plist_path.parent.mkdir(parents=True, exist_ok=True)
-        spec.plist_path.write_bytes(b"<plist></plist>")
-        return spec.plist_path
-    monkeypatch.setattr(
-        "schwab_cli.commands.dataset.install_plist", fake_install
-    )
-
-    result = runner.invoke(app, ["dataset", "cron", "install"])
-    assert result.exit_code == 0, result.output
-    assert calls[0][0] == "scheduler"
-    assert calls[0][1] == "0 4 * * *"
-    plist = tmp_path / "Library" / "LaunchAgents" / \
-            "com.schwab-cli.scheduler.plist"
-    assert plist.exists()
+# `dataset cron install` was retired in the server-jobs cutover — it is now a
+# deprecated no-op that does NOT install the scheduler plist. The new contract is
+# covered by tests/test_dataset_cron_deprecated.py; the former
+# test_cron_install_writes_scheduler_plist was removed accordingly.
 
 
 def test_cron_uninstall_sweeps_all(runner, monkeypatch, tmp_path):

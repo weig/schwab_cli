@@ -11,6 +11,7 @@ from schwab_cli.commands import doctor as doctor_cmd
 from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
+from schwab_cli.commands import jobs as jobs_cmd
 from schwab_cli.commands import notify as notify_cmd
 from schwab_cli.commands import performance as performance_cmd
 from schwab_cli.commands import option as option_cmd
@@ -423,6 +424,7 @@ def skew(
 
 
 app.add_typer(dataset_cmd.app, name="dataset")
+app.add_typer(jobs_cmd.app, name="jobs")
 
 
 watch_app = typer.Typer(

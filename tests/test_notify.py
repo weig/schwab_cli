@@ -278,3 +278,33 @@ def test_from_file_loads_default_path(tmp_path, monkeypatch):
 def test_slack_send_raises_not_yet_supported():
     with pytest.raises(slack_channel.SlackNotYetSupported):
         slack_channel.send(webhook_url="https://x", text="y")
+
+
+# ---- config-dir isolation (regression: notify must honor SCHWAB_CLI_CONFIG_DIR
+#      so tests / e2e never load the operator's real notification.json) --------
+
+
+def test_load_honors_config_dir_env_inert_when_absent(tmp_path, monkeypatch):
+    """With SCHWAB_CLI_CONFIG_DIR set and no notification.json there, load()
+    yields an unconfigured (inert) config — emit() will never send."""
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
+    from schwab_cli.notify import config as nc
+
+    assert nc.default_path() == tmp_path / "notification.json"
+    cfg = nc.load()
+    assert cfg.telegram.configured is False
+    assert cfg.any_configured is False
+
+
+def test_load_honors_config_dir_env_reads_tmp_file(tmp_path, monkeypatch):
+    """A notification.json under SCHWAB_CLI_CONFIG_DIR is what load() reads —
+    not anything under the real ~/.config."""
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
+    from schwab_cli.notify import config as nc
+
+    (tmp_path / "notification.json").write_text(json.dumps({
+        "telegram": {"bot_token": "B", "chat_id": "C", "events": ["x"]},
+    }))
+    cfg = nc.load()
+    assert cfg.telegram.configured is True
+    assert cfg.telegram.bot_token == "B"

@@ -32,7 +32,8 @@ No third-party intermediaries, no data sharing, no shared API keys.
 | Orders (place / preview / cancel / replace) | `order` | [order](doc/order.md) |
 | Notifications | `notify` (Telegram) | [notify](doc/notify.md) |
 | Server / MCP daemon | `server`, `server --enable-mcp`, `server install`, `server status`, `server register-claude` | [server](doc/server.md) · [mcp tools](doc/mcp.md) |
-| Cached dataset backend | `dataset subscribe`, `dataset sync`, `dataset cron …` | [setup](doc/setup.md) |
+| Scheduled jobs | `jobs init`, `jobs list`, `jobs status`, `jobs reload`, `jobs run`, `jobs migrate` | [jobs](doc/jobs.md) |
+| Cached dataset backend | `dataset subscribe`, `dataset sync`, `dataset update …` | [setup](doc/setup.md) |
 | Health check | `doctor` | _(prints install / MCP / auth / dataset status)_ |
 
 Output formats are uniform across commands:

@@ -29,9 +29,20 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from schwab_cli.paths import config_dir
 
-DEFAULT_PATH = Path.home() / ".config" / "schwab_cli" / "notification.json"
 DEFAULT_RATE_LIMIT_SECONDS = 300
+
+
+def default_path() -> Path:
+    """The notification config path under the resolved config dir.
+
+    Resolved at call time via :func:`schwab_cli.paths.config_dir`, so it
+    honors ``SCHWAB_CLI_CONFIG_DIR`` exactly like ``config.json`` /
+    ``session.json`` / ``jobs/`` do. This is what keeps tests and e2e runs
+    that set ``SCHWAB_CLI_CONFIG_DIR`` from ever touching the operator's real
+    ``notification.json`` (and firing real alerts)."""
+    return config_dir() / "notification.json"
 
 
 @dataclass
@@ -64,7 +75,7 @@ class NotificationConfig:
 def load(path: Path | None = None) -> NotificationConfig:
     """Load notification settings from disk. Missing file or empty
     JSON yields an all-defaults config (nothing configured)."""
-    target = path if path is not None else DEFAULT_PATH
+    target = path if path is not None else default_path()
     if not target.exists():
         return NotificationConfig()
     try:
@@ -93,7 +104,7 @@ def load(path: Path | None = None) -> NotificationConfig:
 def save(cfg: NotificationConfig, path: Path | None = None) -> Path:
     """Write the config to disk atomically with 0600 perms. Returns
     the path written to (useful when the default is picked up)."""
-    target = path if path is not None else DEFAULT_PATH
+    target = path if path is not None else default_path()
     target.parent.mkdir(parents=True, exist_ok=True)
 
     payload: dict[str, object] = {}

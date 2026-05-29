@@ -64,11 +64,19 @@ def _future_session() -> "Session":
 # Shared mock setup for the happy path
 # ---------------------------------------------------------------------------
 
-def _patch_happy_path(monkeypatch):
+def _patch_happy_path(monkeypatch, tmp_path):
     """Patch cfg/session present, MCP server, run_loop, asyncio.run.
 
     Returns a dict of recording structures the tests inspect.
+
+    Isolation: points ``SCHWAB_CLI_CONFIG_DIR`` at ``tmp_path`` so the
+    Phase-3 job scheduler startup (reconcile/apply_reload/write_pidfile,
+    ``jobs/.current/state.json``) writes into the tmp dir instead of the
+    real ``~/.config/schwab_cli``. ``paths.config_dir()`` reads this env
+    var dynamically and ``runtime.jobs_dir``/``current_dir`` resolve
+    through it.
     """
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
     monkeypatch.setattr(
         "schwab_cli.session.load", lambda: _future_session()
@@ -148,39 +156,48 @@ def _patch_happy_path(monkeypatch):
 
 @pytest.mark.skipif(Session is None, reason="Session not importable")
 class TestEnableMcpHappyPath:
-    def test_run_http_invoked_with_host_port(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_run_http_invoked_with_host_port(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(
             enable_mcp=True, mcp_host="127.0.0.1", mcp_port=7234,
             interval_s=60,
         )
         assert rec["run_http_args"] == [("127.0.0.1", 7234)]
 
-    def test_run_http_honors_custom_host_port(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_run_http_honors_custom_host_port(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(
             enable_mcp=True, mcp_host="0.0.0.0", mcp_port=9999,
             interval_s=60,
         )
         assert rec["run_http_args"] == [("0.0.0.0", 9999)]
 
-    def test_mcp_server_auth_monitor_disabled(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_mcp_server_auth_monitor_disabled(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=60)
         assert rec["server_kwargs"][0]["auth_monitor_enabled"] is False
 
-    def test_maintenance_thread_started_with_stop_and_sleep(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_maintenance_thread_started_with_stop_and_sleep(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=120)
 
-        assert len(rec["threads"]) == 1
-        kwargs = rec["run_loop_kwargs"][0]
+        # Phase 3 starts a SECOND daemon thread (the job scheduler) on top
+        # of the maintenance thread.
+        assert len(rec["threads"]) == 2
+        # Identify the maintenance run_loop call by its keyword shape rather
+        # than positional index.
+        maint = [
+            kw for kw in rec["run_loop_kwargs"]
+            if {"stop", "sleep", "interval_s"} <= kw.keys()
+        ]
+        assert len(maint) == 1
+        kwargs = maint[0]
         assert callable(kwargs["stop"])
         assert callable(kwargs["sleep"])
         assert kwargs["interval_s"] == 120
 
-    def test_maintenance_thread_is_daemon_and_joined(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_maintenance_thread_is_daemon_and_joined(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=60)
 
         thread = rec["threads"][0]
@@ -189,15 +206,15 @@ class TestEnableMcpHappyPath:
         # the thread has finished and the stop flag was set.
         assert not thread.is_alive()
 
-    def test_stop_event_set_on_return(self, monkeypatch):
+    def test_stop_event_set_on_return(self, monkeypatch, tmp_path):
         """stop callable reports True after run() returns (event set)."""
-        rec = _patch_happy_path(monkeypatch)
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=60)
         stop = rec["run_loop_kwargs"][0]["stop"]
         assert stop() is True
 
-    def test_returns_zero(self, monkeypatch):
-        _patch_happy_path(monkeypatch)
+    def test_returns_zero(self, monkeypatch, tmp_path):
+        _patch_happy_path(monkeypatch, tmp_path)
         assert server_cmd.run(enable_mcp=True, interval_s=60) == 0
 
 
@@ -230,7 +247,10 @@ class TestEnableMcpMissingPrereqs:
 # ---------------------------------------------------------------------------
 
 class TestEnableMcpFalse:
-    def test_maintenance_only_does_not_run_http(self, monkeypatch):
+    def test_maintenance_only_does_not_run_http(self, monkeypatch, tmp_path):
+        # Phase 3: even the bare maintenance path starts the job scheduler,
+        # which writes jobs/.current — isolate it to a tmp config dir.
+        monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
 
         run_http_calls: list = []
@@ -335,8 +355,8 @@ class TestSessionHandoff:
         from schwab_cli.server.maintenance import MaintenanceTick
         return MaintenanceTick(action=action, detail="x")
 
-    def test_renewed_tick_updates_client_session(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_renewed_tick_updates_client_session(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         fresh = _future_session()
         monkeypatch.setattr("schwab_cli.session.load", lambda: fresh)
         server_cmd.run(enable_mcp=True, interval_s=60)
@@ -346,8 +366,8 @@ class TestSessionHandoff:
         notifier(self._tick("renewed"))
         assert client._session is fresh
 
-    def test_renew_failed_tick_does_not_touch_client_session(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_renew_failed_tick_does_not_touch_client_session(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=60)
 
         client = rec["clients"][0]
@@ -364,19 +384,26 @@ class TestSessionHandoff:
 
 @pytest.mark.skipif(Session is None, reason="Session not importable")
 class TestEnableMcpWithRest:
-    def test_extra_routes_passed_to_run_http(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_extra_routes_passed_to_run_http(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, enable_rest=True, interval_s=60)
         extra = rec["run_http_extra_routes"]
         assert len(extra) == 1
         assert extra[0]  # non-empty list of Route objects
         paths = {r.path for r in extra[0]}
-        assert paths == {"/health", "/quote/{symbol}"}
+        # Phase 3 always mounts the /admin/jobs control-plane route in
+        # addition to the REST PoC routes.
+        assert paths == {"/health", "/quote/{symbol}", "/admin/jobs"}
 
-    def test_no_rest_means_no_extra_routes(self, monkeypatch):
-        rec = _patch_happy_path(monkeypatch)
+    def test_no_rest_still_mounts_admin_jobs(self, monkeypatch, tmp_path):
+        rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, enable_rest=False, interval_s=60)
-        assert rec["run_http_extra_routes"] == [None]
+        extra = rec["run_http_extra_routes"]
+        # Phase 3 always mounts /admin/jobs even without REST; the REST PoC
+        # routes (/health, /quote/{symbol}) must NOT be present.
+        assert len(extra) == 1
+        paths = {r.path for r in extra[0]}
+        assert paths == {"/admin/jobs"}
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +411,15 @@ class TestEnableMcpWithRest:
 # ---------------------------------------------------------------------------
 
 class TestEnableRestStandalone:
-    def _patch(self, monkeypatch):
+    def _patch(self, monkeypatch, tmp_path):
         """Patch cfg+session present, maintenance.run_loop, uvicorn,
-        asyncio.run — fully hermetic (no reliance on a real ~/.config)."""
+        asyncio.run — fully hermetic (no reliance on a real ~/.config).
+
+        Isolation: points ``SCHWAB_CLI_CONFIG_DIR`` at ``tmp_path`` so the
+        Phase-3 job scheduler startup writes ``jobs/.current`` into the tmp
+        dir, never the real ``~/.config/schwab_cli``.
+        """
+        monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
         # Future-dated session so the startup refresh-expiry check skips
         # auto-login; and cheap logbook/notifier so no disk/network.
@@ -447,30 +480,37 @@ class TestEnableRestStandalone:
         monkeypatch.setattr(server_cmd.asyncio, "run", _fake_asyncio_run)
         return rec
 
-    def test_starts_maintenance_thread_and_serves(self, monkeypatch):
-        rec = self._patch(monkeypatch)
+    def test_starts_maintenance_thread_and_serves(self, monkeypatch, tmp_path):
+        rec = self._patch(monkeypatch, tmp_path)
         result = server_cmd.run(
             enable_rest=True, rest_host="127.0.0.1", rest_port=8000,
             interval_s=90,
         )
         assert result == 0
         assert rec["served"] is True
-        assert len(rec["threads"]) == 1
-        kwargs = rec["run_loop_kwargs"][0]
+        # Phase 3 starts a SECOND daemon thread (the job scheduler) on top
+        # of the maintenance thread.
+        assert len(rec["threads"]) == 2
+        maint = [
+            kw for kw in rec["run_loop_kwargs"]
+            if {"stop", "sleep", "interval_s"} <= kw.keys()
+        ]
+        assert len(maint) == 1
+        kwargs = maint[0]
         assert callable(kwargs["stop"])
         assert callable(kwargs["sleep"])
         assert kwargs["interval_s"] == 90
 
-    def test_maintenance_thread_is_daemon_and_stop_set(self, monkeypatch):
-        rec = self._patch(monkeypatch)
+    def test_maintenance_thread_is_daemon_and_stop_set(self, monkeypatch, tmp_path):
+        rec = self._patch(monkeypatch, tmp_path)
         server_cmd.run(enable_rest=True, interval_s=60)
         thread = rec["threads"][0]
         assert thread.daemon is True
         assert not thread.is_alive()
         assert rec["run_loop_kwargs"][0]["stop"]() is True
 
-    def test_rest_host_port_passed_to_uvicorn_config(self, monkeypatch):
-        rec = self._patch(monkeypatch)
+    def test_rest_host_port_passed_to_uvicorn_config(self, monkeypatch, tmp_path):
+        rec = self._patch(monkeypatch, tmp_path)
         server_cmd.run(
             enable_rest=True, rest_host="0.0.0.0", rest_port=9100,
             interval_s=60,

@@ -15,6 +15,7 @@ dependencies = [
     "uvicorn>=0.30",
     "starlette>=0.37",
     "openpyxl>=3.1",
+    "croniter>=2.0,<3.0",
 ]
 
 [project.scripts]
