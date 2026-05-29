@@ -28,23 +28,38 @@ schwab_cli auth [--force] [--manual]
 | `--force` given | Skip refresh attempt. |
 | `--manual` given | Skip saved-credential automation. User drives the login. |
 
-## Auth flows
+## Auth flow
 
-Selected during [setup](setup.md); this command honours whichever is
-active in your config.
+There is a single auth flow, `local_server`, configured automatically by
+[setup](setup.md). (Legacy configs with the retired `client` / `code_relay`
+flows still load so non-auth commands keep working, but `schwab auth`
+refuses them and tells you to re-run `schwab setup`.)
 
-### `client`
+### `local_server`
 
-Schwab redirects to a loopback URL (e.g. `https://127.0.0.1:8443`). The
-CLI reads the OAuth code directly from the browser's address bar after
-Schwab navigates there. No external server required.
+`schwab_cli` starts a small **local HTTPS callback server** bound to the
+host/port/path of your `redirect_uri` (e.g.
+`https://127.0.0.1:19806/schwab/callback`), using the leaf certificate
+installed by [`schwab cert install`](cert.md). Schwab redirects the browser
+straight back to that loopback URL with `?code=…&state=…`, and the local
+server captures the code. No external relay, no polling — the callback lands
+directly on your machine.
 
-### `code_relay`
+- **Strict state validation.** A fresh OAuth `state` token is generated per
+  run and the callback must echo it exactly; a missing or mismatched `state`
+  is rejected (CSRF / stale-callback protection).
+- **Paste fallback.** On the human path (no auto-login, or `--manual`) a
+  paste handler races alongside the server: if the redirect can't reach the
+  loopback for some reason, paste the full redirected URL when prompted.
+- **Fail fast on a missing cert.** If the leaf certificate isn't installed,
+  `auth` fails immediately with "run `schwab cert install` first" — *before*
+  opening the browser — so you never burn a one-shot `state` token. The
+  callback port is also bound up front, so a port-in-use error surfaces
+  before login too.
 
-Your configured `redirect_uri` is a pre-deployed public relay (e.g. a
-Cloudflare Worker). The relay catches Schwab's callback and the CLI
-long-polls `code_relay_url` to retrieve the code. Use this when the
-loopback isn't reachable — remote shells, mobile-first flows, etc.
+When `auto_login_command` is configured (and `--manual` is not passed),
+[webauto-cli](https://github.com/weig/webauto-cli) drives the browser through
+the Schwab login while the local server captures the redirect.
 
 ## Environment variables
 
@@ -92,6 +107,12 @@ the CLI waits up to 5 minutes for the redirect and captures the code.
 
 ## Troubleshooting
 
+- **"local callback server needs a TLS certificate — run `schwab cert
+  install` first"** — The leaf certificate for the loopback callback isn't on
+  disk. Run [`schwab cert install`](cert.md) (macOS), then retry `auth`.
+- **"port … in use; close the other process or re-run setup"** — Another
+  process is already bound to your callback port. Find it (e.g.
+  `lsof -i :<port>`) and stop it, or re-run `schwab setup` to pick a new port.
 - **"Refresh token rejected; doing full auth"** — Normal after ~7 days
   (the refresh-token lifetime). A full auth follows automatically.
 - **"SeleniumBase UC was blocked by Akamai (Access Denied)"** —

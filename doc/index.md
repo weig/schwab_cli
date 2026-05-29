@@ -32,7 +32,7 @@ uv run schwab_cli <command> ...
 Three steps, in order:
 
 ```bash
-schwab_cli setup      # interactively capture client_id / secret / redirect_uri / auth_flow
+schwab_cli setup      # interactively capture client_id / secret / callback URL (+ local cert on macOS)
 schwab_cli auth       # OAuth browser dance; writes ~/.config/schwab_cli/session.json
 schwab_cli quote NVDA # smoke test
 ```
@@ -43,8 +43,9 @@ See [setup](setup.md) and [auth](auth.md) for the detail on each.
 
 | Command | Purpose |
 | --- | --- |
-| [`setup`](setup.md) | Capture API credentials and choose an auth flow. |
+| [`setup`](setup.md) | Capture API credentials and the OAuth callback URL. |
 | [`auth`](auth.md) | Refresh or perform a full OAuth flow, save session. |
+| [`cert`](cert.md) | Manage the local callback TLS certificate (`install` / `uninstall` / `status`). macOS only for install/uninstall. |
 | [`accounts`](accounts.md) | List every brokerage account the session has access to. |
 | [`account`](account.md) | Show one account by number or last-N-digit suffix. |
 | [`positions`](positions.md) | List positions across one or all accounts. |
@@ -81,8 +82,9 @@ Cross-cutting references:
 
 ```
 ~/.config/schwab_cli/
-├── config.json          # 0600 — client_id, secret, redirect_uri, auth_flow, creds
+├── config.json          # 0600 — client_id, secret, redirect_uri, auth_flow, optional auto-login
 ├── session.json         # 0600 — access_token + refresh_token (7-day lifetime)
+├── certs/               # local callback TLS cert (leaf + CA record); see cert.md
 ├── chromium-uc/         # persistent browser profile (Trust-Device cookie lives here)
 └── auth-debug/<ts>/     # DEBUG=1 page dumps; redacted for secrets
 ```

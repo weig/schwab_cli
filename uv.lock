@@ -1121,6 +1121,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "httpx", extra = ["http2"] },
     { name = "mcp" },
     { name = "openpyxl" },
@@ -1144,6 +1145,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "croniter", specifier = ">=2.0,<3.0" },
+    { name = "cryptography", specifier = ">=43" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.0" },
     { name = "openpyxl", specifier = ">=3.1" },

@@ -1,16 +1,16 @@
-"""Handlers that capture the OAuth ``code`` (or an OAuth ``error``, or in
-the future a full token bundle) after the user finishes login in their
-browser.
+"""Handlers and subprocess helpers for the OAuth ``code`` capture flow.
 
-Today two concrete implementations ship:
+The concrete handler that ships here is :class:`UserInputHandler` — it
+prompts on stderr, reads one line from stdin, and parses it as a bare
+code / querystring / full callback URL. It is the paste fallback that
+always joins the race in :mod:`schwab_cli.auth_flows`. The loopback
+``local_server`` handler lives in :mod:`schwab_cli.auth_callback_server`.
 
-* :class:`UserInputHandler` — prompts on stderr, reads one line from
-  stdin, parses it as a bare code / querystring / full callback URL.
-* :class:`CodeRelayHandler` — long-polls a relay endpoint that captured
-  the OAuth callback in the user's browser.
-
-Both run concurrently in :mod:`schwab_cli.auth_flows`; the first one to
-produce a valid :data:`AuthResult` wins.
+This module also hosts the auto-login subprocess plumbing used by the
+``local_server`` flow when an ``auto_login_command`` is configured:
+:class:`AutoLoginSupervisor` (keeps webauto-cli alive while the local
+callback server captures the redirect), :func:`_build_webauto_argv`, and
+:func:`_terminate`.
 
 The :class:`AuthHandler` Protocol + :data:`AuthResult` union are the
 extension seam for a future ``AuthServerHandler`` that returns a fully
@@ -32,7 +32,6 @@ import time
 import urllib.parse
 from typing import Literal, Protocol, TypedDict
 
-import httpx
 import typer
 
 
@@ -113,8 +112,8 @@ class AuthHandler(Protocol):
 
 _USER_PROMPT = (
     "Paste the code, the querystring (code=...&state=...), or the full "
-    "redirect URL.\n(If you have a relay server set up, the code will be "
-    "retrieved automatically.)\n> "
+    "redirect URL.\n(If the local callback server captures the redirect "
+    "first, this is retrieved automatically.)\n> "
 )
 
 
@@ -224,477 +223,27 @@ def _from_querystring(
 
 
 # --------------------------------------------------------------------- #
-# CodeRelayHandler                                                       #
+# Subprocess helpers (shared by AutoLoginSupervisor)                     #
 # --------------------------------------------------------------------- #
 
 
-# Per-poll connection budget — must exceed the relay's long-poll window.
-_POLL_HTTP_TIMEOUT_SECONDS = 40
-
-# Default wall-clock budget for the whole race contribution. The browser
-# is the slow part of the flow; the relay should answer within a second
-# of the user finishing login. Anything beyond ~30s usually means the
-# relay is broken or the user is stuck.
-_DEFAULT_DEADLINE_SECONDS = 30.0
-
-
-class CodeRelayHandler:
-    """Long-poll a relay URL that captured the OAuth ``?code=...`` callback.
-
-    Preserves the wire protocol from the prior implementation:
-      * 200 + querystring body → return parsed code/state.
-      * 408                    → loop (relay's long-poll window expired).
-      * httpx.ReadTimeout      → loop.
-      * 403                    → fatal (relay rejected request).
-      * other                  → fatal.
-
-    Cancellation: checks ``cancel.is_set()`` before each poll iteration.
-    """
-
-    def __init__(
-        self,
-        relay_url: str,
-        *,
-        deadline_seconds: float = _DEFAULT_DEADLINE_SECONDS,
-        http_timeout_seconds: float = _POLL_HTTP_TIMEOUT_SECONDS,
-    ):
-        self._relay_url = relay_url
-        self._deadline_seconds = deadline_seconds
-        self._http_timeout_seconds = http_timeout_seconds
-
-    def wait_for_response(
-        self,
-        *,
-        expected_state: str,
-        cancel: threading.Event | None = None,
-    ) -> AuthResult:
-        deadline = time.time() + self._deadline_seconds
-        while True:
-            if cancel is not None and cancel.is_set():
-                raise AuthHandlerError("cancelled by other handler")
-            if time.time() >= deadline:
-                raise AuthHandlerError(
-                    f"relay did not return a code within "
-                    f"{self._deadline_seconds:.0f}s"
-                )
-            try:
-                resp = httpx.get(
-                    self._relay_url, timeout=self._http_timeout_seconds,
-                )
-            except httpx.ReadTimeout:
-                continue
-            except httpx.RequestError as e:
-                raise AuthHandlerError(
-                    f"relay request failed: {type(e).__name__}: {e}"
-                ) from e
-
-            if resp.status_code == 200:
-                try:
-                    return _from_querystring(
-                        resp.text, expected_state=expected_state,
-                    )
-                except StaleCallbackError:
-                    # Relay served a callback from a prior attempt (e.g.
-                    # a browser profile that restored the old callback
-                    # tab and replayed its ?code=). The relay deletes on
-                    # read, so that stale entry is now gone — keep
-                    # polling for OUR callback instead of aborting the
-                    # whole flow. The deadline still bounds the loop.
-                    continue
-            if resp.status_code == 408:
-                continue
-            if resp.status_code == 403:
-                raise AuthHandlerError(
-                    "Relay rejected request (403). Verify code_relay_url "
-                    "and the matching redirect_uri are correct."
-                )
-            raise AuthHandlerError(
-                f"Relay returned unexpected status {resp.status_code}: "
-                f"{resp.text[:200]}"
-            )
-
-
-# --------------------------------------------------------------------- #
-# HttpNotificationListener                                               #
-# --------------------------------------------------------------------- #
-
-
-import http.server
-import json
-import queue
-import secrets
 import subprocess
 from pathlib import Path
-
-
-class HttpNotificationListener:
-    """One-shot HTTP listener for an external auto-login subprocess.
-
-    Binds ``http.server.HTTPServer`` to ``127.0.0.1:0`` (ephemeral port).
-    The endpoint URL embeds an 8-hex-char random token in the path segment
-    so a localhost port-scanner that probes ``/``, ``/oauth``, or any other
-    path gets a ``404`` — it learns nothing about the listener's purpose.
-
-    Wire protocol (single POST):
-      * ``Content-Type: application/json``.
-      * Body must include ``"kind"``: ``"code"``, ``"token"``, or ``"error"``.
-      * Body must include ``"state"`` matching ``expected_state`` (for the
-        code/error variants; token variant doesn't need state echo).
-      * On accept: respond ``200 {"ok": true}`` and shut down.
-      * On bad shape / state mismatch: respond ``400 {"error": "..."}`` and
-        keep listening (so a later legit POST can still win).
-      * Wrong method on the right path: ``405``.
-      * Any other path: ``404`` (no body).
-    """
-
-    def __init__(self) -> None:
-        self._token = secrets.token_hex(4)
-        self._result_q: queue.Queue = queue.Queue()
-        # Closure into the handler so it can push into the queue + read
-        # the path-match secret without subclassing HTTPServer.
-        listener_token = self._token
-        result_q = self._result_q
-
-        class _Handler(http.server.BaseHTTPRequestHandler):
-            # Silence the default access log; we capture failures via
-            # response codes instead.
-            def log_message(self, format, *args):  # noqa: A003 — stdlib name
-                return
-
-            def _send_json(self, status: int, body: dict) -> None:
-                payload = json.dumps(body).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def _send_empty(self, status: int) -> None:
-                """Send an empty-body response with explicit Content-Length 0.
-
-                Without ``Content-Length``, some clients see TCP reset on
-                connection close — explicit zero lets them shut down cleanly.
-                """
-                self.send_response(status)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-
-            def do_GET(self):  # noqa: N802 — stdlib name
-                self._send_empty(405)
-
-            def do_POST(self):  # noqa: N802 — stdlib name
-                if self.path != f"/oauth/{listener_token}":
-                    self._send_empty(404)
-                    return
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b""
-                try:
-                    payload = json.loads(raw.decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                    self._send_json(400, {"error": f"malformed JSON: {e}"})
-                    return
-                if not isinstance(payload, dict) or "kind" not in payload:
-                    self._send_json(400, {"error": "missing 'kind'"})
-                    return
-                # Surface the payload back to wait(); state validation
-                # happens there so the listener can keep running on bad
-                # shape but bail on state mismatch.
-                result_q.put(payload)
-                self._send_json(200, {"ok": True})
-
-        self._server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-        self._port = self._server.server_address[1]
-        self._thread = threading.Thread(
-            target=self._server.serve_forever,
-            name="AutoLoginListener",
-            daemon=True,
-        )
-        self._thread.start()
-        self._closed = False
-
-    @property
-    def transport_type(self) -> Literal["http"]:
-        return "http"
-
-    @property
-    def endpoint(self) -> str:
-        return f"http://127.0.0.1:{self._port}/oauth/{self._token}"
-
-    def wait(
-        self,
-        *,
-        expected_state: str,
-        deadline: float | None,
-        cancel: threading.Event | None,
-    ) -> AuthResult:
-        """Block until a valid POST arrives, the deadline fires, or
-        ``cancel`` is set.
-
-        Returns the parsed :class:`AuthResult`. Raises :class:`AuthHandlerError`
-        on timeout, cancellation, state mismatch, or unrecognised payload
-        shape.
-        """
-        poll_interval = 0.2  # seconds between queue polls
-        while True:
-            if cancel is not None and cancel.is_set():
-                self.close()
-                raise AuthHandlerError("cancelled by other handler")
-            if deadline is not None and time.time() >= deadline:
-                self.close()
-                raise AuthHandlerError("auto-login listener timed out")
-            try:
-                payload = self._result_q.get(timeout=poll_interval)
-            except queue.Empty:
-                continue
-            # Validate; on bad shape, keep waiting (a later legit POST can
-            # still win).
-            result = _validate_payload(payload, expected_state=expected_state)
-            if result is None:
-                continue
-            self.close()
-            return result
-
-    def close(self) -> None:
-        """Stop the server and release the port. Idempotent."""
-        if self._closed:
-            return
-        self._closed = True
-        # `shutdown()` must be called from a different thread than the
-        # one serving.
-        threading.Thread(target=self._server.shutdown, daemon=True).start()
-        try:
-            self._server.server_close()
-        except OSError:
-            pass
-
-
-def _validate_payload(payload: dict, *, expected_state: str) -> AuthResult | None:
-    """Map a parsed JSON POST body to a typed :class:`AuthResult` (or
-    raise on hard failures, return None on recoverable bad shape).
-
-    Returns:
-        * An :class:`AuthResult` (code/token/error variant) when the body
-          validates fully.
-        * ``None`` when the body is recognisable but missing fields the
-          listener should ignore (treat as if no POST happened — keep
-          waiting for a later valid one).
-
-    Raises:
-        :class:`AuthHandlerError` on state mismatch (authoritative
-        rejection — race contribution fails).
-    """
-    kind = payload.get("kind")
-    state = payload.get("state")
-    if kind == "code":
-        code = payload.get("code")
-        if not code:
-            return None  # bad shape, keep waiting
-        if state is not None and state != expected_state:
-            raise AuthHandlerError(
-                "OAuth state mismatch on notification POST — possible "
-                "CSRF, stale callback, or wrong listener."
-            )
-        return {"kind": "code", "code": code, "state": state}
-    if kind == "error":
-        err = payload.get("error")
-        if not err:
-            return None
-        if state is not None and state != expected_state:
-            raise AuthHandlerError(
-                "OAuth state mismatch on error notification."
-            )
-        return {
-            "kind": "error",
-            "error": err,
-            "error_description": payload.get("error_description") or None,
-            "state": state,
-        }
-    if kind == "token":
-        # Token variant doesn't need state echo — the upstream did the
-        # whole OAuth dance and there's no externally-visible 'code' to
-        # confuse with another flow.
-        for field in ("access_token", "refresh_token", "expires_in"):
-            if field not in payload:
-                return None  # bad shape, keep waiting
-        try:
-            expires_in = int(payload["expires_in"])
-        except (TypeError, ValueError):
-            return None
-        return {
-            "kind": "token",
-            "access_token": payload["access_token"],
-            "refresh_token": payload["refresh_token"],
-            "expires_in": expires_in,
-        }
-    # Unknown kind — keep waiting; a later legit POST can still win.
-    return None
-
-
-# --------------------------------------------------------------------- #
-# AutoLoginHandler  (race participant for auth_flow="client")            #
-# --------------------------------------------------------------------- #
-
 
 _TERMINATE_GRACE_SECONDS = 5.0
 
 
-class AutoLoginHandler:
-    """Spawn an external auto-login subprocess and race for its result.
-
-    For ``auth_flow="client"``: schwab_cli stands up a local HTTP listener
-    and runs the configured ``auto_login_command`` (typically a
-    ``webauto-cli`` invocation) in "remote mode", appending::
-
-        --notification-endpoint <listener URL>
-        --state <expected_state>
-        --log <stderr_log_dir>/auto_login-<ts>.stderr.log
-        -a URL=<auth_url>
-
-    webauto-cli's ``--log`` flag writes the subprocess's stderr to that
-    file (and continues to tee to the CLI's own stderr). schwab_cli no
-    longer needs an inner stderr-draining thread.
-
-    The subprocess's action script POSTs an :data:`AuthResult` to the
-    listener when the redirect URL contains the OAuth response.
-
-    Lifecycle (D5 — single cleanup point in a ``finally:`` block):
-
-      1. Listener stands up.
-      2. ``subprocess.Popen(..., stdin=DEVNULL, stderr=None)``.
-         (Inherited terminal stderr — webauto writes its own log via ``--log``.)
-      3. ``listener.wait(...)`` blocks until POST / deadline / cancel /
-         subprocess-died.
-      4. ``finally:`` SIGTERM → 5s → SIGKILL → ``listener.close()``.
-    """
-
-    def __init__(
-        self,
-        base_command: tuple[str, ...] | list[str],
-        *,
-        auth_url: str,
-        stderr_log_dir: Path,
-        timeout_seconds: float = 300.0,
-        listener: HttpNotificationListener | None = None,
-    ):
-        self._base_command = tuple(base_command)
-        self._auth_url = auth_url
-        self._stderr_log_dir = Path(stderr_log_dir)
-        self._timeout_seconds = timeout_seconds
-        self._listener_override = listener
-
-    def wait_for_response(
-        self,
-        *,
-        expected_state: str,
-        cancel: threading.Event | None = None,
-    ) -> AuthResult:
-        listener = self._listener_override or HttpNotificationListener()
-        argv, log_path = _build_webauto_argv(
-            base_command=self._base_command,
-            auth_url=self._auth_url,
-            extra_flags=[
-                "--notification-endpoint", listener.endpoint,
-                "--state", expected_state,
-            ],
-            stderr_log_dir=self._stderr_log_dir,
-        )
-        # Stderr disposition follows DEBUG: when --log was added (DEBUG=1),
-        # let webauto's tee flow through to schwab_cli's terminal so the
-        # user sees what webauto is doing. When --log was skipped (quiet
-        # mode), drop stderr entirely.
-        stderr = None if _debug_enabled() else subprocess.DEVNULL
-        proc = subprocess.Popen(  # noqa: S603 — argv from cfg, not shell
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=None,
-            stderr=stderr,
-        )
-        deadline = time.time() + self._timeout_seconds
-        try:
-            return _wait_for_listener_or_proc_exit(
-                listener=listener,
-                proc=proc,
-                expected_state=expected_state,
-                deadline=deadline,
-                cancel=cancel,
-                log_path=log_path,
-            )
-        finally:
-            _terminate(proc)
-            listener.close()
-
-
-def _wait_for_listener_or_proc_exit(
-    *,
-    listener: HttpNotificationListener,
-    proc: subprocess.Popen,
-    expected_state: str,
-    deadline: float,
-    cancel: threading.Event | None,
-    log_path: Path | None,
-) -> AuthResult:
-    """Loop: poll the listener AND ``proc.poll()`` so we short-circuit when
-    the subprocess dies without notifying.
-
-    ``log_path`` is informational only — it's included in error messages
-    so the user can ``cat`` the file. It's ``None`` when DEBUG is off
-    (no log file was requested), in which case error messages suggest
-    re-running with ``DEBUG=1``.
-    """
-    def _log_hint() -> str:
-        if log_path is not None:
-            return f"; see {log_path}"
-        return " (re-run with DEBUG=1 for a log file)"
-
-    poll_interval = 0.2
-    while True:
-        if cancel is not None and cancel.is_set():
-            raise AuthHandlerError("cancelled by other handler")
-        if time.time() >= deadline:
-            raise AuthHandlerError(
-                f"auto-login script timed out{_log_hint()}"
-            )
-        rc = proc.poll()
-        if rc is not None:
-            # Subprocess exited. Give the listener a moment in case a POST
-            # is in-flight (TCP race).
-            try:
-                payload = listener._result_q.get(timeout=0.5)
-            except queue.Empty:
-                raise AuthHandlerError(
-                    f"auto-login script exited rc={rc} without notifying"
-                    f"{_log_hint()}"
-                )
-            result = _validate_payload(payload, expected_state=expected_state)
-            if result is None:
-                raise AuthHandlerError(
-                    f"auto-login script exited rc={rc} with malformed "
-                    f"notification{_log_hint()}"
-                )
-            return result
-        # Subprocess still running — poll the listener for the next
-        # interval.
-        try:
-            payload = listener._result_q.get(timeout=poll_interval)
-        except queue.Empty:
-            continue
-        result = _validate_payload(payload, expected_state=expected_state)
-        if result is None:
-            continue
-        return result
-
-
 # --------------------------------------------------------------------- #
-# AutoLoginSupervisor  (side-effect for auth_flow="code_relay")          #
+# AutoLoginSupervisor  (side-effect for auth_flow="local_server")        #
 # --------------------------------------------------------------------- #
 
 
 class AutoLoginSupervisor:
-    """Spawn an external auto-login subprocess for the ``code_relay`` flow.
+    """Spawn an external auto-login subprocess for the ``local_server`` flow.
 
-    Not a race participant — :class:`CodeRelayHandler` polls the remote
-    relay; this supervisor just keeps the browser-driving subprocess
-    alive while that happens. The subprocess is invoked in
+    Not a race participant — the loopback ``LocalServerHandler`` captures
+    the redirect; this supervisor just keeps the browser-driving
+    subprocess alive while that happens. The subprocess is invoked in
     ``--no-notify`` mode so it doesn't try to POST a notification.
 
     Caller (``auth_flows.get_auth_response``) calls :meth:`start` before

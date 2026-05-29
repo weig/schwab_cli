@@ -113,12 +113,10 @@ anyone else.
    - **API products**: enable both *Accounts and Trading Production*
      and *Market Data Production*.
    - **Callback URL** (must be HTTPS — Schwab won't accept
-     `http://localhost`):
-     - `https://127.0.0.1:8443` if you'll use the local `client`
-       auth flow, **or**
-     - `https://oauth-relay.<you>.workers.dev/<uuid>/schwab_callback`
-       if you'll use the `code_relay` flow (see
-       [Login callback](#login-callback-oauth_relay)).
+     `http://localhost`): a loopback HTTPS URL such as
+     `https://127.0.0.1:19806/schwab/callback`. `schwab setup` suggests a
+     default with a random port; register whatever you use here in the
+     portal *exactly* (see [Login callback](#login-callback-local-server)).
 3. Wait for the app to be **approved** (usually same-day; status
    shows on the dashboard). Approval issues `App Key` + `Secret`.
 4. Run `schwab setup` and paste the App Key as `client_id` and the
@@ -187,43 +185,49 @@ Set `auto_login_command` in your config to invoke it:
 }
 ```
 
-Three handlers race concurrently to capture the OAuth code (paste
-fallback / auto-login subprocess / code-relay polling); first valid
-result wins, losers are cancelled. Full wire protocol and `auth_flow`
-options in [doc/auth.md](doc/auth.md).
+On the human path, a paste fallback races alongside the local callback
+server; with `auto_login_command` set, the subprocess drives the browser
+while the local server captures the redirect. Full details in
+[doc/auth.md](doc/auth.md).
 
 **Credentials never live in `schwab_cli` config** — they belong in
 webauto's encrypted env file. See `webauto-cli secrets keygen`.
 
-### Login callback (oauth_relay)
+### Login callback (local server)
 
 Schwab requires a pre-registered **HTTPS** redirect URI and won't accept
-`http://localhost`. To get the OAuth `code` back to your CLI without
-shipping certificates, point Schwab at a public relay.
+`http://localhost`. `schwab_cli` gets the OAuth `code` back by running a tiny
+local HTTPS server on `127.0.0.1` — Schwab redirects the browser straight
+back to it. No public relay, no polling.
 
-The reference implementation is
-**[oauth-relay](https://github.com/weig/oauth_relay)** — a tiny
-Cloudflare Worker that:
+1. Register a loopback HTTPS callback in the developer portal, e.g.
+   `https://127.0.0.1:19806/schwab/callback`. `schwab setup` defaults to one
+   with a random port; whatever you pick must match the portal exactly.
+2. Because the browser must trust an HTTPS server on `127.0.0.1`, a one-time
+   local root CA is installed into the macOS System keychain. `schwab setup`
+   does this for you (asking for your login/sudo password once) when the
+   Callback URL is loopback HTTPS; you can also run it directly:
 
-1. Accepts Schwab's redirect at a fixed public URL
-   (`https://<your-worker>.workers.dev/<uuid>/schwab_callback?code=…`).
-2. Holds the `code` for a few seconds.
-3. Hands it to whichever `schwab auth` invocation is currently
-   long-polling it.
+   ```bash
+   schwab cert install      # trust the local CA (macOS; asks for sudo once)
+   schwab cert status       # CA trusted? leaf present? valid-until
+   schwab cert uninstall    # remove it cleanly
+   ```
 
-Configure once:
+The resulting config is just:
 
 ```json
 {
-  "auth_flow": "code_relay",
-  "redirect_uri": "https://oauth-relay.<you>.workers.dev/<uuid>/schwab_callback",
-  "code_relay_url": "https://oauth-relay.<you>.workers.dev/<uuid>/wait"
+  "auth_flow": "local_server",
+  "redirect_uri": "https://127.0.0.1:19806/schwab/callback"
 }
 ```
 
-Alternative `auth_flow="client"` stands up a local HTTP listener
-instead — pick this if you'd rather not run a worker. See
-[doc/auth.md](doc/auth.md) for the trade-offs.
+At `auth` time the server captures `?code=…&state=…` with strict `state`
+validation; a paste fallback remains for the human path. If the certificate
+isn't installed, `auth` fails fast with "run `schwab cert install` first"
+before opening the browser. macOS only for now. See
+[doc/auth.md](doc/auth.md) and [doc/cert.md](doc/cert.md).
 
 ---
 
