@@ -14,7 +14,7 @@ schwab_cli setup [--dry-run]
 
 | Flag | Purpose |
 | --- | --- |
-| `--dry-run` | Run the prompts but print the resulting JSON to stdout instead of writing the file. Useful for previewing a change or generating a config snippet without touching the real file. |
+| `--dry-run` | Run the prompts but print the resulting JSON to stdout instead of writing the file. Useful for previewing a change or generating a config snippet without touching the real file. Skips the certificate-install step. |
 
 ## What it asks for
 
@@ -22,16 +22,31 @@ schwab_cli setup [--dry-run]
 | --- | --- |
 | Client ID | From the Schwab developer portal for your app. |
 | Client Secret | From the Schwab developer portal. Hidden on entry. |
-| Redirect URI | Exactly as registered in the developer portal (trailing slash matters). |
-| Auth flow | `client` (loopback) or `code_relay` (public relay). See [auth](auth.md). |
-| Code Relay URL | Only when `auth_flow=code_relay`. The relay's `/wait` endpoint. |
-| Auto-login credentials | Optional — enables `auth --force` without manual browser input. Password supports `op://` 1Password references. |
+| Callback URL | The redirect URI you registered in the developer portal, exactly as registered (trailing slash matters). Recommended: a loopback HTTPS callback like `https://127.0.0.1:PORT/schwab/callback`. Defaults to `https://127.0.0.1:<random port>/schwab/callback`. See [auth](auth.md). |
+| Auto-login command | Optional — an external subprocess (e.g. [webauto-cli](https://github.com/weig/webauto-cli)) that drives the browser so `auth --force` runs hands-off. Parsed with shell quoting. |
+| Auto-login timeout | Only when an auto-login command is configured. Seconds to wait for the subprocess (default `300`). |
 
-## Auth flow selection
+There is no longer an "auth flow" menu or a "Code Relay URL" prompt — the
+single supported flow is `local_server` and it is set automatically.
 
-The prompt is arrow-key-navigable in an interactive terminal, or a
-numbered menu when stdin is piped (tests, scripts). Each option shows a
-one-paragraph description so you don't need to dig through docs.
+## Local callback certificate
+
+When the Callback URL is a **loopback HTTPS** URL (host `127.0.0.1`,
+`localhost`, or `::1`), `setup` prints a notice and runs the equivalent of
+[`schwab cert install`](cert.md): it installs a one-time, name-constrained
+local root CA into the **macOS System keychain** so the browser trusts the
+local callback server at auth time.
+
+- You will be asked for your **login (sudo) password** once, to add the CA
+  to the System keychain.
+- A **non-loopback** Callback URL skips this step (no local server is run).
+- A **non-interactive** session (stdin is not a TTY) skips the install with a
+  hint to run `schwab cert install` later before authenticating.
+- If the certificate install **fails**, setup warns but still writes the
+  config — you can run `schwab cert install` before your first `auth`.
+
+macOS only for now. See [cert](cert.md) for the full trust model and how to
+uninstall cleanly.
 
 ## Example session (sanitised)
 
@@ -42,34 +57,24 @@ Config: /home/user/.config/schwab_cli/config.json
 Client ID: your_client_id_here
 Client Secret: ****
 
-Redirect URI: https://127.0.0.1:8443
+  (Recommended: a loopback HTTPS callback like https://127.0.0.1:PORT/schwab/callback — schwab_cli captures the redirect locally.)
+Callback URL [https://127.0.0.1:19806/schwab/callback]:
 
-Auth flow — how the CLI captures the OAuth `code`:
+Configure auto-login subprocess (e.g. webauto-cli)? [y/N]: n
 
-  1. client
-     Schwab redirects to your loopback redirect_uri.
-     The CLI reads the OAuth code straight from the browser's URL bar.
-     No external server required.
+This callback runs a local HTTPS server on 127.0.0.1; a one-time root certificate may be installed so the browser trusts it.
 
-  2. code_relay
-     Your redirect_uri points to a pre-deployed public relay.
-     The relay catches the callback and the CLI polls it for the OAuth code.
-     Use this when the loopback redirect isn't reachable (remote shells,
-     mobile login, etc.).
-
-Auth flow (name or number) [client]: 1
-
-Enable automatic login? [y/N]: y
-Username: demo@example.com
-Password: ****
+Auth uses a local callback: schwab_cli starts a tiny HTTPS server on 127.0.0.1 to receive the OAuth redirect.
+This needs a one-time root certificate for 127.0.0.1 in your System keychain — you'll be asked for your login password next.
+Password:
 
 Saved to /home/user/.config/schwab_cli/config.json.
-Auto-login: enabled
+Auto-login: disabled
 ```
 
 ## `--dry-run`
 
-Same prompts, different finish:
+Same prompts, different finish — and the certificate-install step is skipped:
 
 ```
 --- dry-run: would write /home/user/.config/schwab_cli/config.json ---
@@ -77,24 +82,25 @@ Same prompts, different finish:
   "version": 1,
   "client_id": "your_client_id_here",
   "client_secret": "your_secret_here",
-  "redirect_uri": "https://127.0.0.1:8443",
-  "auth_flow": "client",
-  "username": "demo@example.com",
-  "password": "op://Personal/Schwab/password"
+  "redirect_uri": "https://127.0.0.1:19806/schwab/callback",
+  "auth_flow": "local_server"
 }
 --- not saved ---
-Auto-login: enabled (dry-run)
+Auto-login: disabled (dry-run)
 ```
 
-Nothing is written to disk.
+When auto-login is enabled, the payload also carries `auto_login_command`
+(a list of argv tokens) and `auto_login_timeout_seconds`. Nothing is written
+to disk under `--dry-run`.
 
 ## Scripted preview
 
 Point at an isolated path with `SCHWAB_CLI_CONFIG` — never risks
-overwriting the real config:
+overwriting the real config. With `--dry-run` no certificate is installed,
+so this is safe to run unattended:
 
 ```bash
 export SCHWAB_CLI_CONFIG=/tmp/preview.json
-printf 'cid\ncsec\nhttps://127.0.0.1:8443\n1\nn\n' | schwab_cli setup --dry-run
+printf 'cid\ncsec\nhttps://127.0.0.1:19806/schwab/callback\nn\n' | schwab_cli setup --dry-run
 unset SCHWAB_CLI_CONFIG
 ```
