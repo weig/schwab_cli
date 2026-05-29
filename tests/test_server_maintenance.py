@@ -195,11 +195,17 @@ class TestRunOnceFailurePaths:
 
         assert tick.action == "renew_failed"
 
-    def test_token_failed_on_session_expired(self, monkeypatch):
-        """get_session raising SessionExpired → action == 'token_failed', no escape."""
+    def test_token_failed_when_mint_and_fallback_both_fail(self, monkeypatch):
+        """get_session keeps raising SessionExpired across all retries AND the
+        full-auth fallback also raises → action == 'token_failed', no escape.
+
+        (New contract: token_failed only after retries are exhausted *and*
+        the auto-login fallback fails — see test_*_fallback_recovers for the
+        recovery path.)"""
         from schwab_cli.api.client import SessionExpired
 
         good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
+        full_auth_calls = []
 
         monkeypatch.setattr("schwab_cli.session.load", lambda: good_ttl)
         with pytest.MonkeyPatch.context() as mp:
@@ -207,16 +213,23 @@ class TestRunOnceFailurePaths:
                 "schwab_cli.service.auth.get_session",
                 lambda cfg: (_ for _ in ()).throw(SessionExpired("expired")),
             )
+
+            def _failing_full_auth(*a, **k):
+                full_auth_calls.append(1)
+                raise RuntimeError("fallback re-auth failed")
+
             mp.setattr(
-                "schwab_cli.auth_flows.perform_full_auth",
-                lambda *a, **k: None,  # must not be called
+                "schwab_cli.auth_flows.perform_full_auth", _failing_full_auth,
             )
-            tick = run_once(_CFG, now=lambda: _NOW)
+            tick = run_once(
+                _CFG, now=lambda: _NOW, retry_sleep=lambda _s: None,
+            )
 
         assert tick.action == "token_failed"
         assert isinstance(tick.detail, str)
+        assert full_auth_calls == [1], "fallback must be attempted once"
 
-    def test_token_failed_does_not_propagate_session_expired(self, monkeypatch):
+    def test_token_failed_does_not_propagate(self, monkeypatch):
         from schwab_cli.api.client import SessionExpired
 
         good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
@@ -229,17 +242,20 @@ class TestRunOnceFailurePaths:
             )
             mp.setattr(
                 "schwab_cli.auth_flows.perform_full_auth",
-                lambda *a, **k: None,
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")),
             )
             # Must not raise:
-            tick = run_once(_CFG, now=lambda: _NOW)
+            tick = run_once(
+                _CFG, now=lambda: _NOW, retry_sleep=lambda _s: None,
+            )
 
         assert tick.action == "token_failed"
 
     def test_token_path_service_error_does_not_crash_loop(self, monkeypatch):
         """get_session raising NotAuthenticated (a ServiceError, not
-        SessionExpired) must also be caught → 'token_failed', not a crash.
-        Regression for the daemon-resilience fix."""
+        SessionExpired) must also be caught and, with a failing fallback,
+        surface as 'token_failed' — not a crash. Regression for daemon
+        resilience."""
         from schwab_cli.service.auth import NotAuthenticated
 
         good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
@@ -252,12 +268,108 @@ class TestRunOnceFailurePaths:
             )
             mp.setattr(
                 "schwab_cli.auth_flows.perform_full_auth",
-                lambda *a, **k: None,
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")),
             )
             # Must not raise:
-            tick = run_once(_CFG, now=lambda: _NOW)
+            tick = run_once(
+                _CFG, now=lambda: _NOW, retry_sleep=lambda _s: None,
+            )
 
         assert tick.action == "token_failed"
+
+    # ---- new behavior: retry-before-alert + auto-login fallback ----------
+
+    def test_transient_failure_then_success_is_token_ensured(self, monkeypatch):
+        """A transient SessionExpired that clears on a retry yields
+        'token_ensured' — NO failure alert, NO full-auth fallback."""
+        from schwab_cli.api.client import SessionExpired
+
+        good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
+        calls = {"get_session": 0, "full_auth": 0}
+        sleeps: list[float] = []
+
+        monkeypatch.setattr("schwab_cli.session.load", lambda: good_ttl)
+
+        def _flaky_get_session(cfg):
+            calls["get_session"] += 1
+            if calls["get_session"] == 1:
+                raise SessionExpired("transient blip")
+            return good_ttl  # second attempt succeeds
+
+        def _full_auth(*a, **k):
+            calls["full_auth"] += 1
+            return good_ttl
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("schwab_cli.service.auth.get_session", _flaky_get_session)
+            mp.setattr("schwab_cli.auth_flows.perform_full_auth", _full_auth)
+            tick = run_once(
+                _CFG, now=lambda: _NOW, retry_sleep=sleeps.append,
+            )
+
+        assert tick.action == "token_ensured"
+        assert calls["get_session"] == 2, "should retry once then succeed"
+        assert calls["full_auth"] == 0, "fallback must NOT fire on recovery"
+        assert sleeps == [pytest.approx(2.0)], "one backoff between attempts"
+
+    def test_persistent_failure_recovers_via_fallback_is_renewed(self, monkeypatch):
+        """get_session fails every retry but the full-auth fallback succeeds →
+        action == 'renewed' (recovery, not a failure alert)."""
+        from schwab_cli.api.client import SessionExpired
+
+        good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
+        renewed = _session_with_refresh_ttl(DEFAULT_INTERVAL_S * 20)
+        calls = {"get_session": 0, "full_auth": 0}
+
+        monkeypatch.setattr("schwab_cli.session.load", lambda: good_ttl)
+
+        def _always_expired(cfg):
+            calls["get_session"] += 1
+            raise SessionExpired("dead refresh")
+
+        def _full_auth(*a, **k):
+            calls["full_auth"] += 1
+            return renewed
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("schwab_cli.service.auth.get_session", _always_expired)
+            mp.setattr("schwab_cli.auth_flows.perform_full_auth", _full_auth)
+            tick = run_once(
+                _CFG, now=lambda: _NOW, retry_sleep=lambda _s: None,
+            )
+
+        assert tick.action == "renewed", "fallback recovery surfaces as renewed"
+        assert calls["get_session"] == 3, "exhausts the 3 default attempts"
+        assert calls["full_auth"] == 1, "fallback fires exactly once"
+
+    def test_ensure_attempts_is_configurable(self, monkeypatch):
+        """ensure_attempts controls how many times get_session is tried."""
+        from schwab_cli.api.client import SessionExpired
+
+        good_ttl = _session_with_refresh_ttl(DEFAULT_INTERVAL_S + 1)
+        calls = {"get_session": 0}
+        sleeps: list[float] = []
+
+        monkeypatch.setattr("schwab_cli.session.load", lambda: good_ttl)
+
+        def _always_expired(cfg):
+            calls["get_session"] += 1
+            raise SessionExpired("dead")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("schwab_cli.service.auth.get_session", _always_expired)
+            mp.setattr(
+                "schwab_cli.auth_flows.perform_full_auth",
+                lambda *a, **k: good_ttl,
+            )
+            run_once(
+                _CFG, now=lambda: _NOW, ensure_attempts=5,
+                retry_sleep=sleeps.append,
+            )
+
+        assert calls["get_session"] == 5
+        # 5 attempts → 4 backoffs (one between each pair, none after the last).
+        assert len(sleeps) == 4
 
 
 class TestMaintenanceTickDataclass:
@@ -492,9 +604,10 @@ class TestRunOnceNotifier:
                 "schwab_cli.service.auth.get_session",
                 lambda cfg: (_ for _ in ()).throw(SessionExpired("dead")),
             )
+            # Fallback also fails → a genuine token_failed tick fires.
             mp.setattr(
                 "schwab_cli.auth_flows.perform_full_auth",
-                lambda *a, **k: good,
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")),
             )
 
             notified = []
@@ -502,6 +615,7 @@ class TestRunOnceNotifier:
                 _CFG,
                 now=lambda: _NOW,
                 notifier=lambda tick: notified.append(tick),
+                retry_sleep=lambda _s: None,
             )
 
         assert len(notified) == 1
