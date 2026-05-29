@@ -81,9 +81,16 @@ def flatten_chain(raw: dict) -> tuple[list[dict], list[dict]]:
             for _strike, rows in (strike_map or {}).items():
                 for row in rows or []:
                     iv_pct = row.get("volatility")
+                    # Schwab returns -999.0 in `volatility` as an "IV
+                    # unavailable" sentinel (holidays / illiquid snapshots).
+                    # Treat any non-positive value as missing so downstream
+                    # `iv is not None` guards skip it instead of storing -9.99.
                     iv = (
                         iv_pct / 100.0
-                        if isinstance(iv_pct, (int, float)) else None
+                        if isinstance(iv_pct, (int, float))
+                        and math.isfinite(iv_pct)
+                        and iv_pct > 0
+                        else None
                     )
                     contract = {
                         "side":         side,

@@ -695,7 +695,8 @@ def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
         with vol_history.connect() as conn:
             recent = conn.execute(
                 "SELECT atm_iv_30d, atm_iv FROM vol_snapshots "
-                "WHERE symbol = ? ORDER BY captured_at_ms DESC LIMIT 1",
+                "WHERE symbol = ? AND atm_iv > 0 "
+                "ORDER BY captured_at_ms DESC LIMIT 1",
                 (arguments["symbol"],),
             ).fetchone()
             if recent is None:

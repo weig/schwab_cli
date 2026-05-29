@@ -230,3 +230,112 @@ def test_session_expired_on_history_propagates(env):
     ):
         with pytest.raises(SessionExpired):
             VolService().get_vol("NVDA", no_record=True)
+
+
+# ---- _compute_ivp_state: defense-in-depth against non-positive IVs ----
+#
+# Even if the read path is already filtered, _compute_ivp_state must
+# defensively discard any series entry with iv <= 0 before computing
+# range_min / range_max / sample_size / observed / synthetic.
+#
+# This ensures a stale bad row that reaches this layer (e.g. from a
+# synthetic backfill or a future code path) cannot corrupt the output.
+
+
+def test_compute_ivp_state_excludes_sentinel_from_range_and_count():
+    """_compute_ivp_state must drop (-9.99, 'observed') and only use
+    positive iv values for range_min, range_max, and sample_size."""
+    from schwab_cli.service.vol import _compute_ivp_state
+    from schwab_cli.storage.vol_history import SOURCE_OBSERVED, SOURCE_SYNTHETIC
+
+    # Mix: one stored-sentinel value and three valid observed values.
+    # The sentinel is the minimum numerically — range_min must NOT be -9.99.
+    series_tagged = [
+        (-9.99, SOURCE_OBSERVED),   # stored form of the -999.0 sentinel
+        (0.25,  SOURCE_OBSERVED),
+        (0.30,  SOURCE_OBSERVED),
+        (0.35,  SOURCE_SYNTHETIC),
+    ]
+    result = _compute_ivp_state(
+        series_tagged=series_tagged,
+        today_iv=0.28,
+        lookback=252,
+    )
+
+    # range_min must be the smallest POSITIVE value (0.25), not -9.99.
+    assert result["range_min"] == pytest.approx(0.25)
+    # range_max must reflect valid values only.
+    assert result["range_max"] == pytest.approx(0.35)
+    # The bad row must not count toward sample_size.
+    assert result["sample_size"] == 3
+    # Observed count: only the 2 good observed rows (0.25, 0.30).
+    assert result["observed"] == 2
+    # Synthetic count: 1 (0.35).
+    assert result["synthetic"] == 1
+
+
+def test_compute_ivp_state_excludes_zero_iv_from_range():
+    """Zero IV is also non-positive and must be dropped."""
+    from schwab_cli.service.vol import _compute_ivp_state
+    from schwab_cli.storage.vol_history import SOURCE_OBSERVED
+
+    series_tagged = [
+        (0.0,  SOURCE_OBSERVED),   # zero IV — must be excluded
+        (0.20, SOURCE_OBSERVED),
+        (0.22, SOURCE_OBSERVED),
+    ]
+    result = _compute_ivp_state(
+        series_tagged=series_tagged,
+        today_iv=0.21,
+        lookback=252,
+    )
+
+    assert result["range_min"] == pytest.approx(0.20)
+    assert result["range_max"] == pytest.approx(0.22)
+    assert result["sample_size"] == 2
+    assert result["observed"] == 2
+
+
+def test_compute_ivp_state_all_valid_entries_unchanged():
+    """When all series entries are positive, behavior is unchanged."""
+    from schwab_cli.service.vol import _compute_ivp_state
+    from schwab_cli.storage.vol_history import SOURCE_OBSERVED
+
+    series_tagged = [
+        (0.20, SOURCE_OBSERVED),
+        (0.25, SOURCE_OBSERVED),
+        (0.30, SOURCE_OBSERVED),
+    ]
+    result = _compute_ivp_state(
+        series_tagged=series_tagged,
+        today_iv=0.22,
+        lookback=252,
+    )
+
+    assert result["range_min"] == pytest.approx(0.20)
+    assert result["range_max"] == pytest.approx(0.30)
+    assert result["sample_size"] == 3
+
+
+def test_compute_ivp_state_only_sentinel_entries_yields_insufficient():
+    """If every entry is non-positive, the result must be 'insufficient'
+    with None range_min / range_max and sample_size == 0."""
+    from schwab_cli.service.vol import _compute_ivp_state
+    from schwab_cli.storage.vol_history import SOURCE_OBSERVED
+
+    series_tagged = [
+        (-9.99, SOURCE_OBSERVED),
+        (0.0,   SOURCE_OBSERVED),
+        (-5.0,  SOURCE_OBSERVED),
+    ]
+    result = _compute_ivp_state(
+        series_tagged=series_tagged,
+        today_iv=0.28,
+        lookback=252,
+    )
+
+    assert result["state"] == "insufficient"
+    assert result["value"] is None
+    assert result["sample_size"] == 0
+    assert result["range_min"] is None
+    assert result["range_max"] is None

@@ -335,6 +335,7 @@ def _load_atm_iv(
             WHERE symbol IN ({placeholders})
               AND captured_at_ms >= ?
               AND captured_at_ms < ?
+              AND atm_iv > 0
             ORDER BY symbol, captured_at_ms
             """,
             (*underlyings, start_ms, end_ms),
