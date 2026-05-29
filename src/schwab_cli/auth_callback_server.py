@@ -1,13 +1,11 @@
 """A local HTTPS (or, in tests, HTTP) callback server that captures the
 OAuth ``?code=...&state=...`` redirect in the user's browser.
 
-This is the loopback counterpart to the remote relay
-(:class:`schwab_cli.auth_handlers.CodeRelayHandler`): instead of polling a
-remote endpoint, schwab_cli binds ``127.0.0.1`` directly and the IdP
-redirects the browser straight back to us.
+This is the loopback callback server (formerly the remote relay): instead
+of polling a remote endpoint, schwab_cli binds ``127.0.0.1`` directly and
+the IdP redirects the browser straight back to us.
 
-Threading model (mirrors
-:class:`schwab_cli.auth_handlers.HttpNotificationListener`):
+Threading model:
 
   * A plain single-threaded :class:`http.server.HTTPServer` serves on a
     daemon thread, so requests are serialised and a plain boolean capture

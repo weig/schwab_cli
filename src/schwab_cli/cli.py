@@ -72,8 +72,8 @@ def auth(
         help=(
             "Skip the auto-login subprocess (if configured) and drive the "
             "Schwab login yourself in the browser; paste the redirect URL "
-            "when prompted. The CodeRelayHandler (when configured) still "
-            "joins the race alongside the paste fallback."
+            "when prompted. The local callback server still joins the race "
+            "alongside the paste fallback."
         ),
     ),
     doc: bool = doc_option(),

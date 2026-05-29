@@ -31,9 +31,8 @@ def _seed_config():
     save_config(Config(
         client_id="cid",
         client_secret="csec",
-        redirect_uri="https://relay.example.com/uuid/callback",
-        auth_flow="code_relay",
-        code_relay_url="https://relay.example.com/uuid/wait",
+        redirect_uri="https://127.0.0.1:19806/schwab/callback",
+        auth_flow="local_server",
     ))
 
 

@@ -26,16 +26,20 @@ def config_path() -> Path:
     return config_dir() / "config.json"
 
 
-AUTH_FLOWS = ("code_relay", "client")
+AUTH_FLOWS = ("local_server",)
 """
 Allowed values for ``Config.auth_flow``.
 
-- ``code_relay``: schwab_cli polls a remote relay URL for the captured OAuth
-  ``code``. Used when ``redirect_uri`` points at a public endpoint that
-  captures and stores the callback server-side.
-- ``client``: schwab_cli stands up a local HTTP listener; the auto-login
-  subprocess (or anything else with the listener URL) POSTs the captured
-  code directly to it.
+- ``local_server``: schwab_cli binds a loopback HTTPS callback server on
+  ``127.0.0.1`` and the IdP redirects the browser straight back to it.
+  This is the only supported flow.
+"""
+
+_LEGACY_FLOWS = ("code_relay", "client")
+"""
+Retired ``auth_flow`` values that :func:`load` still tolerates so existing
+on-disk configs keep loading (non-auth commands stay usable). Auth itself
+defers a hard failure for these in :func:`schwab_cli.auth_flows.get_auth_response`.
 """
 
 
@@ -44,8 +48,7 @@ class Config:
     client_id: str
     client_secret: str
     redirect_uri: str
-    auth_flow: str = "code_relay"
-    code_relay_url: str | None = None
+    auth_flow: str = "local_server"
     auto_login_command: tuple[str, ...] | None = None
     auto_login_timeout_seconds: int = 300
     version: int = 1
@@ -64,8 +67,6 @@ class Config:
             "redirect_uri": self.redirect_uri,
             "auth_flow": self.auth_flow,
         }
-        if self.code_relay_url is not None:
-            payload["code_relay_url"] = self.code_relay_url
         if self.auto_login_command is not None:
             payload["auto_login_command"] = list(self.auto_login_command)
             payload["auto_login_timeout_seconds"] = self.auto_login_timeout_seconds
@@ -87,10 +88,12 @@ def load() -> Config | None:
     JSON, unsupported schema versions, or missing/invalid required fields.
 
     Unknown fields (e.g. legacy ``username`` / ``password`` from before the
-    auth refactor) are silently ignored. ``code_relay_url`` is not validated
-    here — missing-when-needed is caught at auth time in
-    ``auth_flows._build_handlers`` so non-auth commands can still load
-    a partial config.
+    auth refactor, or a legacy ``code_relay_url`` key) are silently ignored.
+
+    Legacy ``auth_flow`` values (``code_relay`` / ``client``) are tolerated
+    here so existing configs keep loading and non-auth commands stay usable;
+    auth itself rejects them with an actionable message in
+    ``auth_flows.get_auth_response``.
     """
     path = config_path()
     if not path.exists():
@@ -111,10 +114,12 @@ def load() -> Config | None:
         if required not in raw:
             raise ConfigError(f"missing required field '{required}' in {path}")
     auth_flow = raw["auth_flow"]
-    if auth_flow not in AUTH_FLOWS:
+    if auth_flow not in AUTH_FLOWS + _LEGACY_FLOWS:
         raise ConfigError(
             f"invalid auth_flow {auth_flow!r} in {path}; "
-            f"expected one of: {', '.join(AUTH_FLOWS)}"
+            f"expected {', '.join(AUTH_FLOWS)} "
+            f"(legacy {', '.join(_LEGACY_FLOWS)} are tolerated but no longer "
+            f"usable — re-run `schwab setup`)"
         )
     auto_login_command = _parse_auto_login_command(raw.get("auto_login_command"), path)
     auto_login_timeout_seconds = _parse_timeout(
@@ -125,7 +130,6 @@ def load() -> Config | None:
         client_secret=raw["client_secret"],
         redirect_uri=raw["redirect_uri"],
         auth_flow=auth_flow,
-        code_relay_url=raw.get("code_relay_url"),
         auto_login_command=auto_login_command,
         auto_login_timeout_seconds=auto_login_timeout_seconds,
         version=version,

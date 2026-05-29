@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import random
 import shlex
+import sys
 
 import typer
 
 from schwab_cli.config import (
-    AUTH_FLOWS,
     Config,
     ConfigError,
     config_path,
@@ -14,6 +15,55 @@ from schwab_cli.config import (
     mask_secret,
     save,
 )
+from schwab_cli.redirect_uri import is_loopback_https
+
+
+def _default_callback_url() -> str:
+    """Return the default loopback-HTTPS callback URL with a random port."""
+    port = random.randint(15000, 20000)  # noqa: S311 — not security-sensitive
+    return f"https://127.0.0.1:{port}/schwab/callback"
+
+
+def _maybe_install_cert(url: str) -> None:
+    """For a loopback-HTTPS callback URL, print a notice and install the
+    local root certificate so the browser accepts the loopback redirect.
+
+    No-op for non-loopback-HTTPS URLs. Skips (with a hint) when stdin is
+    not a TTY so non-interactive setup never blocks on a sudo prompt.
+    A keychain failure is surfaced as a warning rather than aborting setup.
+    """
+    if not is_loopback_https(url):
+        return
+
+    typer.echo("")
+    typer.echo(
+        "Auth uses a local callback: schwab_cli starts a tiny HTTPS server on "
+        "127.0.0.1 to receive the OAuth redirect.\n"
+        "This needs a one-time root certificate for 127.0.0.1 in your System "
+        "keychain — you'll be asked for your login password next."
+    )
+
+    if not sys.stdin.isatty():
+        typer.secho(
+            "Non-interactive session — skipping certificate install. "
+            "Run `schwab cert install` later before authenticating.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    from schwab_cli.cert.keychain import KeychainError
+    from schwab_cli.commands.cert import _build_manager
+
+    try:
+        _build_manager().install()
+    except (KeychainError, OSError) as e:
+        # A cert failure must NOT abort setup — the config still gets written;
+        # the user can `schwab cert install` before their first auth.
+        typer.secho(
+            f"Certificate install failed: {e}\n"
+            "Run `schwab cert install` later before authenticating.",
+            fg=typer.colors.YELLOW, err=True,
+        )
 
 
 def _prompt_value(
@@ -42,26 +92,6 @@ def _prompt_value(
         if existing:
             return existing
         typer.secho(f"{label} {error_suffix}", fg=typer.colors.RED, err=True)
-
-
-def _prompt_auth_flow(default: str) -> str:
-    """Prompt for ``auth_flow`` ∈ AUTH_FLOWS, re-prompting on invalid input."""
-    typer.echo("")
-    typer.echo("Auth flow (how schwab_cli captures the OAuth code):")
-    typer.echo("  code_relay  — schwab_cli polls a remote relay URL")
-    typer.echo("  client      — schwab_cli stands up a local HTTP listener")
-    while True:
-        entered = typer.prompt(
-            "Auth flow",
-            default=default,
-            show_default=True,
-        ).strip()
-        if entered in AUTH_FLOWS:
-            return entered
-        typer.secho(
-            f"Must be one of: {', '.join(AUTH_FLOWS)}.",
-            fg=typer.colors.RED, err=True,
-        )
 
 
 def _prompt_auto_login_command(
@@ -187,24 +217,17 @@ def _run(*, dry_run: bool) -> None:
         existing.client_secret if existing else None,
         sensitive=True,
     )
+    typer.echo("")
+    typer.echo(
+        "  (Recommended: a loopback HTTPS callback like "
+        "https://127.0.0.1:PORT/schwab/callback — schwab_cli captures the "
+        "redirect locally.)"
+    )
     redirect_uri = _prompt_value(
-        "Redirect URI",
-        existing.redirect_uri if existing else None,
+        "Callback URL",
+        existing.redirect_uri if existing else _default_callback_url(),
         sensitive=False,
     )
-
-    auth_flow = _prompt_auth_flow(
-        existing.auth_flow if existing else "code_relay",
-    )
-
-    code_relay_url: str | None = None
-    if auth_flow == "code_relay":
-        code_relay_url = _prompt_value(
-            "Code Relay URL",
-            existing.code_relay_url if existing else None,
-            sensitive=False,
-            hint="the URL the CLI polls for the captured OAuth code",
-        )
 
     auto_login_command = _prompt_auto_login_command(
         existing.auto_login_command if existing else None,
@@ -221,8 +244,7 @@ def _run(*, dry_run: bool) -> None:
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
-        auth_flow=auth_flow,
-        code_relay_url=code_relay_url,
+        auth_flow="local_server",
         auto_login_command=auto_login_command,
         auto_login_timeout_seconds=auto_login_timeout_seconds,
     )
@@ -240,6 +262,14 @@ def _run(*, dry_run: bool) -> None:
             "(dry-run)"
         )
         return
+
+    if is_loopback_https(redirect_uri):
+        typer.echo("")
+        typer.echo(
+            "This callback runs a local HTTPS server on 127.0.0.1; a one-time "
+            "root certificate may be installed so the browser trusts it."
+        )
+        _maybe_install_cert(redirect_uri)
 
     try:
         save(cfg)

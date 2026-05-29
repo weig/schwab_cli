@@ -6,19 +6,22 @@ stderr as a fallback), and races a set of handlers in daemon threads.
 The first handler to produce a valid :data:`AuthResult` wins; the rest
 are signalled to stop via a shared :class:`threading.Event`.
 
-Handler race composition:
+Only the ``local_server`` flow is supported. Legacy ``auth_flow`` values
+(``code_relay`` / ``client``) load fine (so non-auth commands keep
+working) but raise an actionable :class:`AuthFlowError` here.
 
-* :class:`UserInputHandler` — always present. Paste fallback.
-* :class:`AutoLoginHandler` — added when ``cfg.auth_flow == "client"``
-  and ``cfg.auto_login_command`` is set (and ``--manual`` is not passed).
-  Stands up a local HTTP listener and spawns webauto-cli in remote mode.
-* :class:`CodeRelayHandler` — added when ``cfg.auth_flow == "code_relay"``
-  and ``cfg.code_relay_url`` is set.
+Handler race composition for ``local_server``:
 
-Side-effect (not in race) for ``auth_flow == "code_relay"`` with
-``auto_login_command`` set: an :class:`AutoLoginSupervisor` spawns
+* :class:`UserInputHandler` — paste fallback. Present on the human path
+  (no ``auto_login_command``, or ``--manual``); excluded when auto-login
+  is driving the flow unattended.
+* :class:`LocalServerHandler` — binds a loopback HTTPS callback server on
+  ``127.0.0.1`` and captures the IdP redirect directly.
+
+Side-effect (not in race) when ``auto_login_command`` is set and
+``--manual`` is not passed: an :class:`AutoLoginSupervisor` spawns
 webauto-cli in ``--no-notify`` mode so the browser drives Schwab; the
-relay captures the code; ``CodeRelayHandler`` polls and wins. The
+local callback server captures the code; the handler wins. The
 supervisor is always torn down on race exit.
 
 The :class:`AuthHandler` Protocol + :data:`AuthResult` union are the
@@ -31,25 +34,51 @@ import queue
 import secrets
 import threading
 import webbrowser
+from typing import TYPE_CHECKING
 
 import typer
 
+if TYPE_CHECKING:
+    from schwab_cli.session import Session
+
+from schwab_cli.auth_callback_server import CallbackServerError, LocalServerHandler
 from schwab_cli.auth_handlers import (
     AuthHandler,
     AuthResult,
-    AutoLoginHandler,
     AutoLoginSupervisor,
-    CodeRelayHandler,
     UserInputHandler,
 )
-from schwab_cli.config import Config
+from schwab_cli.cert.keychain import MacTrustStore
+from schwab_cli.cert.manager import CertManager, LeafAbsentError
+from schwab_cli.config import AUTH_FLOWS, Config
 from schwab_cli.oauth import build_auth_url
 from schwab_cli.paths import config_dir
+from schwab_cli.redirect_uri import is_loopback_https
 
 
 class AuthFlowError(Exception):
     """Raised when the auth flow as a whole fails (e.g., bad config,
     every handler errored)."""
+
+
+def _resolve_cert_paths(redirect_uri: str) -> tuple[str, str] | tuple[None, None]:
+    """Resolve the TLS cert/key paths the local callback server needs.
+
+    * Loopback-HTTPS redirect URI → return ``(certfile, keyfile)`` for the
+      installed leaf certificate. Raises :class:`AuthFlowError` (pointing
+      at ``schwab cert install``) when the leaf is not on disk.
+    * Anything else → ``(None, None)`` (no TLS material needed).
+    """
+    if not is_loopback_https(redirect_uri):
+        return (None, None)
+    try:
+        leaf = CertManager(MacTrustStore()).leaf_paths()
+    except LeafAbsentError as e:
+        raise AuthFlowError(
+            "local callback server needs a TLS certificate — run "
+            "`schwab cert install` first."
+        ) from e
+    return (str(leaf.cert), str(leaf.key))
 
 
 def get_auth_response(cfg: Config, *, manual: bool = False) -> AuthResult:
@@ -58,36 +87,50 @@ def get_auth_response(cfg: Config, *, manual: bool = False) -> AuthResult:
     Generates a fresh OAuth ``state`` token; each handler is responsible
     for verifying it against its response.
 
+    Only the ``local_server`` flow is supported. A legacy ``auth_flow``
+    (``code_relay`` / ``client``) loads fine but fails here with an
+    actionable error directing the user to re-run ``schwab setup``.
+
     When ``cfg.auto_login_command`` is set and ``--manual`` is not passed,
-    schwab_cli additionally manages a webauto-cli subprocess:
-
-    * ``auth_flow="client"`` → :class:`AutoLoginHandler` is the race
-      participant; the local HTTP listener is what webauto-cli POSTs to.
-    * ``auth_flow="code_relay"`` → :class:`AutoLoginSupervisor` spawns
-      webauto-cli in ``--no-notify`` mode as a side-effect; the race is
-      won by :class:`CodeRelayHandler` polling the remote relay.
-
-    Either way, the subprocess is terminated on every exit path.
+    schwab_cli additionally manages a webauto-cli subprocess via an
+    :class:`AutoLoginSupervisor` (``--no-notify`` mode): the browser
+    drives Schwab and the :class:`LocalServerHandler` captures the
+    redirect. The subprocess is terminated on every exit path.
     """
+    if cfg.auth_flow not in AUTH_FLOWS:
+        raise AuthFlowError(
+            f"auth_flow {cfg.auth_flow!r} is no longer supported — "
+            "re-run `schwab setup` to switch to the local callback server."
+        )
     state = secrets.token_urlsafe(32)
     auth_url = build_auth_url(cfg, state=state)
-    # When auto-login will spawn webauto, webauto opens its own browser;
-    # don't double up. The URL is still printed so the paste fallback in
-    # ``UserInputHandler`` is usable if webauto stalls.
     auto_login_active = cfg.auto_login_command is not None and not manual
-    _open_and_print(auth_url, open_browser=not auto_login_active)
 
-    supervisor = _maybe_start_supervisor(
-        cfg, manual=manual, auth_url=auth_url, state=state,
-    )
+    # Fail fast: resolve the TLS cert and BIND the callback port BEFORE we send
+    # the user (or webauto) to the IdP. A missing cert (`cert install`) or an
+    # in-use port surfaces as a clean AuthFlowError here — not after the user
+    # has already logged in and burned the CSRF state token.
+    handlers = _build_handlers(cfg, manual=manual, auth_url=auth_url)
+
+    supervisor = None
     try:
-        handlers = _build_handlers(
-            cfg, manual=manual, auth_url=auth_url,
+        # When auto-login will spawn webauto, webauto opens its own browser;
+        # don't double up. The URL is still printed so the paste fallback in
+        # ``UserInputHandler`` is usable if webauto stalls.
+        _open_and_print(auth_url, open_browser=not auto_login_active)
+        supervisor = _maybe_start_supervisor(
+            cfg, manual=manual, auth_url=auth_url, state=state,
         )
         return _race_handlers(handlers, expected_state=state)
     finally:
         if supervisor is not None:
             supervisor.terminate()
+        # Release any bound callback port on every exit path (the winning
+        # handler self-closes, but losers / early failures must be torn down).
+        for h in handlers:
+            close = getattr(h, "close", None)
+            if callable(close):
+                close()
 
 
 def _open_and_print(auth_url: str, *, open_browser: bool = True) -> None:
@@ -119,69 +162,54 @@ def _open_and_print(auth_url: str, *, open_browser: bool = True) -> None:
 def _build_handlers(
     cfg: Config, *, manual: bool, auth_url: str,
 ) -> list[AuthHandler]:
-    """Pick which handlers join the race for this config.
+    """Pick which handlers join the race for this ``local_server`` config.
+
+    The :class:`LocalServerHandler` (loopback HTTPS callback server) is
+    always a participant; its TLS material comes from the
+    :func:`_resolve_cert_paths` seam.
 
     When auto-login is active (``auto_login_command`` set AND not
     ``--manual``), the user cannot interact with the terminal — auth is
-    running unattended (typical ``--force`` from a cron job or similar).
-    ``UserInputHandler`` is **excluded** in that case. The race is just
-    the auto-driven path:
+    running unattended (typical ``--force`` from a cron job or similar) —
+    so ``UserInputHandler`` is **excluded** and the race is the local
+    server solo (an :class:`AutoLoginSupervisor` drives webauto outside
+    the race; see :func:`_maybe_start_supervisor`).
 
-      * ``auth_flow="client"`` → :class:`AutoLoginHandler` solo
-        (its listener receives webauto's POST).
-      * ``auth_flow="code_relay"`` → :class:`CodeRelayHandler` solo
-        (an :class:`AutoLoginSupervisor` spawns webauto outside the race
-        — see :func:`_maybe_start_supervisor`).
-
-    When auto-login is NOT active (no command, or ``--manual``), the
-    race is the human-driven path:
-
-      * :class:`UserInputHandler` (paste fallback) is **always** present.
-      * :class:`CodeRelayHandler` joins when ``auth_flow="code_relay"``.
+    When auto-login is NOT active (no command, or ``--manual``), the race
+    is the human-driven path: :class:`UserInputHandler` (paste fallback)
+    plus the local callback server.
     """
+    certfile, keyfile = _resolve_cert_paths(cfg.redirect_uri)
+    try:
+        local = LocalServerHandler(
+            cfg.redirect_uri, certfile=certfile, keyfile=keyfile,
+        )
+    except CallbackServerError as e:
+        # Port-in-use or TLS-load failure → actionable AuthFlowError instead of
+        # a raw traceback surfacing through `schwab auth`.
+        raise AuthFlowError(str(e)) from e
+
     auto_login_active = cfg.auto_login_command is not None and not manual
-
     if auto_login_active:
-        handlers: list[AuthHandler] = []
-        if cfg.auth_flow == "client":
-            handlers.append(AutoLoginHandler(
-                cfg.auto_login_command,
-                auth_url=auth_url,
-                stderr_log_dir=config_dir() / "auth-debug",
-                timeout_seconds=float(cfg.auto_login_timeout_seconds),
-            ))
-        elif cfg.auth_flow == "code_relay":
-            if not cfg.code_relay_url:
-                raise AuthFlowError(
-                    "auth_flow='code_relay' requires 'code_relay_url' in config"
-                )
-            handlers.append(CodeRelayHandler(cfg.code_relay_url))
-        return handlers
-
-    # Human-driven path: paste fallback + optional relay.
-    handlers = [UserInputHandler()]
-    if cfg.auth_flow == "code_relay":
-        if not cfg.code_relay_url:
-            raise AuthFlowError(
-                "auth_flow='code_relay' requires 'code_relay_url' in config"
-            )
-        handlers.append(CodeRelayHandler(cfg.code_relay_url))
-    return handlers
+        return [local]
+    return [UserInputHandler(), local]
 
 
 def _maybe_start_supervisor(
     cfg: Config, *, manual: bool, auth_url: str, state: str,
 ) -> AutoLoginSupervisor | None:
-    """Spawn the side-effect supervisor for ``auth_flow="code_relay"``
-    with auto-login configured; otherwise return None.
+    """Spawn the side-effect supervisor for the ``local_server`` flow with
+    auto-login configured; otherwise return None.
 
-    The supervisor is responsible for keeping webauto-cli alive while
-    :class:`CodeRelayHandler` polls the relay. It never participates in
-    the race itself.
+    The supervisor keeps webauto-cli alive while the
+    :class:`LocalServerHandler` captures the redirect. It never
+    participates in the race itself.
     """
     if cfg.auto_login_command is None or manual:
         return None
-    if cfg.auth_flow != "code_relay":
+    # Defensive only: ``get_auth_response`` already rejects legacy flows before
+    # reaching here, so this guard is exercised only by direct callers/tests.
+    if cfg.auth_flow not in AUTH_FLOWS:
         return None
     sup = AutoLoginSupervisor(
         cfg.auto_login_command,
@@ -240,7 +268,7 @@ def _race_handlers(
             raise AuthFlowError(f"all auth handlers failed: {detail}")
 
 
-def perform_full_auth(cfg: Config, *, manual: bool = False):
+def perform_full_auth(cfg: Config, *, manual: bool = False) -> "Session":
     """Run a full OAuth round-trip and persist the resulting session.
 
     Wraps the get_auth_response + resolve_auth_result + save_session
