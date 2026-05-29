@@ -109,6 +109,34 @@ def _ms_to_dt(ms: int | None) -> datetime | None:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
+def _format_ohlcv_day(
+    day: str | None, *, now: datetime | None = None,
+) -> str:
+    """Render an OHLCV trading day relative to today's NY date.
+
+    Daily bars are keyed by the America/New_York trading ``day``, so freshness
+    is coverage-based: compare the stored ISO date to the current NY date and
+    report ``today`` / ``N days ago`` rather than a wall-clock write time.
+    A malformed/empty day renders ``"—"``.
+    """
+    if not day:
+        return "—"
+    now = now or datetime.now(tz=_NY_TZ)
+    try:
+        bar_date = datetime.strptime(day, "%Y-%m-%d").date()
+    except ValueError:
+        return f"latest day {day}"
+    today = now.astimezone(_NY_TZ).date()
+    delta_days = (today - bar_date).days
+    if delta_days <= 0:
+        rel = "today"
+    elif delta_days == 1:
+        rel = "1 day ago"
+    else:
+        rel = f"{delta_days} days ago"
+    return f"latest day {day} ({rel})"
+
+
 # ---- 1. Global install ------------------------------------------------
 
 
@@ -539,8 +567,13 @@ def _print_data_freshness() -> None:
         return
 
     now = datetime.now(tz=timezone.utc)
+    # OHLCV is coverage-based: daily bars are keyed by trading day, so report
+    # the latest day present (today / N days ago) rather than the write time.
+    typer.echo(
+        f"      {'OHLCV':<13} {_format_ohlcv_day(freshness.ohlcv_latest_day)}"
+    )
+    # Volatility & Account are point-in-time samples — last write is correct.
     rows = (
-        ("OHLCV", _ms_to_dt(freshness.ohlcv_ms)),
         ("Volatility", _ms_to_dt(freshness.volatility_ms)),
         ("Account", _ms_to_dt(freshness.account_ms)),
     )

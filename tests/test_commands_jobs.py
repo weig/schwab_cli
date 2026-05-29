@@ -150,7 +150,7 @@ class TestJobsRunCommand:
     """schwab jobs run <id> — CLI integration via CliRunner."""
 
     def test_run_exits_with_execute_job_return_code(self, monkeypatch, tmp_path):
-        """If execute_job returns 7, the CLI exits 7."""
+        """If the job runner returns 7, the CLI exits 7 (manual path)."""
         from typer.testing import CliRunner
         from schwab_cli.cli import app as cli_app
 
@@ -162,8 +162,10 @@ class TestJobsRunCommand:
             "schwab_cli.paths.config_dir",
             lambda: tmp_path,
         )
+        # Manual invocation (no env flag) goes through run_job_blocking.
+        monkeypatch.delenv("SCHWAB_JOBS_SCHEDULED", raising=False)
         monkeypatch.setattr(
-            "schwab_cli.commands.jobs.execute_job",
+            "schwab_cli.commands.jobs.run_job_blocking",
             lambda cfg: 7,
         )
 
@@ -172,7 +174,7 @@ class TestJobsRunCommand:
         assert result.exit_code == 7
 
     def test_run_exits_0_on_success(self, monkeypatch, tmp_path):
-        """execute_job returning 0 → CLI exits 0."""
+        """run_job_blocking returning 0 → CLI exits 0 (manual path)."""
         from typer.testing import CliRunner
         from schwab_cli.cli import app as cli_app
 
@@ -181,7 +183,10 @@ class TestJobsRunCommand:
         _write_job_file(current_dir, "ok-job", _minimal_python_payload("ok-job"))
 
         monkeypatch.setattr("schwab_cli.paths.config_dir", lambda: tmp_path)
-        monkeypatch.setattr("schwab_cli.commands.jobs.execute_job", lambda cfg: 0)
+        monkeypatch.delenv("SCHWAB_JOBS_SCHEDULED", raising=False)
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.run_job_blocking", lambda cfg: 0
+        )
 
         runner = CliRunner()
         result = runner.invoke(cli_app, ["jobs", "run", "ok-job"])
@@ -220,7 +225,7 @@ class TestJobsRunCommand:
         assert "missing-id" in output
 
     def test_run_exit_code_2_for_auth_failure(self, monkeypatch, tmp_path):
-        """execute_job returning 2 (EXIT_AUTH_FAILED) → CLI exits 2."""
+        """run_job_blocking returning 2 (EXIT_AUTH_FAILED) → CLI exits 2."""
         from typer.testing import CliRunner
         from schwab_cli.cli import app as cli_app
 
@@ -229,7 +234,10 @@ class TestJobsRunCommand:
         _write_job_file(current_dir, "auth-job", _minimal_python_payload("auth-job"))
 
         monkeypatch.setattr("schwab_cli.paths.config_dir", lambda: tmp_path)
-        monkeypatch.setattr("schwab_cli.commands.jobs.execute_job", lambda cfg: 2)
+        monkeypatch.delenv("SCHWAB_JOBS_SCHEDULED", raising=False)
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.run_job_blocking", lambda cfg: 2
+        )
 
         runner = CliRunner()
         result = runner.invoke(cli_app, ["jobs", "run", "auth-job"])
@@ -255,6 +263,131 @@ class TestJobsRunCommand:
         )
         assert "broken-job" in output
         assert "invalid config" in output
+
+
+class TestJobsRunManualReport:
+    """Manual `jobs run` (no env flag) records a run-report marker."""
+
+    @pytest.mark.parametrize(
+        "rc,expected_status",
+        [(0, "ok"), (2, "auth-failed"), (1, "failed")],
+    )
+    def test_manual_run_writes_marker_with_status(
+        self, monkeypatch, tmp_path, rc, expected_status
+    ):
+        from typer.testing import CliRunner
+        from schwab_cli.cli import app as cli_app
+        from schwab_cli.server.jobs.state import read_run_reports
+
+        current_dir = tmp_path / "jobs" / ".current"
+        current_dir.mkdir(parents=True)
+        _write_job_file(current_dir, "my-job", _minimal_command_payload("my-job"))
+
+        monkeypatch.setattr("schwab_cli.paths.config_dir", lambda: tmp_path)
+        monkeypatch.delenv("SCHWAB_JOBS_SCHEDULED", raising=False)
+        # Manual path uses run_job_blocking, not execute_job/execvp.
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.run_job_blocking", lambda cfg: rc
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(cli_app, ["jobs", "run", "my-job"])
+        assert result.exit_code == rc
+
+        reports = read_run_reports(tmp_path / "jobs" / ".current")
+        assert "my-job" in reports
+        assert reports["my-job"]["last_status"] == expected_status
+        assert reports["my-job"]["last_exit_code"] == rc
+        assert isinstance(reports["my-job"]["last_run_at"], (int, float))
+
+    def test_manual_run_uses_run_job_blocking_not_execute_job(
+        self, monkeypatch, tmp_path
+    ):
+        from typer.testing import CliRunner
+        from schwab_cli.cli import app as cli_app
+
+        current_dir = tmp_path / "jobs" / ".current"
+        current_dir.mkdir(parents=True)
+        _write_job_file(current_dir, "my-job", _minimal_command_payload("my-job"))
+
+        monkeypatch.setattr("schwab_cli.paths.config_dir", lambda: tmp_path)
+        monkeypatch.delenv("SCHWAB_JOBS_SCHEDULED", raising=False)
+
+        def _boom_execute_job(cfg):
+            raise AssertionError("manual run must NOT call execute_job")
+
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.execute_job", _boom_execute_job
+        )
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.run_job_blocking", lambda cfg: 0
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(cli_app, ["jobs", "run", "my-job"])
+        assert result.exit_code == 0
+
+    def test_manual_run_marker_failure_does_not_change_exit_code(
+        self, monkeypatch, tmp_path
+    ):
+        """A run-report write failure must never alter the job's exit code."""
+        from typer.testing import CliRunner
+        from schwab_cli.cli import app as cli_app
+
+        current_dir = tmp_path / "jobs" / ".current"
+        current_dir.mkdir(parents=True)
+        _write_job_file(current_dir, "my-job", _minimal_command_payload("my-job"))
+
+        monkeypatch.setattr("schwab_cli.paths.config_dir", lambda: tmp_path)
+        monkeypatch.delenv("SCHWAB_JOBS_SCHEDULED", raising=False)
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.run_job_blocking", lambda cfg: 4
+        )
+
+        def _boom_write(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.write_run_report", _boom_write
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(cli_app, ["jobs", "run", "my-job"])
+        assert result.exit_code == 4
+
+
+class TestJobsRunScheduled:
+    """Scheduler-spawned `jobs run` (env flag set) execvp's, writes no marker."""
+
+    def test_scheduled_run_uses_execute_job_and_no_marker(
+        self, monkeypatch, tmp_path
+    ):
+        from typer.testing import CliRunner
+        from schwab_cli.cli import app as cli_app
+        from schwab_cli.server.jobs.state import read_run_reports
+
+        current_dir = tmp_path / "jobs" / ".current"
+        current_dir.mkdir(parents=True)
+        _write_job_file(current_dir, "my-job", _minimal_command_payload("my-job"))
+
+        monkeypatch.setattr("schwab_cli.paths.config_dir", lambda: tmp_path)
+        monkeypatch.setenv("SCHWAB_JOBS_SCHEDULED", "1")
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.execute_job", lambda cfg: 0
+        )
+
+        def _boom_blocking(cfg):
+            raise AssertionError("scheduled run must NOT call run_job_blocking")
+
+        monkeypatch.setattr(
+            "schwab_cli.commands.jobs.run_job_blocking", _boom_blocking
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(cli_app, ["jobs", "run", "my-job"])
+        assert result.exit_code == 0
+        # Scheduled path records via reap, never via a marker.
+        assert read_run_reports(tmp_path / "jobs" / ".current") == {}
 
 
 # ---------------------------------------------------------------------------

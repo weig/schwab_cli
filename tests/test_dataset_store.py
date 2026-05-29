@@ -33,7 +33,10 @@ def test_read_dataset_freshness_empty_db(conn):
     """An empty DB yields all-None — MAX over no rows is NULL."""
     fresh = read_dataset_freshness(conn)
     assert fresh == DatasetFreshness(
-        ohlcv_ms=None, volatility_ms=None, account_ms=None
+        ohlcv_ms=None,
+        volatility_ms=None,
+        account_ms=None,
+        ohlcv_latest_day=None,
     )
 
 
@@ -66,6 +69,35 @@ def test_read_dataset_freshness_returns_max_per_table(conn):
     assert fresh.ohlcv_ms == 222
     assert fresh.volatility_ms == 333
     assert fresh.account_ms == 444
+    # ohlcv_latest_day is MAX(day), independent of which row wrote last.
+    assert fresh.ohlcv_latest_day == "2026-01-03"
+
+
+def test_read_dataset_freshness_latest_day_is_max_day_not_max_write(conn):
+    """ohlcv_latest_day tracks MAX(day) even when an older day wrote last.
+
+    Reproduces the operator's bug: today's bar is written at the day's start
+    (smaller captured_at_ms) yet a backfill of an OLDER day writes later. The
+    latest *day* must still be today's, decoupled from write time.
+    """
+    # Today's bar written FIRST (small captured_at_ms).
+    conn.execute(
+        "INSERT INTO ohlcv_daily "
+        "(symbol, day, open, high, low, close, volume, captured_at_ms) "
+        "VALUES ('AAPL', '2026-05-28', 1, 2, 0, 1, 10, 100)"
+    )
+    # An older day backfilled LATER (larger captured_at_ms).
+    conn.execute(
+        "INSERT INTO ohlcv_daily "
+        "(symbol, day, open, high, low, close, volume, captured_at_ms) "
+        "VALUES ('AAPL', '2026-05-01', 1, 2, 0, 1, 10, 9999)"
+    )
+
+    fresh = read_dataset_freshness(conn)
+
+    assert fresh.ohlcv_latest_day == "2026-05-28"
+    # MAX(captured_at_ms) is the older day's later backfill write.
+    assert fresh.ohlcv_ms == 9999
 
 
 def test_subscribe_equity_inserts_row(conn):

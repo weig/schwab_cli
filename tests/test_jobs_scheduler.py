@@ -617,6 +617,119 @@ def test_tick_calls_reap_enforce_fire_in_that_order(tmp_path):
     assert len(spawner.calls) == 2, "tick must reap and re-fire within the same call"
 
 
+def test_tick_ingests_pending_run_report(tmp_path):
+    """A manual run-report marker is merged into _states and persisted by tick.
+
+    Seeds a report for a job whose state has never run; after tick() the
+    in-memory state AND state.json must reflect the manual run's last_run.
+    """
+    from schwab_cli.server.jobs.state import write_run_report
+
+    clock = FakeClock(t=1_000_000.0)
+    cfg = _make_cfg("j1", enabled=False)  # disabled so fire_due never spawns
+    sched = _make_scheduler(current_dir=tmp_path, jobs=[cfg], clock=clock)
+    sched.schedule_all()
+
+    # Manual run happened externally: drop a marker the scheduler will ingest.
+    write_run_report(
+        tmp_path, "j1", last_run_at=999_999.0, last_status="ok", last_exit_code=0
+    )
+
+    sched.tick()
+
+    mem = sched.snapshot().jobs["j1"]
+    assert mem.last_run_at == pytest.approx(999_999.0)
+    assert mem.last_status == "ok"
+    assert mem.last_exit_code == 0
+
+    # Persisted by the same tick's save_state.
+    on_disk = load_state(tmp_path).jobs["j1"]
+    assert on_disk.last_run_at == pytest.approx(999_999.0)
+    assert on_disk.last_status == "ok"
+
+    # The marker was drained (consumed exactly once).
+    assert list((tmp_path / "reports").glob("*.json")) == []
+
+
+def test_tick_ingests_report_for_unknown_job_id(tmp_path):
+    """A report for a job not yet in _states creates a JobRunState entry."""
+    from schwab_cli.server.jobs.state import write_run_report
+
+    clock = FakeClock(t=1_000_000.0)
+    sched = _make_scheduler(current_dir=tmp_path, jobs=[], clock=clock)
+
+    write_run_report(
+        tmp_path, "ghost", last_run_at=42.0, last_status="failed", last_exit_code=1
+    )
+    sched.tick()
+
+    mem = sched.snapshot().jobs.get("ghost")
+    assert mem is not None
+    assert mem.last_status == "failed"
+    assert mem.last_exit_code == 1
+
+
+def test_tick_reap_overrides_older_manual_report(tmp_path):
+    """No double-count: when a job is reaped in the same tick a manual marker
+    is ingested, the scheduler's (newer) reap result wins. Ingest runs before
+    reap, so the reap unconditionally overwrites the older ingested value."""
+    from schwab_cli.server.jobs.state import write_run_report
+
+    clock = FakeClock(t=1_000_000.0)
+    spawner = FakeSpawner()
+    cfg = _make_cfg("j1")
+    sched = _make_scheduler(current_dir=tmp_path, jobs=[cfg], clock=clock, spawner=spawner)
+
+    sched.schedule_all()
+    clock.advance(400)
+    sched.fire_due()  # j1 now running
+    spawner.last_handle.set_exit_code(0)  # scheduler run will reap as ok
+
+    # An OLDER manual marker for the same job (a prior failed manual run).
+    write_run_report(
+        tmp_path, "j1", last_run_at=clock.t - 5000,
+        last_status="failed", last_exit_code=1,
+    )
+
+    sched.tick()  # ingest(old marker) -> reap(newer scheduler run)
+
+    j1 = sched.snapshot().jobs["j1"]
+    assert j1.last_status == "ok", "scheduler reap must win over the older marker"
+    assert j1.last_exit_code == 0
+    assert j1.last_run_at == pytest.approx(clock.t)  # reap time, not the marker
+
+
+def test_tick_ingest_skips_marker_without_run_time(tmp_path):
+    """A malformed marker missing last_run_at must NOT clobber a recorded run."""
+    import json
+
+    from schwab_cli.server.jobs.state import reports_dir, write_run_report
+
+    clock = FakeClock(t=1_000_000.0)
+    cfg = _make_cfg("j1", enabled=False)
+    sched = _make_scheduler(current_dir=tmp_path, jobs=[cfg], clock=clock)
+    sched.schedule_all()
+
+    # Record a good manual run first.
+    write_run_report(
+        tmp_path, "j1", last_run_at=500.0, last_status="ok", last_exit_code=0
+    )
+    sched.tick()
+    assert sched.snapshot().jobs["j1"].last_run_at == pytest.approx(500.0)
+
+    # Now drop a malformed marker (no last_run_at) and tick again.
+    rd = reports_dir(tmp_path)
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "j1.json").write_text(
+        json.dumps({"last_status": "failed", "last_exit_code": 1}), encoding="utf-8"
+    )
+    sched.tick()
+
+    j1 = sched.snapshot().jobs["j1"]
+    assert j1.last_run_at == pytest.approx(500.0), "malformed marker must not clobber"
+    assert j1.last_status == "ok"
+
+
 # ---------------------------------------------------------------------------
 # next_wakeup
 # ---------------------------------------------------------------------------

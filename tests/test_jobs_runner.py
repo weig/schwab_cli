@@ -382,3 +382,101 @@ class TestExecuteJobUnknownType:
         cfg = _command_cfg(type="bogus")
         rc = runner_mod.execute_job(cfg)
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# run_job_blocking — command dispatch (no execvp)
+# ---------------------------------------------------------------------------
+
+
+class TestRunJobBlockingCommand:
+    """run_job_blocking runs command jobs via subprocess.run, never execvp."""
+
+    def test_command_returns_subprocess_returncode(self, monkeypatch):
+        import subprocess
+
+        captured = {}
+
+        class _Completed:
+            returncode = 5
+
+        def _fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return _Completed()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        monkeypatch.setattr(runner_mod, "resolve_binary", lambda: "schwab")
+
+        cfg = _command_cfg(command=("quote", "NVDA"))
+        rc = runner_mod.run_job_blocking(cfg)
+        assert rc == 5
+        assert captured["argv"] == ["schwab", "quote", "NVDA"]
+
+    def test_command_does_not_execvp(self, monkeypatch):
+        import subprocess
+
+        def _boom_execvp(file, argv):
+            raise AssertionError("run_job_blocking must NOT execvp")
+
+        class _Completed:
+            returncode = 0
+
+        monkeypatch.setattr(runner_mod.os, "execvp", _boom_execvp)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Completed())
+        monkeypatch.setattr(runner_mod, "resolve_binary", lambda: "schwab")
+
+        cfg = _command_cfg(command=("quote", "NVDA"))
+        rc = runner_mod.run_job_blocking(cfg)
+        assert rc == 0
+
+    def test_command_oserror_returns_127(self, monkeypatch):
+        import subprocess
+
+        def _fail_run(argv, **kwargs):
+            raise OSError("no such file")
+
+        monkeypatch.setattr(subprocess, "run", _fail_run)
+        monkeypatch.setattr(runner_mod, "resolve_binary", lambda: "schwab")
+
+        cfg = _command_cfg(command=("quote", "NVDA"))
+        rc = runner_mod.run_job_blocking(cfg)
+        assert rc == 127
+
+
+class TestRunJobBlockingPython:
+    """run_job_blocking maps python outcomes exactly like execute_job."""
+
+    def test_python_success_returns_0(self, monkeypatch):
+        monkeypatch.setattr(runner_mod, "import_runner", lambda d: lambda *a, **k: None)
+        cfg = _python_cfg(runner="some.module.fn")
+        assert runner_mod.run_job_blocking(cfg) == 0
+
+    def test_python_auth_failure_returns_2(self, monkeypatch):
+        from schwab_cli.service.auth import NotAuthenticated
+
+        def _fn(*a, **k):
+            raise NotAuthenticated("nope")
+
+        monkeypatch.setattr(runner_mod, "import_runner", lambda d: _fn)
+        cfg = _python_cfg(runner="some.module.fn")
+        assert runner_mod.run_job_blocking(cfg) == 2
+
+    def test_python_generic_exception_returns_1(self, monkeypatch):
+        def _fn(*a, **k):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(runner_mod, "import_runner", lambda d: _fn)
+        cfg = _python_cfg(runner="some.module.fn")
+        assert runner_mod.run_job_blocking(cfg) == 1
+
+    def test_python_system_exit_3_returns_3(self, monkeypatch):
+        def _fn(*a, **k):
+            raise SystemExit(3)
+
+        monkeypatch.setattr(runner_mod, "import_runner", lambda d: _fn)
+        cfg = _python_cfg(runner="some.module.fn")
+        assert runner_mod.run_job_blocking(cfg) == 3
+
+    def test_unknown_type_returns_1(self):
+        cfg = _command_cfg(type="bogus")
+        assert runner_mod.run_job_blocking(cfg) == 1

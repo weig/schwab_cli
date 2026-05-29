@@ -774,6 +774,67 @@ class TestStatusPayload:
         payload = runtime_mod.status_payload(config_dir=tmp_path)
         assert payload == {"jobs": [], "server_running": False}
 
+    def test_overlays_pending_run_report(self, tmp_path):
+        """A manual run-report (no/older persisted state) surfaces immediately."""
+        from schwab_cli.server.jobs.state import write_run_report
+
+        current = tmp_path / "jobs" / ".current"
+        _write_promoted_config(current, "sync-equity")
+        # No state.json → persisted last_run_at is None. The pending marker
+        # must overlay so the manual run shows up before the daemon ingests it.
+        write_run_report(
+            current,
+            "sync-equity",
+            last_run_at=555.0,
+            last_status="ok",
+            last_exit_code=0,
+        )
+
+        payload = runtime_mod.status_payload(config_dir=tmp_path)
+        job = next(j for j in payload["jobs"] if j["id"] == "sync-equity")
+        assert job["last_run_at"] == pytest.approx(555.0)
+        assert job["last_status"] == "ok"
+        assert job["last_exit_code"] == 0
+
+    def test_stale_report_does_not_override_newer_state(self, tmp_path):
+        """A marker OLDER than persisted state must not override the state."""
+        from schwab_cli.server.jobs.state import (
+            JobRunState,
+            SchedulerState,
+            save_state,
+            write_run_report,
+        )
+
+        current = tmp_path / "jobs" / ".current"
+        _write_promoted_config(current, "sync-equity")
+        # Persisted state is newer (last_run_at=1000) than the pending marker.
+        save_state(
+            current,
+            SchedulerState(
+                jobs={
+                    "sync-equity": JobRunState(
+                        id="sync-equity",
+                        last_run_at=1000.0,
+                        last_status="ok",
+                        last_exit_code=0,
+                    )
+                },
+                updated_at=1000.0,
+            ),
+        )
+        write_run_report(
+            current,
+            "sync-equity",
+            last_run_at=500.0,  # older than persisted state
+            last_status="failed",
+            last_exit_code=1,
+        )
+
+        payload = runtime_mod.status_payload(config_dir=tmp_path)
+        job = next(j for j in payload["jobs"] if j["id"] == "sync-equity")
+        assert job["last_run_at"] == pytest.approx(1000.0)
+        assert job["last_status"] == "ok"
+
     def test_server_running_false_without_pidfile(self, tmp_path):
         assert runtime_mod.server_running(tmp_path) is False
 

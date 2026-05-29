@@ -33,6 +33,7 @@ from schwab_cli.server.jobs.runner import JobHandle
 from schwab_cli.server.jobs.state import (
     JobRunState,
     SchedulerState,
+    drain_run_reports,
     save_state,
 )
 
@@ -286,8 +287,32 @@ class JobScheduler:
                 self._timed_out.add(job_id)
                 handle.terminate()
 
+    def _ingest_run_reports(self) -> None:
+        """Merge any pending manual run-report markers into ``_states``.
+
+        Manual ``schwab jobs run`` invocations drop a marker under
+        ``<current>/reports/``; the scheduler (sole authoritative writer of
+        state.json) drains them here so a manual run's last_run is recorded
+        and not clobbered by this tick's ``save_state``.
+        """
+        reports = drain_run_reports(self._current_dir)
+        for job_id, report in reports.items():
+            run_at = report.get("last_run_at")
+            if not isinstance(run_at, (int, float)):
+                # A marker with no usable run time can't record a run; skip it
+                # rather than clobbering a valid last_run_at with None.
+                continue
+            rs = self._ensure_state(job_id)
+            self._states[job_id] = replace(
+                rs,
+                last_run_at=run_at,
+                last_status=report.get("last_status"),
+                last_exit_code=report.get("last_exit_code"),
+            )
+
     def tick(self) -> None:
-        """One scheduling cycle: reap, enforce timeouts, fire due, persist."""
+        """One scheduling cycle: ingest reports, reap, enforce timeouts, fire, persist."""
+        self._ingest_run_reports()
         self.reap()
         self.enforce_timeouts()
         self.fire_due()
