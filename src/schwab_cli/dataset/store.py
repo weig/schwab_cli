@@ -15,11 +15,19 @@ from typing import Any
 
 @dataclass(frozen=True)
 class DatasetFreshness:
-    """Most-recent write (epoch ms) per dataset table; ``None`` when empty."""
+    """Most-recent write (epoch ms) per dataset table; ``None`` when empty.
+
+    ``ohlcv_latest_day`` is the ``MAX(day)`` value in ``ohlcv_daily`` (an ISO
+    date anchored to the America/New_York trading day, e.g. ``"2026-05-28"``).
+    OHLCV freshness is coverage-based — daily bars are keyed by trading day, so
+    the latest *day* present is the meaningful signal, not the wall-clock write
+    time (``ohlcv_ms``), which can be stale even when today's bar exists.
+    """
 
     ohlcv_ms: int | None
     volatility_ms: int | None
     account_ms: int | None
+    ohlcv_latest_day: str | None
 
 
 def read_dataset_freshness(conn: sqlite3.Connection) -> DatasetFreshness:
@@ -27,9 +35,14 @@ def read_dataset_freshness(conn: sqlite3.Connection) -> DatasetFreshness:
 
     A staleness signal independent of how sync runs. The caller owns the
     connection/transaction boundary (mirrors :func:`read_status_rows`).
+    Also returns ``ohlcv_latest_day`` — the latest trading day covered in
+    ``ohlcv_daily`` — for coverage-based OHLCV freshness.
     """
     ohlcv_ms = conn.execute(
         "SELECT MAX(captured_at_ms) FROM ohlcv_daily"
+    ).fetchone()[0]
+    ohlcv_latest_day = conn.execute(
+        "SELECT MAX(day) FROM ohlcv_daily"
     ).fetchone()[0]
     volatility_ms = conn.execute(
         "SELECT MAX(captured_at_ms) FROM vol_snapshots"
@@ -41,6 +54,7 @@ def read_dataset_freshness(conn: sqlite3.Connection) -> DatasetFreshness:
         ohlcv_ms=ohlcv_ms,
         volatility_ms=volatility_ms,
         account_ms=account_ms,
+        ohlcv_latest_day=ohlcv_latest_day,
     )
 
 

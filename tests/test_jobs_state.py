@@ -18,10 +18,14 @@ import pytest
 from schwab_cli.server.jobs.state import (
     JobRunState,
     SchedulerState,
+    drain_run_reports,
     load_state,
+    read_run_reports,
     reconcile_orphans,
     save_state,
     state_path,
+    status_for_exit_code,
+    write_run_report,
 )
 
 
@@ -204,6 +208,88 @@ def test_save_state_writes_valid_json(tmp_path):
     raw = (tmp_path / "state.json").read_text(encoding="utf-8")
     parsed = json.loads(raw)  # must not raise
     assert isinstance(parsed, dict)
+
+
+# ---------------------------------------------------------------------------
+# Run-report markers
+# ---------------------------------------------------------------------------
+
+
+def test_status_for_exit_code_mapping():
+    assert status_for_exit_code(0) == "ok"
+    assert status_for_exit_code(2) == "auth-failed"  # EXIT_AUTH_FAILED
+    assert status_for_exit_code(1) == "failed"
+    assert status_for_exit_code(127) == "failed"
+
+
+def test_write_then_read_run_report_round_trip(tmp_path):
+    write_run_report(
+        tmp_path, "j1", last_run_at=123.5, last_status="ok", last_exit_code=0
+    )
+    reports = read_run_reports(tmp_path)
+    assert reports == {
+        "j1": {"last_run_at": 123.5, "last_status": "ok", "last_exit_code": 0}
+    }
+
+
+def test_write_run_report_creates_reports_dir(tmp_path):
+    assert not (tmp_path / "reports").exists()
+    write_run_report(
+        tmp_path, "j1", last_run_at=1.0, last_status="ok", last_exit_code=0
+    )
+    assert (tmp_path / "reports" / "j1.json").exists()
+
+
+def test_write_run_report_is_atomic_no_tmp_leftover(tmp_path):
+    write_run_report(
+        tmp_path, "j1", last_run_at=1.0, last_status="ok", last_exit_code=0
+    )
+    tmp_files = list((tmp_path / "reports").glob("*.tmp"))
+    assert tmp_files == [], f"Unexpected temp files: {tmp_files}"
+
+
+def test_read_run_reports_does_not_delete(tmp_path):
+    write_run_report(
+        tmp_path, "j1", last_run_at=1.0, last_status="ok", last_exit_code=0
+    )
+    read_run_reports(tmp_path)
+    # File must still be present after a read-only overlay.
+    assert (tmp_path / "reports" / "j1.json").exists()
+
+
+def test_drain_run_reports_returns_and_deletes(tmp_path):
+    write_run_report(
+        tmp_path, "j1", last_run_at=2.0, last_status="auth-failed", last_exit_code=2
+    )
+    write_run_report(
+        tmp_path, "j2", last_run_at=3.0, last_status="failed", last_exit_code=1
+    )
+    drained = drain_run_reports(tmp_path)
+    assert set(drained) == {"j1", "j2"}
+    assert drained["j1"]["last_exit_code"] == 2
+    assert drained["j2"]["last_status"] == "failed"
+    # Both marker files are consumed.
+    assert list((tmp_path / "reports").glob("*.json")) == []
+
+
+def test_drain_run_reports_missing_dir_returns_empty(tmp_path):
+    assert drain_run_reports(tmp_path) == {}
+
+
+def test_read_run_reports_missing_dir_returns_empty(tmp_path):
+    assert read_run_reports(tmp_path) == {}
+
+
+def test_read_run_reports_ignores_corrupt_marker(tmp_path):
+    rdir = tmp_path / "reports"
+    rdir.mkdir()
+    (rdir / "bad.json").write_text("{not json", encoding="utf-8")
+    write_run_report(
+        tmp_path, "good", last_run_at=1.0, last_status="ok", last_exit_code=0
+    )
+    reports = read_run_reports(tmp_path)
+    assert "good" in reports
+    assert "bad" not in reports
 
 
 # ---------------------------------------------------------------------------

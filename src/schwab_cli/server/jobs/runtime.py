@@ -28,7 +28,7 @@ from schwab_cli import paths
 from schwab_cli.server.jobs import config
 from schwab_cli.server.jobs.config import load_jobs, promote
 from schwab_cli.server.jobs.scheduler import JobScheduler, Transition
-from schwab_cli.server.jobs.state import load_state
+from schwab_cli.server.jobs.state import load_state, read_run_reports
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +186,10 @@ def status_payload(*, config_dir: Path | None = None) -> dict[str, Any]:
     valid, _current_errors = config.load_jobs(current)
     _staging_valid, staging_errors = config.load_jobs(jobs_dir(config_dir))
     scheduler_state = load_state(current)
+    # Pending manual run-report markers (read-only; not drained). Overlaying
+    # them lets a manual `jobs run` surface immediately — before/without the
+    # daemon ingesting them — and consistently whether the daemon is up or down.
+    pending_reports = read_run_reports(current)
 
     jobs: list[dict] = []
     for cfg in valid:
@@ -195,6 +199,18 @@ def status_payload(*, config_dir: Path | None = None) -> dict[str, Any]:
         last_run_at = run_state.last_run_at if run_state else None
         last_status = run_state.last_status if run_state else None
         last_exit_code = run_state.last_exit_code if run_state else None
+
+        report = pending_reports.get(cfg.id)
+        if report is not None:
+            report_run_at = report.get("last_run_at")
+            # Prefer the pending report only when it is strictly newer than the
+            # persisted state (a stale marker must never override fresh state).
+            if report_run_at is not None and (
+                last_run_at is None or report_run_at > last_run_at
+            ):
+                last_run_at = report_run_at
+                last_status = report.get("last_status")
+                last_exit_code = report.get("last_exit_code")
 
         edit_error = staging_errors.get(cfg.id)
         outdated = edit_error is not None

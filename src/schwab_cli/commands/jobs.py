@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import signal
@@ -23,7 +24,7 @@ from schwab_cli.dataset.launchd import uninstall_all_schwab_plists
 from schwab_cli.server.jobs import config
 from schwab_cli.server.jobs.config import JobConfig, JobConfigError
 from schwab_cli.server.jobs.defaults import write_default_jobs
-from schwab_cli.server.jobs.runner import execute_job
+from schwab_cli.server.jobs.runner import execute_job, run_job_blocking
 from schwab_cli.server.jobs.runtime import (
     current_dir,
     jobs_dir,
@@ -32,7 +33,11 @@ from schwab_cli.server.jobs.runtime import (
     server_running,
     status_payload,
 )
-from schwab_cli.server.jobs.state import load_state
+from schwab_cli.server.jobs.state import (
+    load_state,
+    status_for_exit_code,
+    write_run_report,
+)
 
 __all__ = [
     "app",
@@ -40,6 +45,8 @@ __all__ = [
     "server_running",
     "status_payload",
 ]
+
+log = logging.getLogger(__name__)
 
 app = typer.Typer(
     help="Run promoted scheduled jobs by id (used by the scheduler and manually).",
@@ -84,9 +91,34 @@ def resolve_job_config(job_id: str, *, config_dir: Path | None = None) -> JobCon
 
 @app.command("run")
 def run(job_id: str) -> None:
-    """Run a single promoted job by id and exit with its return code."""
+    """Run a single promoted job by id and exit with its return code.
+
+    Two paths, keyed by the ``SCHWAB_JOBS_SCHEDULED`` env flag that
+    :func:`~schwab_cli.server.jobs.runner.spawn_worker` sets on its children:
+
+    * scheduler-spawned (flag set) -> ``execute_job`` (execvp for command jobs);
+      the scheduler records the outcome when it reaps the child.
+    * manual invocation (flag unset) -> ``run_job_blocking`` (no execvp) so we
+      survive to drop a run-report marker the daemon ingests into state.json.
+    """
     cfg = resolve_job_config(job_id)
-    rc = execute_job(cfg)
+
+    if os.environ.get("SCHWAB_JOBS_SCHEDULED"):
+        rc = execute_job(cfg)
+        raise typer.Exit(rc)
+
+    rc = run_job_blocking(cfg)
+    # Best-effort: a marker-write failure must never change the exit code.
+    try:
+        write_run_report(
+            current_dir(),
+            job_id,
+            last_run_at=time.time(),
+            last_status=status_for_exit_code(rc),
+            last_exit_code=rc,
+        )
+    except Exception:  # noqa: BLE001 — never let bookkeeping change the exit code
+        log.warning("could not write run report for job %s", job_id, exc_info=True)
     raise typer.Exit(rc)
 
 

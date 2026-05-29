@@ -148,6 +148,46 @@ def test_spawn_worker_argv_uses_binary_jobs_run_id(tmp_path, monkeypatch):
     assert captured_argv[0] == [binary, "jobs", "run", "dataset-update"]
 
 
+def test_spawn_worker_sets_scheduled_env_flag(tmp_path, monkeypatch):
+    """Popen must receive env with SCHWAB_JOBS_SCHEDULED=1 so the spawned
+    `jobs run` child knows it is scheduler-driven (and execvp's)."""
+    captured_kwargs: dict = {}
+
+    def _fake_popen_factory(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _fake_popen(pid=9050)
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen_factory)
+    monkeypatch.setattr("os.getpgid", lambda pid: pid)
+
+    log_path = tmp_path / "j1.log"
+    spawn_worker(_cfg("j1"), log_path=log_path, binary="/usr/local/bin/schwab")
+
+    env = captured_kwargs.get("env")
+    assert env is not None, "spawn_worker must pass an explicit env to Popen"
+    assert env.get("SCHWAB_JOBS_SCHEDULED") == "1"
+
+
+def test_spawn_worker_env_preserves_existing_environment(tmp_path, monkeypatch):
+    """The scheduled flag is added on top of the inherited environment."""
+    monkeypatch.setenv("PATH_SENTINEL_XYZ", "kept")
+    captured_kwargs: dict = {}
+
+    def _fake_popen_factory(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _fake_popen(pid=9051)
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen_factory)
+    monkeypatch.setattr("os.getpgid", lambda pid: pid)
+
+    log_path = tmp_path / "j1.log"
+    spawn_worker(_cfg("j1"), log_path=log_path, binary="/usr/local/bin/schwab")
+
+    env = captured_kwargs["env"]
+    assert env.get("PATH_SENTINEL_XYZ") == "kept"
+    assert env.get("SCHWAB_JOBS_SCHEDULED") == "1"
+
+
 def test_spawn_worker_no_binary_uses_resolve_binary(tmp_path, monkeypatch):
     """When binary=None, spawn_worker must call resolve_binary() for the path."""
     from schwab_cli.server.jobs import runner as runner_mod

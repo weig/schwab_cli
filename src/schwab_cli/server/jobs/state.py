@@ -25,6 +25,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from schwab_cli._exit_codes import EXIT_AUTH_FAILED
+
 log = logging.getLogger(__name__)
 
 # Tolerance (seconds) when matching a recorded started_at against the OS-reported
@@ -151,6 +153,123 @@ def save_state(current_dir: Path, state: SchedulerState) -> None:
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
         raise
+
+
+# ---------------------------------------------------------------------------
+# Run-report markers (manual `jobs run` -> scheduler ingest)
+# ---------------------------------------------------------------------------
+#
+# The scheduler is the sole authoritative writer of state.json (its tick
+# rewrites the file from in-memory state, clobbering any external edit). A
+# manual `schwab jobs run <id>` therefore hands its outcome to the scheduler
+# via a small JSON marker under ``<current>/reports/<job_id>.json``; the next
+# tick drains the markers and merges them into the authoritative state. A
+# read-only overlay (read_run_reports) lets the status view surface a manual
+# run immediately, whether or not the daemon is up.
+
+
+def reports_dir(current: Path) -> Path:
+    """Return the run-report inbox directory under ``current``."""
+    return current / "reports"
+
+
+def status_for_exit_code(exit_code: int) -> str:
+    """Map a process exit code to a status string (matches the scheduler).
+
+    ``0 -> "ok"``, ``EXIT_AUTH_FAILED (2) -> "auth-failed"``, else ``"failed"``.
+    """
+    if exit_code == 0:
+        return "ok"
+    if exit_code == EXIT_AUTH_FAILED:
+        return "auth-failed"
+    return "failed"
+
+
+def write_run_report(
+    current: Path,
+    job_id: str,
+    *,
+    last_run_at: float,
+    last_status: str,
+    last_exit_code: int,
+) -> None:
+    """Atomically write a manual run-report marker for ``job_id``.
+
+    Creates ``<current>/reports/`` if needed and writes
+    ``<job_id>.json`` via temp-file + :func:`os.replace` (mirrors
+    :func:`save_state`).
+    """
+    rdir = reports_dir(current)
+    rdir.mkdir(parents=True, exist_ok=True)
+    dest = rdir / f"{job_id}.json"
+    tmp = rdir / f".{dest.name}.tmp"
+    payload = json.dumps(
+        {
+            "last_run_at": last_run_at,
+            "last_status": last_status,
+            "last_exit_code": last_exit_code,
+        },
+        indent=2,
+    )
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        raise
+
+
+def _read_report_file(path: Path) -> dict | None:
+    """Parse one report marker; ``None`` when missing/corrupt/not-an-object."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("could not read run report %s: %s; ignoring", path, exc)
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return {
+        "last_run_at": raw.get("last_run_at"),
+        "last_status": raw.get("last_status"),
+        "last_exit_code": raw.get("last_exit_code"),
+    }
+
+
+def read_run_reports(current: Path) -> dict[str, dict]:
+    """Return all pending run reports keyed by job id (does NOT delete).
+
+    Read-only overlay for status display. A missing reports dir yields ``{}``.
+    """
+    rdir = reports_dir(current)
+    if not rdir.is_dir():
+        return {}
+    out: dict[str, dict] = {}
+    for path in sorted(rdir.glob("*.json")):
+        report = _read_report_file(path)
+        if report is not None:
+            out[path.stem] = report
+    return out
+
+
+def drain_run_reports(current: Path) -> dict[str, dict]:
+    """Return all pending run reports keyed by job id and DELETE the files.
+
+    The authoritative ingest path: the scheduler calls this at the start of a
+    tick so the markers are consumed exactly once. A missing reports dir yields
+    ``{}``.
+    """
+    rdir = reports_dir(current)
+    if not rdir.is_dir():
+        return {}
+    out: dict[str, dict] = {}
+    for path in sorted(rdir.glob("*.json")):
+        report = _read_report_file(path)
+        if report is not None:
+            out[path.stem] = report
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    return out
 
 
 # ---------------------------------------------------------------------------

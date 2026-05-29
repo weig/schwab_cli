@@ -153,6 +153,38 @@ def execute_job(cfg: JobConfig) -> int:
     return 1
 
 
+def _run_command_blocking(cfg: JobConfig) -> int:
+    """Run a command job as a child process and return its exit code.
+
+    Unlike :func:`_execute_command` (which ``execvp``s), this keeps the current
+    process alive so a manual ``schwab jobs run`` can record an outcome after
+    the job finishes.
+    """
+    argv = command_argv(cfg)
+    try:
+        completed = subprocess.run(argv, check=False)  # noqa: S603
+    except OSError:
+        log.exception("failed to run command job %s: %r", cfg.id, argv)
+        return _EXIT_CANNOT_EXEC
+    return completed.returncode
+
+
+def run_job_blocking(cfg: JobConfig) -> int:
+    """Run ``cfg`` without replacing the current process; return its exit code.
+
+    The manual-run counterpart to :func:`execute_job`: command jobs run via
+    :func:`subprocess.run` (no ``execvp``) so the caller survives to record the
+    outcome; python jobs behave exactly like the python branch of
+    :func:`execute_job`.
+    """
+    if cfg.type == "command":
+        return _run_command_blocking(cfg)
+    if cfg.type == "python":
+        return _execute_python(cfg)
+    log.error("job %s has unknown type %r; cannot execute", cfg.id, cfg.type)
+    return 1
+
+
 # ---------------------------------------------------------------------------
 # Worker spawning (used by the scheduler)
 # ---------------------------------------------------------------------------
@@ -198,6 +230,10 @@ def spawn_worker(
             start_new_session=True,
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            # Mark the child as scheduler-driven so `jobs run` execvp's (the
+            # scheduler records the outcome on reap) rather than writing a
+            # manual run-report marker.
+            env={**os.environ, "SCHWAB_JOBS_SCHEDULED": "1"},
         )
     finally:
         log_file.close()
