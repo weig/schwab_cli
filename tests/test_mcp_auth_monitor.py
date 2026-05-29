@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 
 from schwab_cli.mcp_server.auth_monitor import (
     AuthMonitor,
@@ -93,7 +94,13 @@ def test_run_once_success_emits_success_event():
     result = asyncio.run(mon.run_once(reason="test"))
     assert result.ok is True
     assert len(runner_calls) == 1
-    assert runner_calls[0]["cmd"] == ["schwab_cli", "auth", "--force"]
+    # The monitor resolves the real console-script path
+    # (`shutil.which("schwab") or ... or "schwab"`), so cmd[0] is a path
+    # whose basename is the binary — assert the tail + binary name rather
+    # than a hard-coded literal (the script was renamed schwab_cli → schwab).
+    cmd = runner_calls[0]["cmd"]
+    assert cmd[1:] == ["auth", "--force"]
+    assert os.path.basename(cmd[0]) in ("schwab", "schwab_cli")
     assert "auth.auto_login.succeeded" in buf.getvalue()
 
 
