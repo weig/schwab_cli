@@ -269,6 +269,13 @@ def apply_reload(
 # ---------------------------------------------------------------------------
 
 
+_FALLBACK_WAIT_S = 10.0
+# Notify on the 1st consecutive loop failure and every Nth thereafter, so a
+# persistently-broken scheduler raises an alert (not just silent logs) without
+# spamming a notification every tick.
+_LOOP_FAIL_NOTIFY_EVERY = 30
+
+
 def run_scheduler_loop(
     scheduler: JobScheduler,
     staging: Path,
@@ -278,25 +285,58 @@ def run_scheduler_loop(
     reload_requested: Callable[[], bool],
     wait: Callable[[float], None],
     max_iterations: int | None = None,
+    notify: Callable[..., None] | None = None,
 ) -> None:
     """Drive the scheduler until ``stop()`` returns True.
 
     Each iteration: tick, honour a pending reload, then sleep until the next
     wakeup via the injected ``wait``. ``max_iterations`` bounds the loop for
     deterministic tests.
+
+    Resilience: NOTHING in the loop body may kill the thread (that was a real
+    incident — one unguarded worker-spawn killed the scheduler for 36h). Both
+    the tick/reload step AND the next-wakeup computation are guarded; on a
+    persistent failure we keep looping at a safe fallback interval and emit a
+    throttled ``scheduler.loop_error`` notification so the silent-death class of
+    failure becomes visible.
     """
     count = 0
+    consecutive_failures = 0
     while not stop():
         if max_iterations is not None and count >= max_iterations:
             break
-        scheduler.tick()
-        if reload_requested():
-            apply_reload(staging, current, scheduler)
+        try:
+            scheduler.tick()
+            if reload_requested():
+                apply_reload(staging, current, scheduler)
+            consecutive_failures = 0
+        except Exception as exc:  # noqa: BLE001 — a bad tick/reload must never kill the loop
+            consecutive_failures += 1
+            log.exception("scheduler tick/reload failed; continuing loop")
+            if notify is not None and (
+                consecutive_failures == 1
+                or consecutive_failures % _LOOP_FAIL_NOTIFY_EVERY == 0
+            ):
+                try:
+                    notify(
+                        "scheduler.loop_error",
+                        error=f"{type(exc).__name__}: {exc}",
+                        consecutive_failures=consecutive_failures,
+                    )
+                except Exception:  # noqa: BLE001 — notify must never break the loop
+                    log.exception("notify failed for scheduler.loop_error")
+
         # next_wakeup() is an absolute epoch; subtract the scheduler's clock to
-        # get a relative timeout. Fall back to wall-clock when a (test) fake
-        # scheduler exposes no public now() seam.
+        # get a relative timeout. This MUST be guarded too — if next_wakeup or
+        # the clock seam raises, the loop must not die; fall back to a fixed
+        # interval. Fall back to wall-clock when a (test) fake scheduler exposes
+        # no public now() seam.
         now_fn = getattr(scheduler, "now", time.time)
-        timeout = max(0.0, scheduler.next_wakeup() - now_fn())
+        try:
+            timeout = max(0.0, scheduler.next_wakeup() - now_fn())
+        except Exception:  # noqa: BLE001 — never let wakeup math kill the loop
+            log.exception("next_wakeup failed; using fallback interval")
+            timeout = getattr(scheduler, "_watchdog_s", _FALLBACK_WAIT_S)
         wait(timeout)
         count += 1
 

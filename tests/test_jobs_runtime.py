@@ -854,3 +854,243 @@ class TestStatusPayload:
         assert runtime_mod.derive_job_state(
             enabled=True, running_pid=None, next_run_at=None
         ) == "idle"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1b — run_scheduler_loop must survive a tick() exception
+# ---------------------------------------------------------------------------
+#
+# Contract:
+#   run_scheduler_loop must catch any exception raised by scheduler.tick() and
+#   continue to the next iteration (log/swallow it) rather than propagating out
+#   and killing the daemon thread. The loop must:
+#     - NOT propagate the tick exception to the caller.
+#     - Continue calling wait() after the failing tick.
+#     - Eventually exit cleanly via stop() / max_iterations.
+# ---------------------------------------------------------------------------
+
+
+class FakeSchedulerRaisingOnFirstTick:
+    """Scheduler whose tick() raises on the first call, succeeds on subsequent calls."""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc or RuntimeError("tick exploded")
+        self.tick_count = 0
+        self.reload_count = 0
+        self._next_wakeup = 1_000_005.0  # absolute epoch
+
+    def tick(self) -> None:
+        self.tick_count += 1
+        if self.tick_count == 1:
+            raise self._exc
+
+    def reload(self, jobs, *, invalid=None) -> list:
+        self.reload_count += 1
+        return []
+
+    def next_wakeup(self) -> float:
+        return self._next_wakeup
+
+    def now(self) -> float:
+        return 1_000_000.0
+
+
+class FakeSchedulerAlwaysRaisingTick:
+    """Scheduler whose tick() always raises."""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc or RuntimeError("tick always fails")
+        self.tick_count = 0
+        self.reload_count = 0
+        self._next_wakeup = 1_000_005.0
+
+    def tick(self) -> None:
+        self.tick_count += 1
+        raise self._exc
+
+    def reload(self, jobs, *, invalid=None) -> list:
+        self.reload_count += 1
+        return []
+
+    def next_wakeup(self) -> float:
+        return self._next_wakeup
+
+    def now(self) -> float:
+        return 1_000_000.0
+
+
+class TestRunSchedulerLoopTickResilience:
+    """run_scheduler_loop must not die when tick() raises."""
+
+    def test_loop_does_not_propagate_tick_exception(self, tmp_path):
+        """run_scheduler_loop must NOT propagate when tick() raises on first call."""
+        sched = FakeSchedulerRaisingOnFirstTick()
+        wait_calls: list[float] = []
+
+        # This must NOT raise — the bug is that it currently propagates tick's error.
+        runtime_mod.run_scheduler_loop(
+            sched,
+            staging=tmp_path / "staging",
+            current=tmp_path / "current",
+            stop=lambda: False,
+            reload_requested=lambda: False,
+            wait=lambda t: wait_calls.append(t),
+            max_iterations=3,
+        )
+
+    def test_loop_continues_to_wait_after_tick_exception(self, tmp_path):
+        """wait() must still be called after a tick that raised."""
+        sched = FakeSchedulerRaisingOnFirstTick()
+        wait_calls: list[float] = []
+
+        runtime_mod.run_scheduler_loop(
+            sched,
+            staging=tmp_path / "staging",
+            current=tmp_path / "current",
+            stop=lambda: False,
+            reload_requested=lambda: False,
+            wait=lambda t: wait_calls.append(t),
+            max_iterations=3,
+        )
+
+        # 3 iterations must each call wait(), even though tick 1 raised.
+        assert len(wait_calls) == 3, (
+            f"wait() must be called on every iteration including the failing one; "
+            f"got {len(wait_calls)} calls"
+        )
+
+    def test_loop_runs_all_iterations_despite_first_tick_failing(self, tmp_path):
+        """All max_iterations iterations must complete even if tick 1 raises."""
+        sched = FakeSchedulerRaisingOnFirstTick()
+
+        runtime_mod.run_scheduler_loop(
+            sched,
+            staging=tmp_path / "staging",
+            current=tmp_path / "current",
+            stop=lambda: False,
+            reload_requested=lambda: False,
+            wait=lambda t: None,
+            max_iterations=5,
+        )
+
+        # tick() is called on every iteration regardless of prior errors.
+        assert sched.tick_count == 5, (
+            f"tick() must be called 5 times across 5 iterations; got {sched.tick_count}"
+        )
+
+    def test_loop_survives_always_raising_tick_and_exits_via_max_iterations(self, tmp_path):
+        """Loop must exit cleanly via max_iterations even when EVERY tick raises."""
+        sched = FakeSchedulerAlwaysRaisingTick()
+        wait_calls: list[float] = []
+
+        # Must not raise.
+        runtime_mod.run_scheduler_loop(
+            sched,
+            staging=tmp_path / "staging",
+            current=tmp_path / "current",
+            stop=lambda: False,
+            reload_requested=lambda: False,
+            wait=lambda t: wait_calls.append(t),
+            max_iterations=4,
+        )
+
+        assert sched.tick_count == 4, (
+            f"All 4 ticks must be attempted; got {sched.tick_count}"
+        )
+        assert len(wait_calls) == 4, (
+            f"wait() must be called after each failing tick; got {len(wait_calls)}"
+        )
+
+    def test_loop_exits_via_stop_after_surviving_tick_exception(self, tmp_path):
+        """After a tick exception the loop must honour stop() on the next check."""
+        sched = FakeSchedulerRaisingOnFirstTick()
+        call_count = [0]
+
+        def stop() -> bool:
+            call_count[0] += 1
+            # Allow one full iteration (tick raises), then stop.
+            return call_count[0] > 1
+
+        # Must not raise, and must exit cleanly (not run forever).
+        runtime_mod.run_scheduler_loop(
+            sched,
+            staging=tmp_path / "staging",
+            current=tmp_path / "current",
+            stop=stop,
+            reload_requested=lambda: False,
+            wait=lambda t: None,
+            max_iterations=100,  # high cap — loop must exit via stop(), not this
+        )
+
+        assert sched.tick_count == 1, (
+            f"Only 1 iteration before stop()=True; got tick_count={sched.tick_count}"
+        )
+
+
+class _FakeSchedulerWakeupRaises:
+    """tick() is fine, but next_wakeup() raises — must not kill the loop."""
+
+    def __init__(self) -> None:
+        self.tick_count = 0
+        self.wakeup_calls = 0
+        self._watchdog_s = 10.0
+
+    def tick(self) -> None:
+        self.tick_count += 1
+
+    def reload(self, jobs, *, invalid=None) -> list:
+        return []
+
+    def next_wakeup(self) -> float:
+        self.wakeup_calls += 1
+        raise RuntimeError("next_wakeup boom")
+
+    def now(self) -> float:
+        return 1_000_000.0
+
+
+class TestRunSchedulerLoopWakeupAndNotify:
+    def test_loop_survives_next_wakeup_exception(self, tmp_path):
+        """A raising next_wakeup() must NOT kill the loop; wait() still fires
+        with the fallback interval and the loop exits via max_iterations."""
+        sched = _FakeSchedulerWakeupRaises()
+        wait_calls: list[float] = []
+
+        runtime_mod.run_scheduler_loop(
+            sched,
+            staging=tmp_path / "staging",
+            current=tmp_path / "current",
+            stop=lambda: False,
+            reload_requested=lambda: False,
+            wait=lambda t: wait_calls.append(t),
+            max_iterations=3,
+        )
+
+        assert sched.tick_count == 3
+        assert len(wait_calls) == 3
+        # Fallback interval used when next_wakeup raises (scheduler._watchdog_s).
+        assert all(t == 10.0 for t in wait_calls)
+
+    def test_loop_notifies_on_tick_failure(self, tmp_path):
+        """A failing tick emits a throttled scheduler.loop_error notification."""
+        sched = FakeSchedulerAlwaysRaisingTick()
+        events: list[tuple] = []
+
+        def _notify(event, **fields):
+            events.append((event, fields))
+
+        runtime_mod.run_scheduler_loop(
+            sched,
+            staging=tmp_path / "staging",
+            current=tmp_path / "current",
+            stop=lambda: False,
+            reload_requested=lambda: False,
+            wait=lambda t: None,
+            max_iterations=3,
+            notify=_notify,
+        )
+
+        # First consecutive failure notifies (throttled thereafter).
+        assert events, "a persistent tick failure must emit a notification"
+        assert events[0][0] == "scheduler.loop_error"
+        assert events[0][1].get("consecutive_failures") == 1

@@ -698,6 +698,7 @@ def _start_jobs(
         spawn=_spawn_worker,
         renew=renew,
         notify=notify,
+        initial_states=state.jobs,
     )
     # Promote + load + schedule the staged configs.
     jobs_runtime.apply_reload(stg, curr, scheduler)
@@ -723,6 +724,7 @@ def _start_jobs(
             stop=stop_event.is_set,
             reload_requested=_reload_requested,
             wait=_wait,
+            notify=notify,
         ),
         daemon=True,
         name="schwab-server-jobs",
