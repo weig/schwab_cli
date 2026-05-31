@@ -24,6 +24,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Callable, Iterable
 
 from schwab_cli._exit_codes import EXIT_AUTH_FAILED
@@ -81,6 +82,7 @@ class JobScheduler:
         watchdog_s: float = WATCHDOG_S,
         max_concurrent: int = MAX_CONCURRENT_JOBS,
         log_retention: int = LOG_RETENTION,
+        initial_states: Mapping[str, JobRunState] | None = None,
     ) -> None:
         self._current_dir = current_dir
         self._now = now
@@ -96,6 +98,12 @@ class JobScheduler:
         self._states: dict[str, JobRunState] = {
             cfg.id: JobRunState(id=cfg.id) for cfg in self._configs.values()
         }
+        # Seed persisted run-history so last_run_at / last_status / last_exit_code
+        # survive an in-process restart (a subsequent reload/_ensure_state will
+        # find these and only recompute next_run_at).
+        if initial_states:
+            for job_id, run_state in initial_states.items():
+                self._states[job_id] = run_state
         self._handles: dict[str, JobHandle] = {}
         self._deadlines: dict[str, float] = {}
         # Per-job remaining auth retries; seeded lazily from cfg.retries.
@@ -172,7 +180,22 @@ class JobScheduler:
 
             ts = int(now)
             log_path = self._current_dir / "logs" / cfg.id / f"{ts}.log"
-            handle = self._spawn(cfg, log_path)
+            try:
+                handle = self._spawn(cfg, log_path)
+            except Exception:  # noqa: BLE001 — one bad spawn must not starve the rest
+                log.exception("failed to spawn job %s", cfg.id)
+                self._states[cfg.id] = replace(
+                    rs,
+                    last_run_at=now,
+                    last_status="spawn-failed",
+                    last_exit_code=-1,
+                    running_pid=None,
+                    running_pgid=None,
+                    started_at=None,
+                )
+                self._reschedule(cfg, now)
+                self._emit_failure(cfg, "spawn-failed", -1)
+                continue
             self._handles[cfg.id] = handle
             self._deadlines[cfg.id] = now + cfg.timeout_s
             self._log_paths[cfg.id] = log_path

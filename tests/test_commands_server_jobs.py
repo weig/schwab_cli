@@ -493,3 +493,146 @@ class TestStartJobsRaisesInFinally:
         # remove_pidfile) must not itself raise.
         with pytest.raises(ValueError, match="nope"):
             server_cmd.run()
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 (integration) — _start_jobs must seed the scheduler from persisted state
+# ---------------------------------------------------------------------------
+#
+# Seam: _start_jobs passes ``initial_states`` (loaded from state.json via
+# load_state()) to JobScheduler.__init__ so that a job's last_run_at /
+# last_status from a previous daemon instance survive a restart.
+#
+# This test patches enough of the environment so _start_jobs can run without a
+# real daemon / real workers: spawn is mocked to never actually fork, and the
+# scheduler loop thread is never started (we call _start_jobs but immediately
+# inspect the returned scheduler before any tick runs).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not _SERVER_CMD_AVAILABLE or not _STATE_AVAILABLE or not _RUNTIME_AVAILABLE,
+    reason="server command, state, and runtime modules not yet available",
+)
+class TestStartJobsSeedsFromPersistedState:
+    """_start_jobs must pass persisted run-history into the JobScheduler constructor.
+
+    Seam assumed by the implementation:
+      JobScheduler.__init__ gains  ``initial_states: Mapping[str, JobRunState] | None = None``
+      _start_jobs calls  ``load_state(curr)`` and passes ``state.jobs`` as
+      ``initial_states`` when constructing the scheduler — so that a job's
+      ``last_run_at`` / ``last_status`` are preserved across a restart even
+      though jobs=[] is still passed (config is loaded via reload(), not __init__).
+    """
+
+    @pytest.fixture
+    def isolated_config(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / "config"
+        _write_minimal_config(config_dir)
+        monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(config_dir))
+        return config_dir
+
+    def test_start_jobs_preserves_last_run_at_from_state_json(
+        self, isolated_config, monkeypatch, tmp_path
+    ):
+        """A job whose last_run_at is in state.json must still report it after _start_jobs.
+
+        Setup:
+          1. Write a valid job config (accounts) to the staging jobs dir.
+          2. Write a state.json under .current with last_run_at=999.0 for "accounts".
+          3. Call _start_jobs (with mocked spawn so no real workers fork).
+          4. Call scheduler.snapshot() and assert last_run_at==999.0.
+
+        This fails today because _start_jobs builds JobScheduler(jobs=[])
+        with an empty _states dict, discarding the persisted history.
+        """
+        from schwab_cli.server.jobs.state import (
+            JobRunState,
+            SchedulerState,
+            save_state,
+        )
+        import threading
+
+        config_dir = isolated_config
+        jobs_dir = config_dir / "jobs"
+        current_dir = jobs_dir / ".current"
+
+        # Write a valid job config to staging.
+        _write_job_file(jobs_dir, "accounts", enabled=False)
+
+        # Write persisted state with a known last_run_at.
+        current_dir.mkdir(parents=True, exist_ok=True)
+        save_state(
+            current_dir,
+            SchedulerState(
+                jobs={
+                    "accounts": JobRunState(
+                        id="accounts",
+                        last_run_at=999.0,
+                        last_status="ok",
+                        last_exit_code=0,
+                    )
+                },
+                updated_at=999.0,
+            ),
+        )
+
+        # Prevent _start_jobs from actually writing a pidfile or starting a thread.
+        monkeypatch.setattr(runtime_mod, "write_pidfile", lambda _: None)
+
+        # Capture the JobScheduler constructor args to verify initial_states was passed.
+        captured_schedulers: list = []
+        original_scheduler_cls = server_cmd.JobScheduler
+
+        class CapturingScheduler(original_scheduler_cls):
+            def __init__(self, **kwargs):
+                captured_schedulers.append(kwargs)
+                super().__init__(**kwargs)
+
+            def tick(self):
+                pass  # no-op — we don't want any real ticks
+
+        monkeypatch.setattr(server_cmd, "JobScheduler", CapturingScheduler)
+
+        # Prevent the loop thread from doing anything real.
+        monkeypatch.setattr(
+            runtime_mod,
+            "run_scheduler_loop",
+            lambda *a, **k: None,
+        )
+
+        stop_event = threading.Event()
+        reload_event = threading.Event()
+        wake = threading.Event()
+
+        scheduler, thread, curr = server_cmd._start_jobs(
+            cfg=None,  # not used in current implementation
+            stop_event=stop_event,
+            reload_event=reload_event,
+            wake=wake,
+            renew=None,
+            notify=None,
+        )
+
+        # The scheduler's snapshot must carry the persisted last_run_at.
+        snap = scheduler.snapshot()
+        accounts = snap.jobs.get("accounts")
+        assert accounts is not None, (
+            "Job 'accounts' must be present in scheduler snapshot after _start_jobs. "
+            "It was promoted via apply_reload but its run-state was not seeded."
+        )
+        assert accounts.last_run_at == pytest.approx(999.0), (
+            f"last_run_at must be 999.0 from persisted state.json; "
+            f"got {accounts.last_run_at!r}. "
+            "_start_jobs must pass initial_states=state.jobs to JobScheduler.__init__."
+        )
+        assert accounts.last_status == "ok", (
+            f"last_status must be 'ok' from persisted state.json; "
+            f"got {accounts.last_status!r}"
+        )
+
+        # Cleanup: stop the thread.
+        stop_event.set()
+        wake.set()
+        if thread is not None:
+            thread.join(timeout=2)

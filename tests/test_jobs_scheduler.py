@@ -1099,3 +1099,388 @@ def test_reload_old_label_scheduled_for_scheduled_job(tmp_path):
 
     t = _find_transition(transitions, "j1")
     assert t.old == "scheduled"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1a — fire_due must survive a spawn exception
+# ---------------------------------------------------------------------------
+#
+# Contract:
+#   - fire_due() must NOT propagate a spawn exception.
+#   - The failing job must be recorded with last_status="spawn-failed",
+#     last_run_at set to now(), running_pid/running_pgid/started_at all None.
+#   - The job must NOT remain in _handles (reap is a no-op; job can re-fire).
+#   - The job must be rescheduled to a future next_run_at (not stuck at past).
+#   - notify must be called once with event "scheduler.job_failed" and
+#     job_id matching the failing job.
+# ---------------------------------------------------------------------------
+
+
+class RaisingSpawner:
+    """Spawner that raises RuntimeError for every call."""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self.calls: list[tuple] = []
+        self._exc = exc or RuntimeError("boom")
+
+    def __call__(self, cfg: "JobConfig", log_path: "Path") -> "JobHandle":
+        self.calls.append((cfg, log_path))
+        raise self._exc
+
+
+class SelectiveSpawner:
+    """Raises for job ids in ``raise_ids``; returns a FakeHandle for others."""
+
+    def __init__(self, raise_ids: set[str], start_pid: int = 20000) -> None:
+        self._raise_ids = raise_ids
+        self._next_pid = start_pid
+        self.calls: list[tuple] = []
+        self.handles: dict[str, FakeHandle] = {}
+
+    def __call__(self, cfg: "JobConfig", log_path: "Path") -> "FakeHandle":
+        self.calls.append((cfg, log_path))
+        if cfg.id in self._raise_ids:
+            raise RuntimeError(f"forced spawn failure for {cfg.id}")
+        pid = self._next_pid
+        self._next_pid += 1
+        handle = FakeHandle(pid=pid, pgid=pid)
+        self.handles[cfg.id] = handle
+        return handle
+
+
+def test_fire_due_does_not_propagate_spawn_exception(tmp_path):
+    """fire_due() must swallow a spawn exception — not propagate it."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = RaisingSpawner()
+    cfg = _make_cfg("j1")
+    notify_calls: list[tuple] = []
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg],
+        clock=clock,
+        spawner=spawner,
+        notify=lambda *a, **kw: notify_calls.append((a, kw)),
+    )
+    sched.schedule_all()
+    clock.advance(400)
+
+    # This must NOT raise — the bug is that it currently does.
+    sched.fire_due()
+
+
+def test_fire_due_spawn_failure_records_spawn_failed_status(tmp_path):
+    """A spawn failure must be recorded as last_status='spawn-failed' in snapshot."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = RaisingSpawner()
+    cfg = _make_cfg("j1")
+    notify_calls: list[tuple] = []
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg],
+        clock=clock,
+        spawner=spawner,
+        notify=lambda *a, **kw: notify_calls.append((a, kw)),
+    )
+    sched.schedule_all()
+    clock.advance(400)
+    sched.fire_due()
+
+    state = sched.snapshot()
+    j1 = state.jobs["j1"]
+    assert j1.last_status == "spawn-failed", (
+        f"Expected last_status='spawn-failed' after spawn exception; got {j1.last_status!r}"
+    )
+
+
+def test_fire_due_spawn_failure_sets_last_run_at(tmp_path):
+    """A spawn failure must set last_run_at to the current now() value."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = RaisingSpawner()
+    cfg = _make_cfg("j1")
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg],
+        clock=clock,
+        spawner=spawner,
+    )
+    sched.schedule_all()
+    clock.advance(400)
+    fire_time = clock.t
+    sched.fire_due()
+
+    j1 = sched.snapshot().jobs["j1"]
+    assert j1.last_run_at is not None, "last_run_at must be set after spawn failure"
+    assert j1.last_run_at == pytest.approx(fire_time), (
+        f"last_run_at={j1.last_run_at} must equal fire time {fire_time}"
+    )
+
+
+def test_fire_due_spawn_failure_clears_running_fields(tmp_path):
+    """running_pid, running_pgid, and started_at must all be None after spawn failure."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = RaisingSpawner()
+    cfg = _make_cfg("j1")
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg],
+        clock=clock,
+        spawner=spawner,
+    )
+    sched.schedule_all()
+    clock.advance(400)
+    sched.fire_due()
+
+    j1 = sched.snapshot().jobs["j1"]
+    assert j1.running_pid is None, "running_pid must be None after spawn failure"
+    assert j1.running_pgid is None, "running_pgid must be None after spawn failure"
+    assert j1.started_at is None, "started_at must be None after spawn failure"
+
+
+def test_fire_due_spawn_failure_not_left_in_handles(tmp_path):
+    """A failed-spawn job must not remain in _handles — reap is a no-op and job can re-fire."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = RaisingSpawner()
+    cfg = _make_cfg("j1")
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg],
+        clock=clock,
+        spawner=spawner,
+    )
+    sched.schedule_all()
+    clock.advance(400)
+    sched.fire_due()
+
+    # reap() must be a no-op (nothing in handles)
+    sched.reap()  # must not raise
+
+    # Job can re-fire: after rescheduling it's due again when the clock advances
+    # past the new next_run_at
+    snap_after = sched.snapshot().jobs["j1"]
+    assert snap_after.running_pid is None, "job must not appear running after failed spawn"
+
+
+def test_fire_due_spawn_failure_reschedules_to_future(tmp_path):
+    """After a spawn failure the job must be rescheduled to a future next_run_at."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = RaisingSpawner()
+    cfg = _make_cfg("j1")
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg],
+        clock=clock,
+        spawner=spawner,
+    )
+    sched.schedule_all()
+    clock.advance(400)
+    fire_time = clock.t
+    sched.fire_due()
+
+    j1 = sched.snapshot().jobs["j1"]
+    assert j1.next_run_at is not None, "next_run_at must be set after spawn failure"
+    assert j1.next_run_at > fire_time, (
+        f"next_run_at={j1.next_run_at} must be strictly in the future (>{fire_time})"
+    )
+
+
+def test_fire_due_spawn_failure_calls_notify(tmp_path):
+    """notify must be called once with event='scheduler.job_failed' and job_id='j1'."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = RaisingSpawner()
+    cfg = _make_cfg("j1")
+    notify_calls: list[tuple] = []
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg],
+        clock=clock,
+        spawner=spawner,
+        notify=lambda *a, **kw: notify_calls.append((a, kw)),
+    )
+    sched.schedule_all()
+    clock.advance(400)
+    sched.fire_due()
+
+    assert len(notify_calls) == 1, (
+        f"notify must be called exactly once after spawn failure; got {len(notify_calls)}"
+    )
+    event_name, kwargs = notify_calls[0][0][0], notify_calls[0][1]
+    assert event_name == "scheduler.job_failed", (
+        f"Expected event 'scheduler.job_failed'; got {event_name!r}"
+    )
+    assert kwargs.get("job_id") == "j1", (
+        f"Expected job_id='j1' in notify kwargs; got {kwargs!r}"
+    )
+
+
+def test_fire_due_second_job_spawned_when_first_raises(tmp_path):
+    """With two due jobs, a spawn error on the first must not prevent the second from spawning."""
+    clock = FakeClock(t=1_000_000.0)
+    spawner = SelectiveSpawner(raise_ids={"a"})
+    cfg_a = _make_cfg("a")
+    cfg_b = _make_cfg("b")
+    notify_calls: list[tuple] = []
+
+    sched = _make_scheduler(
+        current_dir=tmp_path,
+        jobs=[cfg_a, cfg_b],
+        clock=clock,
+        spawner=spawner,
+        notify=lambda *a, **kw: notify_calls.append((a, kw)),
+    )
+    sched.schedule_all()
+    clock.advance(400)
+
+    # Must not raise; "a" fails, "b" must still get spawned.
+    sched.fire_due()
+
+    assert "b" in spawner.handles, (
+        "Job 'b' must be spawned even though job 'a' raised during spawn"
+    )
+    # "a" must be recorded as failed.
+    snap = sched.snapshot()
+    assert snap.jobs["a"].last_status == "spawn-failed", (
+        f"Job 'a' must have last_status='spawn-failed'; got {snap.jobs['a'].last_status!r}"
+    )
+    # "b" must be running.
+    assert snap.jobs["b"].running_pid is not None, (
+        "Job 'b' must be running (running_pid set) after successful spawn"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 — initial_states seam: persisted run-history survives a restart
+# ---------------------------------------------------------------------------
+#
+# Contract:
+#   JobScheduler.__init__ accepts an optional keyword argument
+#   ``initial_states: Mapping[str, JobRunState] | None = None``.
+#   When provided, those states seed self._states so that last_run_at,
+#   last_status, and last_exit_code are preserved across an in-process
+#   restart. A subsequent reload() + schedule_all() must:
+#     - preserve the seeded last_run_at / last_status for the job, AND
+#     - compute a fresh next_run_at (not None, not left from the old state).
+# ---------------------------------------------------------------------------
+
+
+def test_initial_states_accepted_without_error(tmp_path):
+    """JobScheduler must accept initial_states keyword without raising TypeError."""
+    from schwab_cli.server.jobs.state import JobRunState
+
+    clock = FakeClock(t=1_000_000.0)
+    spawner = FakeSpawner()
+
+    # This must not raise — currently raises TypeError: unexpected keyword argument
+    sched = JobScheduler(
+        current_dir=tmp_path,
+        jobs=[],
+        now=clock,
+        spawn=spawner,
+        next_run=_stub_next_run,
+        initial_states={"accounts": JobRunState(
+            id="accounts",
+            last_run_at=123.0,
+            last_status="ok",
+            last_exit_code=0,
+        )},
+    )
+    assert sched is not None
+
+
+def test_initial_states_preserves_last_run_at_after_reload_and_schedule_all(tmp_path):
+    """Seeded last_run_at must survive reload() + schedule_all()."""
+    from schwab_cli.server.jobs.state import JobRunState
+
+    clock = FakeClock(t=1_000_000.0)
+    spawner = FakeSpawner()
+    cfg_accounts = _make_cfg("accounts")
+
+    sched = JobScheduler(
+        current_dir=tmp_path,
+        jobs=[],
+        now=clock,
+        spawn=spawner,
+        next_run=_stub_next_run,
+        initial_states={"accounts": JobRunState(
+            id="accounts",
+            last_run_at=123.0,
+            last_status="ok",
+            last_exit_code=0,
+        )},
+    )
+    # Simulate what _start_jobs does: reload absent→updated, then schedule_all.
+    sched.reload([cfg_accounts])
+    sched.schedule_all()
+
+    snap = sched.snapshot()
+    assert snap.jobs["accounts"].last_run_at == pytest.approx(123.0), (
+        f"last_run_at must be 123.0 from initial_states; got {snap.jobs['accounts'].last_run_at}"
+    )
+
+
+def test_initial_states_preserves_last_status_after_reload_and_schedule_all(tmp_path):
+    """Seeded last_status must survive reload() + schedule_all()."""
+    from schwab_cli.server.jobs.state import JobRunState
+
+    clock = FakeClock(t=1_000_000.0)
+    spawner = FakeSpawner()
+    cfg_accounts = _make_cfg("accounts")
+
+    sched = JobScheduler(
+        current_dir=tmp_path,
+        jobs=[],
+        now=clock,
+        spawn=spawner,
+        next_run=_stub_next_run,
+        initial_states={"accounts": JobRunState(
+            id="accounts",
+            last_run_at=123.0,
+            last_status="ok",
+            last_exit_code=0,
+        )},
+    )
+    sched.reload([cfg_accounts])
+    sched.schedule_all()
+
+    snap = sched.snapshot()
+    assert snap.jobs["accounts"].last_status == "ok", (
+        f"last_status must be 'ok' from initial_states; got {snap.jobs['accounts'].last_status!r}"
+    )
+
+
+def test_initial_states_next_run_at_is_freshly_computed(tmp_path):
+    """schedule_all() must compute a fresh next_run_at, not leave it None or stale."""
+    from schwab_cli.server.jobs.state import JobRunState
+
+    clock = FakeClock(t=1_000_000.0)
+    spawner = FakeSpawner()
+    cfg_accounts = _make_cfg("accounts")
+
+    sched = JobScheduler(
+        current_dir=tmp_path,
+        jobs=[],
+        now=clock,
+        spawn=spawner,
+        next_run=_stub_next_run,
+        initial_states={"accounts": JobRunState(
+            id="accounts",
+            last_run_at=123.0,
+            last_status="ok",
+            last_exit_code=0,
+        )},
+    )
+    sched.reload([cfg_accounts])
+    sched.schedule_all()
+
+    snap = sched.snapshot()
+    nra = snap.jobs["accounts"].next_run_at
+    assert nra is not None, "next_run_at must be computed by schedule_all(), not None"
+    assert nra > clock.t, (
+        f"next_run_at={nra} must be in the future (>{clock.t})"
+    )
