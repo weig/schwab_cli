@@ -64,6 +64,38 @@ class TestResolveBinary:
         result = runner_mod.resolve_binary()
         assert isinstance(result, str)
 
+    def test_prefers_console_script_next_to_interpreter(self, monkeypatch, tmp_path):
+        """The script co-located with sys.executable wins even when PATH lookup
+        fails — the launchd-daemon case (minimal PATH, no ~/.local/bin)."""
+        (tmp_path / "schwab").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(runner_mod.sys, "executable", str(tmp_path / "python3"))
+        # Simulate launchd's minimal PATH: nothing found via which().
+        monkeypatch.setattr(runner_mod.shutil, "which", lambda _name: None)
+        assert runner_mod.resolve_binary() == str(tmp_path / "schwab")
+
+    def test_falls_back_to_legacy_sibling_name(self, monkeypatch, tmp_path):
+        """A legacy 'schwab_cli' sibling is preferred over a PATH lookup."""
+        (tmp_path / "schwab_cli").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(runner_mod.sys, "executable", str(tmp_path / "python3"))
+        monkeypatch.setattr(runner_mod.shutil, "which", lambda _name: None)
+        assert runner_mod.resolve_binary() == str(tmp_path / "schwab_cli")
+
+    def test_falls_back_to_path_then_literal_when_no_sibling(self, monkeypatch, tmp_path):
+        """No sibling script + nothing on PATH → literal 'schwab' (loud-fail)."""
+        monkeypatch.setattr(runner_mod.sys, "executable", str(tmp_path / "python3"))
+        monkeypatch.setattr(runner_mod.shutil, "which", lambda _name: None)
+        assert runner_mod.resolve_binary() == "schwab"
+
+    def test_uses_path_when_no_sibling_but_on_path(self, monkeypatch, tmp_path):
+        """No sibling, but schwab is on PATH → use the PATH location."""
+        monkeypatch.setattr(runner_mod.sys, "executable", str(tmp_path / "python3"))
+        monkeypatch.setattr(
+            runner_mod.shutil,
+            "which",
+            lambda name: "/usr/local/bin/schwab" if name == "schwab" else None,
+        )
+        assert runner_mod.resolve_binary() == "/usr/local/bin/schwab"
+
 
 # ---------------------------------------------------------------------------
 # command_argv

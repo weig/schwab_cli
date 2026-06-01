@@ -14,6 +14,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,9 +52,20 @@ _BLOCKED_RUNNER_MODULES = frozenset(
 def resolve_binary() -> str:
     """Return the path to the ``schwab`` console-script.
 
-    Falls back to the legacy ``schwab_cli`` name, then to the literal
-    ``"schwab"`` when neither is on PATH (exec then fails loudly).
+    Resolution order:
+      1. The console script co-located with the running interpreter
+         (``Path(sys.executable).parent``). This is the critical case for the
+         launchd daemon: launchd gives it a minimal PATH WITHOUT ``~/.local/bin``,
+         so :func:`shutil.which` can't find ``schwab`` — but the script lives
+         right next to ``sys.executable`` in the same venv/tool bin dir.
+      2. ``shutil.which`` on PATH (covers shell / dev invocations).
+      3. The literal ``"schwab"`` fallback (exec then fails loudly).
     """
+    bindir = Path(sys.executable).parent
+    for name in ("schwab", "schwab_cli"):
+        candidate = bindir / name
+        if candidate.exists():
+            return str(candidate)
     for name in ("schwab", "schwab_cli"):
         path = shutil.which(name)
         if path:
