@@ -844,3 +844,70 @@ def test_http_to_non_loopback_host_is_refused():
     code is never served in the clear."""
     with pytest.raises(CallbackServerError):
         CallbackServer("http://example.com:8080/cb")
+
+
+# ---------------------------------------------------------------------
+# Timeout diagnostics — the message must self-explain (no secrets)
+# ---------------------------------------------------------------------
+
+
+def test_timeout_message_reports_zero_requests_when_browser_never_arrives():
+    """The headline daemon signal: requests=0 → the redirect never reached us."""
+    port = _free_port()
+    server = CallbackServer(_http_uri(port))
+    try:
+        with pytest.raises(AuthHandlerError) as exc:
+            server.wait(
+                expected_state="S",
+                deadline=time.time() + 0.3,
+                cancel=None,
+            )
+        msg = str(exc.value)
+        assert "timed out" in msg
+        assert "requests=0" in msg
+        assert f":{port}/cb" in msg  # bind target surfaced
+    finally:
+        server.close()
+
+
+def test_timeout_message_counts_stale_state_get():
+    """A GET with the wrong state is tallied as stale_state, not a no-show."""
+    port = _free_port()
+    server = CallbackServer(_http_uri(port))
+    out: dict = {}
+    t = _wait_result_in_thread(
+        server, expected_state="RIGHT", deadline_offset=1.5, out=out
+    )
+    try:
+        httpx.get(
+            f"http://127.0.0.1:{port}/cb?code=C&state=WRONG",
+            follow_redirects=False, timeout=5,
+        )
+        t.join(timeout=4)
+        assert "exc" in out and isinstance(out["exc"], AuthHandlerError)
+        msg = str(out["exc"])
+        assert "requests=1" in msg
+        assert "stale_state=1" in msg
+    finally:
+        server.close()
+
+
+def test_timeout_message_counts_wrong_path_get():
+    """A GET to the wrong path is tallied as wrong_path."""
+    port = _free_port()
+    server = CallbackServer(_http_uri(port))
+    out: dict = {}
+    t = _wait_result_in_thread(
+        server, expected_state="S", deadline_offset=1.5, out=out
+    )
+    try:
+        httpx.get(
+            f"http://127.0.0.1:{port}/nope?code=C&state=S",
+            follow_redirects=False, timeout=5,
+        )
+        t.join(timeout=4)
+        assert "exc" in out
+        msg = str(out["exc"])
+        assert "wrong_path=1" in msg
+    finally:
+        server.close()
