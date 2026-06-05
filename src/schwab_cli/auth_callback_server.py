@@ -20,6 +20,7 @@ Threading model:
 from __future__ import annotations
 
 import http.server
+import logging
 import queue
 import ssl
 import threading
@@ -35,6 +36,8 @@ from schwab_cli.auth_handlers import (
     StaleCallbackError,
 )
 from schwab_cli.redirect_uri import parse_callback_uri
+
+log = logging.getLogger(__name__)
 
 # Default wall-clock budget for the local-server race contribution. The
 # browser round-trip is the slow part; once the user finishes login the
@@ -175,6 +178,19 @@ class CallbackServer:
         self._captured = False
         self._expected_state: str | None = None
         self._closed = False
+        self._bind_desc = f"{target.scheme}://{target.host}:{target.port}{target.path}"
+
+        # Diagnostic counters (server-scoped, GIL-guarded; the single serve
+        # thread is the only writer). Surfaced in the wait()-timeout error so a
+        # daemon failure self-explains in the notification: requests=0 means the
+        # browser never reached us (delivery / cert / redirect problem), while
+        # stale_state / wrong_path point at a mismatch rather than a no-show.
+        self._req_total = 0
+        self._req_wrong_path = 0
+        self._req_wrong_method = 0
+        self._req_early = 0       # arrived before wait() set expected_state
+        self._req_stale = 0       # state missing/mismatch
+        self._req_bad = 0         # no code and no error
 
         handler_cls = self._build_handler(target.path)
 
@@ -208,6 +224,7 @@ class CallbackServer:
             daemon=True,
         )
         self._thread.start()
+        log.info("callback server listening on %s", self._bind_desc)
 
     def _build_handler(self, path: str) -> type[http.server.BaseHTTPRequestHandler]:
         server = self  # closure for the capture state + expected_state
@@ -231,9 +248,15 @@ class CallbackServer:
             def _reject_method(self) -> None:
                 # Wrong path → 404 (reveal nothing); right path but wrong
                 # method → 405.
-                if urllib.parse.urlparse(self.path).path != path:
+                req_path = urllib.parse.urlparse(self.path).path
+                server._req_total += 1
+                if req_path != path:
+                    server._req_wrong_path += 1
+                    log.info("callback: 404 wrong path %r (method %s)", req_path, self.command)
                     self._send_empty(404)
                 else:
+                    server._req_wrong_method += 1
+                    log.info("callback: 405 wrong method %s", self.command)
                     self._send_empty(405)
 
             do_POST = _reject_method  # noqa: N815 — stdlib name
@@ -244,7 +267,10 @@ class CallbackServer:
 
             def do_GET(self):  # noqa: N802 — stdlib name
                 parsed = urllib.parse.urlparse(self.path)
+                server._req_total += 1
                 if parsed.path != path:
+                    server._req_wrong_path += 1
+                    log.info("callback: 404 wrong path %r", parsed.path)
                     self._send_empty(404)
                     return
 
@@ -252,9 +278,12 @@ class CallbackServer:
                 if expected_state is None:
                     # A GET arrived before wait() set the expected state.
                     # Treat as keep-waiting; do not capture.
+                    server._req_early += 1
+                    log.warning("callback: GET arrived before wait() armed expected_state")
                     self._send_html(200, _WAITING_BODY)
                     return
 
+                # NB: never log ``parsed.query`` — it carries the code + state.
                 try:
                     result = parse_callback_query(
                         parsed.query,
@@ -263,19 +292,25 @@ class CallbackServer:
                     )
                 except StaleCallbackError:
                     # Wrong/missing state — keep waiting, do not capture.
+                    server._req_stale += 1
+                    log.warning("callback: rejected GET (missing/mismatched state); still waiting")
                     self._send_html(200, _WAITING_BODY)
                     return
                 except AuthHandlerError:
                     # Neither code nor error — bad request, keep waiting.
+                    server._req_bad += 1
+                    log.warning("callback: 400 GET had neither code nor error")
                     self._send_html(400, _BAD_REQUEST_BODY)
                     return
 
                 # Server-scoped, GIL-guarded idempotent capture.
                 if server._captured:
+                    log.info("callback: duplicate GET after capture")
                     self._send_html(200, _ALREADY_BODY)
                     return
                 server._captured = True
                 server._result_q.put(result)
+                log.info("callback: captured (kind=%s)", result["kind"])
                 self._send_html(200, _SUCCESS_BODY)
 
         return _Handler
@@ -283,6 +318,21 @@ class CallbackServer:
     @property
     def port(self) -> int:
         return self._port
+
+    def _diag_summary(self) -> str:
+        """Human-readable request tally for timeout diagnostics (no secrets).
+
+        ``requests=0`` is the headline signal: the browser never reached the
+        server, so the OAuth redirect to the loopback callback didn't deliver
+        (cert/redirect/delivery problem) rather than a state/path mismatch.
+        """
+        return (
+            f"on {self._bind_desc}; requests={self._req_total} "
+            f"(wrong_path={self._req_wrong_path}, "
+            f"wrong_method={self._req_wrong_method}, "
+            f"early={self._req_early}, stale_state={self._req_stale}, "
+            f"bad={self._req_bad})"
+        )
 
     def wait(
         self,
@@ -304,8 +354,12 @@ class CallbackServer:
                 self.close()
                 raise AuthHandlerError("cancelled by other handler")
             if deadline is not None and time.time() >= deadline:
+                summary = self._diag_summary()
                 self.close()
-                raise AuthHandlerError("local callback server timed out")
+                log.warning("local callback server timed out %s", summary)
+                raise AuthHandlerError(
+                    f"local callback server timed out {summary}"
+                )
             try:
                 result = self._result_q.get(timeout=poll_interval)
             except queue.Empty:
