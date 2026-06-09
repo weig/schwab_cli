@@ -132,9 +132,21 @@ def run(
                     fg=typer.colors.RED, err=True,
                 )
                 raise typer.Exit(code=1)
+            # Auto-selected MCP but the stream dropped. Only fall back to a
+            # direct streamer if the daemon is actually gone — re-probe
+            # first; if it's still up, abort rather than kick its session
+            # (Schwab allows one streamer per account).
+            if _probe_mcp_daemon(mcp_url):
+                typer.secho(
+                    f"MCP daemon at {mcp_url} is still running but its stream "
+                    "connection failed — not opening a direct Schwab WebSocket "
+                    "(it would disconnect the daemon). Retry, or use "
+                    "--direct --force to override.",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
             typer.secho(
-                "(MCP daemon probe succeeded but connection failed; "
-                "falling back to direct streamer)",
+                "(MCP daemon went away; falling back to a direct streamer)",
                 fg=typer.colors.YELLOW, err=True,
             )
             asyncio.run(_run_direct(symbols, fields=fields, as_json=as_json))

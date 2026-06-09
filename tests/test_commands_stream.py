@@ -180,3 +180,47 @@ def test_stream_direct_proceeds_when_daemon_unreachable(monkeypatch, tmp_path):
         result = runner.invoke(app, ["stream", "NVDA", "--direct"])
     assert result.exit_code == 0, result.output + result.stderr
     assert called["direct"] == 1
+
+
+# ---- auto-MCP mid-stream drop: re-probe before falling back to direct -----
+
+
+def test_stream_auto_mcp_drop_aborts_when_daemon_still_up(monkeypatch, tmp_path):
+    """If the daemon is still up after the MCP stream drops, do NOT open a
+    direct streamer (it would evict the daemon) — abort with exit 1."""
+    _prep(monkeypatch, tmp_path)
+    from schwab_cli.commands._stream_mcp import McpUnreachable
+    with patch(
+        "schwab_cli.commands.stream._probe_mcp_daemon", side_effect=[True, True]
+    ), patch(
+        "schwab_cli.commands.stream._run_via_mcp",
+        side_effect=McpUnreachable("drop"),
+    ), patch(
+        "schwab_cli.commands.stream._run_direct"
+    ) as direct:
+        result = runner.invoke(app, ["stream", "NVDA"])
+    assert result.exit_code == 1, result.stderr
+    assert "still running" in result.stderr
+    assert not direct.called
+
+
+def test_stream_auto_mcp_drop_falls_back_when_daemon_gone(monkeypatch, tmp_path):
+    """If the daemon really went away, fall back to a direct streamer."""
+    _prep(monkeypatch, tmp_path)
+    from schwab_cli.commands._stream_mcp import McpUnreachable
+    called = {"direct": 0}
+
+    async def fake_direct(symbols, *, fields, as_json):
+        called["direct"] += 1
+
+    with patch(
+        "schwab_cli.commands.stream._probe_mcp_daemon", side_effect=[True, False]
+    ), patch(
+        "schwab_cli.commands.stream._run_via_mcp",
+        side_effect=McpUnreachable("drop"),
+    ), patch(
+        "schwab_cli.commands.stream._run_direct", side_effect=fake_direct
+    ):
+        result = runner.invoke(app, ["stream", "NVDA"])
+    assert result.exit_code == 0, result.stderr
+    assert called["direct"] == 1
