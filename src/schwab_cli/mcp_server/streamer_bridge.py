@@ -22,6 +22,7 @@ from typing import Any
 from schwab_cli.api.client import SchwabClient
 from schwab_cli.api.streamer import (
     Streamer,
+    StreamerInfo,
     classify_frame,
     fetch_streamer_info,
     is_heartbeat,
@@ -42,6 +43,7 @@ class StreamerBridge:
         manager: SubscriptionManager,
         *,
         notifier=None,
+        idle_linger_s: float = 45.0,
     ) -> None:
         self._client = client
         self._logbook = logbook
@@ -52,12 +54,24 @@ class StreamerBridge:
         self._queues: dict[tuple[str, str], asyncio.Queue] = {}
         self._lock = asyncio.Lock()
         self._reconnect_count = 0
+        # When the subscription refcount hits zero we keep the socket open
+        # for ``idle_linger_s`` so a re-subscribe within the window reuses
+        # it (avoids a ~1s reconnect). 0 = close immediately (legacy).
+        self._idle_linger_s = idle_linger_s
+        self._idle_close_task: asyncio.Task | None = None
+        # streamer_info (socket URL + IDs from /userPreference) is static
+        # for the daemon's life — cache it so post-linger / post-rotation
+        # re-opens skip the REST round-trip. Cleared on rotation as cheap
+        # insurance against stale socket metadata.
+        self._cached_info: StreamerInfo | None = None
 
     # ---- state ---------------------------------------------------------
 
     def streamer_state(self) -> str:
         if self._streamer is None:
             return "idle"
+        if self._idle_close_task is not None and not self._idle_close_task.done():
+            return "lingering"
         return "connected"
 
     def reconnect_count(self) -> int:
@@ -80,6 +94,9 @@ class StreamerBridge:
         shouldn't starve others).
         """
         async with self._lock:
+            # Cancel any pending idle-close: a subscriber is back within
+            # the linger window, so the live socket is reused as-is.
+            self._cancel_idle_close()
             await self._ensure_connected()
             new_keys = self._manager.add(session, progress_token, service, symbols)
             queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
@@ -114,7 +131,7 @@ class StreamerBridge:
             if gone_keys and self._streamer is not None:
                 await self._schwab_unsubscribe(gone_keys)
             if not self._manager.active_symbols():
-                await self._close_streamer()
+                await self._on_refcount_zero()
 
     async def drop_session(self, session: str) -> None:
         """Clean up every subscription a session held — called on
@@ -132,7 +149,7 @@ class StreamerBridge:
             if gone_keys and self._streamer is not None:
                 await self._schwab_unsubscribe(gone_keys)
             if not self._manager.active_symbols():
-                await self._close_streamer()
+                await self._on_refcount_zero()
 
     # ---- Schwab wire ops ----------------------------------------------
 
@@ -179,6 +196,9 @@ class StreamerBridge:
         async with self._lock:
             active = self._manager.active_symbols()
             await self._close_streamer()
+            # Refetch streamer_info on the next connect — don't run a
+            # long-lived daemon on socket metadata cached before rotation.
+            self._cached_info = None
             if not active:
                 # Nothing to resubscribe; the next add_subscription
                 # call will reopen normally.
@@ -191,12 +211,60 @@ class StreamerBridge:
                 symbol_count=len(active),
             )
 
+    # ---- idle linger --------------------------------------------------
+
+    async def _on_refcount_zero(self) -> None:
+        """The last subscription just went away (called under the lock).
+
+        With ``idle_linger_s <= 0`` close immediately (legacy). Otherwise
+        arm a single cancellable timer that closes the socket once the
+        linger elapses *if still idle* — so a re-subscribe within the
+        window reuses the live connection instead of reconnecting.
+        """
+        if self._idle_linger_s <= 0:
+            await self._close_streamer()
+            return
+        self._cancel_idle_close()
+        self._idle_close_task = asyncio.create_task(self._idle_close_after())
+        self._logbook.info(
+            "streamer.lingering", linger_s=self._idle_linger_s,
+        )
+
+    async def _idle_close_after(self) -> None:
+        try:
+            await asyncio.sleep(self._idle_linger_s)
+        except asyncio.CancelledError:
+            return
+        async with self._lock:
+            # Clear our own handle first so _close_streamer's defensive
+            # _cancel_idle_close() doesn't try to cancel the task we're
+            # running in. Re-check the refcount: a subscriber may have
+            # arrived after the sleep but before we took the lock.
+            self._idle_close_task = None
+            if not self._manager.active_symbols():
+                await self._close_streamer()
+
+    def _cancel_idle_close(self) -> None:
+        task = self._idle_close_task
+        self._idle_close_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def close(self) -> None:
+        """Daemon-shutdown teardown. Cancels any pending idle-close timer
+        and closes the socket so no task is left pending when the event
+        loop tears down. Idempotent."""
+        async with self._lock:
+            await self._close_streamer()
+
     # ---- connection lifecycle -----------------------------------------
 
     async def _ensure_connected(self) -> None:
         if self._streamer is not None:
             return
-        info = fetch_streamer_info(self._client)
+        if self._cached_info is None:
+            self._cached_info = fetch_streamer_info(self._client)
+        info = self._cached_info
         streamer = Streamer(info, self._client.session.access_token)
         await streamer.connect()
         await streamer.login()
@@ -209,6 +277,10 @@ class StreamerBridge:
         )
 
     async def _close_streamer(self) -> None:
+        # Forced closes (rotation, shutdown) must also drop any pending
+        # idle-close timer. No-op when called from _idle_close_after,
+        # which clears the handle before invoking us.
+        self._cancel_idle_close()
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:

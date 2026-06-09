@@ -13,7 +13,13 @@ import io
 import json
 from unittest.mock import patch
 
-from schwab_cli.mcp_server.app import SchwabMcpServer
+import pytest
+
+from schwab_cli.mcp_server.app import (
+    _DEFAULT_IDLE_LINGER_S,
+    SchwabMcpServer,
+    _idle_linger_default,
+)
 from schwab_cli.mcp_server.logbook import LogBook
 
 
@@ -41,6 +47,28 @@ def _make_server() -> SchwabMcpServer:
 
 def _call(coro) -> list:
     return asyncio.run(coro)
+
+
+# ---- idle-linger env default ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env, expected",
+    [
+        (None, _DEFAULT_IDLE_LINGER_S),   # unset -> default
+        ("0", 0.0),                       # explicit close-immediately
+        ("10", 10.0),                     # explicit seconds
+        ("12.5", 12.5),                   # float
+        ("nonsense", _DEFAULT_IDLE_LINGER_S),  # invalid -> default, no crash
+        ("-5", _DEFAULT_IDLE_LINGER_S),   # negative -> default
+    ],
+)
+def test_idle_linger_default_parses_env(monkeypatch, env, expected):
+    if env is None:
+        monkeypatch.delenv("SCHWAB_STREAMER_IDLE_LINGER_S", raising=False)
+    else:
+        monkeypatch.setenv("SCHWAB_STREAMER_IDLE_LINGER_S", env)
+    assert _idle_linger_default() == expected
 
 
 # ---- get_quote --------------------------------------------------------
