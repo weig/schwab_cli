@@ -1386,6 +1386,87 @@ def _fetch_underlying_quote_safe(
     }
 
 
+def _seed_underlying_quote(client: SchwabClient, symbol: str) -> dict:
+    """Best-effort REST quote seed → ``{bid, ask, last, net_change}`` (the
+    shape the streamer decode also produces). ``{}`` on any failure."""
+    try:
+        from schwab_cli.api.quotes import get_quotes
+        raw = get_quotes(client, [symbol])
+    except Exception:  # noqa: BLE001 — best-effort seed
+        return {}
+    entry = raw.get(symbol) if isinstance(raw, dict) else None
+    q = (
+        entry.get("quote")
+        if isinstance(entry, dict) and isinstance(entry.get("quote"), dict)
+        else None
+    )
+    if not q:
+        return {}
+    return {
+        "bid": q.get("bidPrice"),
+        "ask": q.get("askPrice"),
+        "last": q.get("lastPrice"),
+        "net_change": q.get("netChange"),
+        "bid_size": q.get("bidSize"),
+        "ask_size": q.get("askSize"),
+        "volume": q.get("totalVolume"),
+    }
+
+
+def run_quote_watch(
+    symbol: str, *, mcp_url: str | None = None,
+) -> None:
+    """Watch the order-confirm live ticker for one symbol — **places
+    nothing**. Uses the exact production stack (``LiveTicker`` +
+    ``StreamQuoteSource``): streams via the daemon when reachable
+    (repaints a line above the prompt), REST seed otherwise. Press Enter
+    (or Ctrl+C) to stop.
+    """
+    from schwab_cli.commands._stream_mcp import probe_daemon
+    from schwab_cli.order_pipeline.live_ticker import (
+        LiveTicker,
+        StreamQuoteSource,
+    )
+    from schwab_cli.order_pipeline.rules import _format_live_line, _ticker_mcp_url
+
+    symbol = symbol.upper()
+    mcp_url = mcp_url or _ticker_mcp_url()
+    client = _client()
+    seed = {**_seed_underlying_quote(client, symbol), "symbol": symbol}
+    initial = _format_live_line(seed)
+
+    stream_src = None
+    if probe_daemon(mcp_url):
+        stream_src = StreamQuoteSource(symbol, mcp_url=mcp_url)
+        stream_src.start()
+        _src = stream_src
+
+        def _fetch() -> dict | None:
+            snap = _src.latest()
+            return snap if snap is not None else seed
+    else:
+        def _fetch() -> dict | None:
+            return seed
+
+    ticker = LiveTicker(
+        fetch=_fetch, render=_format_live_line, initial_line=initial,
+    )
+    ticker.start()
+    try:
+        typer.echo(
+            'Press Enter to stop (demo — nothing is placed): ',
+            err=True, nl=False,
+        )
+        sys.stdin.readline()
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        ticker.stop()
+        if stream_src is not None:
+            stream_src.stop()
+    typer.echo("\n(demo ended — no order was placed)", err=True)
+
+
 def _fetch_account_safe(client: SchwabClient, account_number: str) -> dict:
     from schwab_cli.api.accounts import get_account
     return get_account(client, account_number)

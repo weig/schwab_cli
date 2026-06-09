@@ -1086,6 +1086,22 @@ def order_preview(
     )
 
 
+@order_app.command(
+    "quote-watch",
+    help="Live underlying-quote ticker (demo of the order-confirm ticker; "
+         "places nothing).",
+)
+def order_quote_watch(
+    symbol: str = typer.Argument(..., help="Underlying symbol, e.g. AMZN."),
+    mcp_url: str = typer.Option(
+        None, "--mcp-url",
+        help="MCP daemon URL (default: $SCHWAB_MCP_URL or 127.0.0.1:7234).",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    order_cmd.run_quote_watch(symbol, mcp_url=mcp_url)
+
+
 @order_app.command("get", help="Fetch one order by id.")
 def order_get(
     order_id: str = typer.Argument(..., help="Schwab order id."),

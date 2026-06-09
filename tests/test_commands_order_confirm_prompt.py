@@ -78,3 +78,64 @@ def test_random_text_aborts(text):
         with pytest.raises(typer.Exit) as exc:
             _confirm_or_abort(yes=False)
         assert int(exc.value.exit_code or 0) == 0
+
+
+# ---- ConfirmRule: live-ticker data source (daemon stream vs REST) ----------
+
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+from schwab_cli.order_pipeline.context import OrderContext  # noqa: E402
+from schwab_cli.order_pipeline.rules import ConfirmRule  # noqa: E402
+
+
+def _confirm_ctx(**over):
+    base = dict(
+        spec=None, body={}, account=SimpleNamespace(account_number="123456789"),
+        client=object(), sub="place", dry_run=False, yes=False, overriding=False,
+        profile_name="p", override_reason=None, as_json=False, limits=None,
+        underlying_quote={"symbol": "SPY", "last": 1.0},
+    )
+    base.update(over)
+    return OrderContext(**base)
+
+
+def test_confirm_rule_streams_via_daemon_when_reachable():
+    with patch("schwab_cli.commands.order._confirm_or_abort"), \
+         patch("schwab_cli.commands.order._fetch_underlying_quote_safe",
+               return_value={"symbol": "SPY", "last": 2.0}), \
+         patch("schwab_cli.commands._stream_mcp.probe_daemon",
+               return_value=True), \
+         patch("schwab_cli.order_pipeline.live_ticker.StreamQuoteSource") as SQS, \
+         patch("schwab_cli.order_pipeline.live_ticker.LiveTicker") as LT:
+        ConfirmRule().execute(_confirm_ctx())
+    # Stream source started and torn down; ticker driven by it.
+    SQS.assert_called_once()
+    SQS.return_value.start.assert_called_once()
+    SQS.return_value.stop.assert_called_once()
+    LT.return_value.start.assert_called_once()
+    LT.return_value.stop.assert_called_once()
+
+
+def test_confirm_rule_rest_only_when_no_daemon():
+    with patch("schwab_cli.commands.order._confirm_or_abort"), \
+         patch("schwab_cli.commands.order._fetch_underlying_quote_safe",
+               return_value={"symbol": "SPY"}), \
+         patch("schwab_cli.commands._stream_mcp.probe_daemon",
+               return_value=False), \
+         patch("schwab_cli.order_pipeline.live_ticker.StreamQuoteSource") as SQS, \
+         patch("schwab_cli.order_pipeline.live_ticker.LiveTicker") as LT:
+        ConfirmRule().execute(_confirm_ctx())
+    SQS.assert_not_called()   # never streams
+    LT.return_value.start.assert_called_once()
+    LT.return_value.stop.assert_called_once()
+
+
+def test_confirm_rule_skips_ticker_when_yes_flag():
+    # --yes (non-override) skips the prompt → no ticker, no probe.
+    with patch("schwab_cli.commands.order._confirm_or_abort"), \
+         patch("schwab_cli.commands._stream_mcp.probe_daemon") as probe, \
+         patch("schwab_cli.order_pipeline.live_ticker.LiveTicker") as LT:
+        ConfirmRule().execute(_confirm_ctx(yes=True))
+    probe.assert_not_called()
+    LT.assert_not_called()
