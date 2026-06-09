@@ -464,8 +464,24 @@ def watch_list(
 
 
 @watch_app.command("show", help="Live streaming table. Ctrl-C to exit.")
-def watch_show(doc: bool = doc_option()) -> None:
-    watch_cmd.run_show()
+def watch_show(
+    direct: bool = typer.Option(
+        False, "--direct",
+        help="Open a direct Schwab WebSocket instead of routing through "
+             "the daemon. Refused while a daemon is running unless --force.",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="With --direct, proceed even when an MCP daemon is running "
+             "(may disconnect the daemon's streamer session).",
+    ),
+    mcp_url: str = typer.Option(
+        "http://127.0.0.1:7234/mcp", "--mcp-url",
+        help="Streamable HTTP URL of the MCP daemon.",
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    watch_cmd.run_show(direct=direct, force=force, mcp_url=mcp_url)
 
 
 # ---- server sub-app ---------------------------------------------------
