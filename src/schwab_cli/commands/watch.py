@@ -27,9 +27,17 @@ import typer
 from schwab_cli import config as config_module
 from schwab_cli.api.client import SchwabClient
 from schwab_cli.api.quotes import get_quotes
+from schwab_cli.commands._stream_mcp import (
+    McpUnreachable,
+    probe_daemon,
+    stream_quotes_via_mcp,
+)
 from schwab_cli.session import load as load_session
 from schwab_cli.storage import vol_history
 from schwab_cli.storage.groups import GROUP_OHLCV, GROUP_VOLATILITY
+
+_DEFAULT_MCP_URL = "http://127.0.0.1:7234/mcp"
+_SERVICE = "LEVELONE_EQUITIES"
 
 
 _NY = ZoneInfo("America/New_York")
@@ -177,9 +185,21 @@ def run_list(as_json: bool = False) -> None:
 # ---- show (live stream) -----------------------------------------------
 
 
-def run_show() -> None:
+def run_show(
+    *,
+    direct: bool = False,
+    force: bool = False,
+    mcp_url: str = _DEFAULT_MCP_URL,
+) -> None:
     """Subscribe to LEVELONE_EQUITIES for every watchlist symbol and
-    render an updating rich.Live table. ``Ctrl-C`` to exit."""
+    render an updating rich.Live table. ``Ctrl-C`` to exit.
+
+    Prefers the daemon's shared streamer (Schwab allows one streamer per
+    account): when a daemon is reachable, quotes come through it; otherwise
+    we open our own direct connection. ``--direct`` forces a direct
+    connection but is refused while a daemon is up (it would kick the
+    daemon's session) unless ``--force``.
+    """
     from schwab_cli.dataset.store import list_watched_symbols
 
     with vol_history.connect() as conn:
@@ -188,14 +208,109 @@ def run_show() -> None:
         typer.echo("(watchlist empty — use `schwab watch add SYMBOL`)")
         return
 
+    if direct and probe_daemon(mcp_url) and not force:
+        typer.secho(
+            f"MCP daemon is running at {mcp_url} — refusing --direct because "
+            "Schwab allows only one streamer session per account and a direct "
+            "connection would disconnect the daemon.",
+            fg=typer.colors.RED, err=True,
+        )
+        typer.secho(
+            "Drop --direct to stream through the daemon, or pass "
+            "--direct --force to proceed anyway.",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(code=2)
+
+    use_mcp = not direct and probe_daemon(mcp_url)
+    if use_mcp:
+        try:
+            asyncio.run(_run_show_via_mcp(symbols, mcp_url=mcp_url))
+            return
+        except McpUnreachable:
+            # The MCP stream dropped. Only fall back to a direct streamer if
+            # the daemon is actually gone — re-probe first. If it's still up,
+            # a direct connection would kick its session (the collision this
+            # routing exists to avoid), so abort instead of evicting it.
+            if probe_daemon(mcp_url):
+                typer.secho(
+                    "MCP daemon is still running but its stream connection "
+                    "failed — not opening a direct streamer (it would "
+                    "disconnect the daemon). Retry, or use --direct --force "
+                    "to override.",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
+            typer.secho(
+                "(MCP daemon went away; falling back to a direct streamer)",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        except KeyboardInterrupt:
+            typer.echo("\n(stopped)")
+            return
+
     try:
-        asyncio.run(_run_show_async(symbols))
+        asyncio.run(_run_show_direct(symbols))
     except KeyboardInterrupt:
         typer.echo("\n(stopped)")
 
 
-async def _run_show_async(symbols: list[str]) -> None:
-    """Open one streamer session, subscribe to ``symbols``, and update
+def _apply_decoded(
+    state: dict[str, "QuoteSnapshot"], decoded: dict[str, Any]
+) -> bool:
+    """Merge one decoded quote update into ``state``. Returns True if a
+    watched symbol changed (so the caller repaints)."""
+    sym = (decoded.get("symbol") or "").upper()
+    if sym not in state:
+        return False
+    state[sym] = state[sym].merged_with(decoded)
+    return True
+
+
+def _seed_state(
+    symbols: list[str],
+) -> dict[str, "QuoteSnapshot"]:
+    """Best-effort REST snapshot so the first paint isn't blank. Falls
+    back to empty snapshots (filled by the first streaming frames) when
+    auth or the quote call is unavailable — used by the MCP path, where
+    the daemon (not this process) owns the streamer."""
+    empty = {sym: QuoteSnapshot(symbol=sym) for sym in symbols}
+    cfg = config_module.load()
+    session = load_session()
+    if cfg is None or session is None:
+        return empty
+    try:
+        seed = get_quotes(SchwabClient(cfg, session), symbols)
+    except Exception:  # noqa: BLE001 — best-effort seed
+        return empty
+    return {sym: _extract_quote(sym, seed.get(sym)) for sym in symbols}
+
+
+async def _run_show_via_mcp(symbols: list[str], *, mcp_url: str) -> None:
+    """Render the watch table from the daemon's shared streamer."""
+    from rich.live import Live
+
+    state = _seed_state(symbols)
+    asof = {"t": datetime.now(tz=_NY)}
+    with Live(
+        _build_table(list(state.values()), asof=asof["t"], live=True),
+        refresh_per_second=4,
+        screen=False,
+    ) as live:
+        def on_decoded(decoded: dict[str, Any]) -> None:
+            if _apply_decoded(state, decoded):
+                asof["t"] = datetime.now(tz=_NY)
+                live.update(_build_table(
+                    list(state.values()), asof=asof["t"], live=True,
+                ))
+
+        await stream_quotes_via_mcp(
+            symbols, mcp_url=mcp_url, on_decoded=on_decoded,
+        )
+
+
+async def _run_show_direct(symbols: list[str]) -> None:
+    """Open our own streamer session, subscribe to ``symbols``, and update
     a rich.Live table on every data frame."""
     from rich.live import Live
 
@@ -217,7 +332,6 @@ async def _run_show_async(symbols: list[str]) -> None:
         raise typer.Exit(code=1)
     client = SchwabClient(cfg, session)
     info = fetch_streamer_info(client)
-    service = "LEVELONE_EQUITIES"
 
     # Seed the table with a REST snapshot so the first frame's render
     # has all rows present (the streamer typically pushes one symbol at
@@ -233,9 +347,9 @@ async def _run_show_async(symbols: list[str]) -> None:
     try:
         await streamer.login()
         await streamer.subscribe(
-            service=service,
+            service=_SERVICE,
             keys=[s.upper() for s in symbols],
-            fields=default_fields(service),
+            fields=default_fields(_SERVICE),
         )
         with Live(
             _build_table(list(state.values()), asof=last_update, live=True),
@@ -249,14 +363,10 @@ async def _run_show_async(symbols: list[str]) -> None:
                     continue
                 changed = False
                 for chunk in frame.get("data", []):
-                    svc = chunk.get("service") or service
+                    svc = chunk.get("service") or _SERVICE
                     for content in chunk.get("content", []):
-                        decoded = decode(svc, content)
-                        sym = (decoded.get("symbol") or "").upper()
-                        if sym not in state:
-                            continue
-                        state[sym] = state[sym].merged_with(decoded)
-                        changed = True
+                        if _apply_decoded(state, decode(svc, content)):
+                            changed = True
                 if changed:
                     last_update = datetime.now(tz=_NY)
                     live.update(_build_table(
@@ -265,7 +375,7 @@ async def _run_show_async(symbols: list[str]) -> None:
     finally:
         try:
             await streamer.unsubscribe(
-                service=service, keys=[s.upper() for s in symbols],
+                service=_SERVICE, keys=[s.upper() for s in symbols],
             )
         finally:
             await streamer.close()
