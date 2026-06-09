@@ -26,6 +26,8 @@ handlers can still succeed.
 """
 from __future__ import annotations
 
+import os
+import signal
 import sys
 import threading
 import time
@@ -266,6 +268,9 @@ class AutoLoginSupervisor:
         self._timeout_seconds = timeout_seconds
         self._proc: subprocess.Popen | None = None
         self._watchdog: threading.Timer | None = None
+        # Guards terminate()'s read-clear of _watchdog/_proc: the watchdog
+        # Timer fires on its own thread and may race the caller's finally.
+        self._lock = threading.Lock()
 
     def start(self) -> None:
         argv, _log_path = _build_webauto_argv(
@@ -278,11 +283,16 @@ class AutoLoginSupervisor:
             stderr_log_dir=self._stderr_log_dir,
         )
         stderr = None if _debug_enabled() else subprocess.DEVNULL
+        # start_new_session=True puts the subprocess in its own session and
+        # process group, so terminate() can ``killpg`` the whole tree —
+        # webauto-cli → seleniumbase → uc_driver → chrome — instead of
+        # orphaning the browser-driver grandchildren (which otherwise leak).
         self._proc = subprocess.Popen(  # noqa: S603 — argv from cfg, not shell
             argv,
             stdin=subprocess.DEVNULL,
             stdout=None,
             stderr=stderr,
+            start_new_session=True,
         )
         # Watchdog kills the subprocess after timeout even if the caller
         # forgets to call terminate().
@@ -291,13 +301,22 @@ class AutoLoginSupervisor:
         self._watchdog.start()
 
     def terminate(self) -> None:
-        """SIGTERM → 5s → SIGKILL. Idempotent."""
-        if self._watchdog is not None:
-            self._watchdog.cancel()
-            self._watchdog = None
-        if self._proc is not None:
-            _terminate(self._proc)
-            self._proc = None
+        """SIGTERM → 5s → SIGKILL. Idempotent and thread-safe.
+
+        The watchdog Timer fires on its own thread and can race the
+        caller's ``finally``. We atomically capture-and-clear both
+        references under the lock, then run the side effects (``cancel``,
+        ``_terminate``) outside it so we never hold the lock across the
+        multi-second subprocess teardown. Whichever caller wins gets the
+        non-None references; the loser sees ``None`` and no-ops.
+        """
+        with self._lock:
+            watchdog, self._watchdog = self._watchdog, None
+            proc, self._proc = self._proc, None
+        if watchdog is not None:
+            watchdog.cancel()
+        if proc is not None:
+            _terminate(proc)
 
 
 # --------------------------------------------------------------------- #
@@ -307,7 +326,6 @@ class AutoLoginSupervisor:
 
 def _debug_enabled() -> bool:
     """``DEBUG`` env in {1, true, yes} (case-insensitive)."""
-    import os
     return os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
 
 
@@ -347,9 +365,59 @@ def _build_webauto_argv(
 
 
 def _terminate(proc: subprocess.Popen) -> None:
-    """SIGTERM, 5s grace, SIGKILL. Idempotent — no-op on already-exited."""
+    """Tear down the subprocess and its whole tree. Idempotent.
+
+    The subprocess is spawned with ``start_new_session=True`` (see
+    :meth:`AutoLoginSupervisor.start`), so it leads its own process group.
+    We signal that group with ``killpg`` — SIGTERM, 5s grace, then a
+    SIGKILL sweep — so the browser-driver descendants (seleniumbase →
+    uc_driver → chrome) go down with it instead of being orphaned and
+    leaked. The final SIGKILL is unconditional (any already-dead group
+    yields ``ProcessLookupError``, which we swallow) so a child that
+    ignores SIGTERM can't survive the leader's exit. (A descendant forked
+    *into* the group during the grace window — after SIGKILL enumerates
+    members — could still escape; webauto's driver tree is spun up before
+    teardown, not during, so this is not a concern in practice.)
+
+    Defensive: if the child is *not* its own group leader (spawned without
+    ``start_new_session``), we fall back to single-process signals — never
+    ``killpg`` a shared group that would also hit the daemon itself.
+    """
     if proc.poll() is not None:
         return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+
+    if pgid != proc.pid:
+        _terminate_single(proc)
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _terminate_single(proc: subprocess.Popen) -> None:
+    """SIGTERM, 5s grace, SIGKILL — for a single process only.
+
+    Used when the child does not lead its own process group, so we must
+    not ``killpg`` (it would signal the daemon's group too).
+    """
     try:
         proc.terminate()
     except ProcessLookupError:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -375,6 +376,125 @@ def test_supervisor_terminate_kills_long_running(tmp_path):
     assert elapsed < 6.5, f"terminate() took {elapsed}s"
 
 
+def test_supervisor_terminate_is_thread_safe_under_concurrency(tmp_path):
+    """terminate() may be called by the watchdog Timer thread and the
+    caller's finally at the same time. Hammering it from many threads
+    while the watchdog is armed must never raise (regression for the
+    ``self._watchdog.cancel()`` / ``self._proc`` TOCTOU)."""
+    fixture = _write_fixture_script(tmp_path, "import time; time.sleep(30)\n")
+    sup = AutoLoginSupervisor(
+        [sys.executable, str(fixture)],
+        auth_url="https://schwab/auth",
+        state="S",
+        stderr_log_dir=tmp_path / "logs",
+        timeout_seconds=60.0,  # watchdog armed but won't fire during the test
+    )
+    sup.start()
+    pid = sup._proc.pid
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(8)
+
+    def hammer() -> None:
+        try:
+            barrier.wait()
+            sup.terminate()
+        except BaseException as exc:  # noqa: BLE001 — capture any race fault
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, f"terminate() raced: {errors!r}"
+    # Subprocess is gone and the watchdog was cancelled.
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert sup._proc is None and sup._watchdog is None
+
+
+def test_supervisor_start_leads_its_own_process_group(tmp_path):
+    """The subprocess must lead its own session/process group so the whole
+    tree (webauto-cli → seleniumbase → uc_driver → chrome) can be signalled
+    together. ``getpgid(pid) == pid`` proves it is the group leader, i.e.
+    ``start_new_session=True`` was used."""
+    fixture = _write_fixture_script(tmp_path, "import time; time.sleep(5)\n")
+    sup = AutoLoginSupervisor(
+        [sys.executable, str(fixture)],
+        auth_url="https://schwab/auth",
+        state="S",
+        stderr_log_dir=tmp_path / "logs",
+        timeout_seconds=10.0,
+    )
+    sup.start()
+    try:
+        pid = sup._proc.pid
+        assert os.getpgid(pid) == pid, (
+            "subprocess is not its own process-group leader; "
+            "start_new_session=True is required so killpg reaches the tree"
+        )
+    finally:
+        sup.terminate()
+
+
+def test_supervisor_terminate_reaps_grandchild_tree(tmp_path):
+    """Regression for the uc_driver leak: ``terminate()`` must kill the
+    subprocess's *descendants* (the browser-driver tree), not just the
+    direct child. The fixture spawns a long-lived grandchild (stand-in for
+    uc_driver/chrome) and records its PID; after ``terminate()`` that
+    grandchild must be gone."""
+    sidecar = tmp_path / "grandchild.pid"
+    fixture = _write_fixture_script(
+        tmp_path,
+        "import subprocess, sys, time\n"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open({str(sidecar)!r}, 'w').write(str(g.pid))\n"
+        "time.sleep(120)\n",
+    )
+    sup = AutoLoginSupervisor(
+        [sys.executable, str(fixture)],
+        auth_url="https://schwab/auth",
+        state="S",
+        stderr_log_dir=tmp_path / "logs",
+        timeout_seconds=60.0,
+    )
+    sup.start()
+    grandchild_pid: int | None = None
+    try:
+        for _ in range(100):  # wait up to ~5s for the grandchild PID
+            if sidecar.exists() and sidecar.read_text().strip():
+                break
+            time.sleep(0.05)
+        grandchild_pid = int(sidecar.read_text().strip())
+        os.kill(grandchild_pid, 0)  # alive now — raises if not
+
+        sup.terminate()
+
+        # Poll: init should reap the killed grandchild within a few seconds.
+        deadline = time.time() + 5.0
+        gone = False
+        while time.time() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+                time.sleep(0.1)
+            except ProcessLookupError:
+                gone = True
+                break
+        assert gone, (
+            f"grandchild {grandchild_pid} survived terminate() — "
+            "the driver tree leaked"
+        )
+    finally:
+        # Belt-and-suspenders: never leak the stand-in if the assertion fails.
+        if grandchild_pid is not None:
+            try:
+                os.kill(grandchild_pid, 9)
+            except ProcessLookupError:
+                pass
+        sup.terminate()
+
+
 # ---- _build_webauto_argv (KEPT) --------------------------------------------
 
 
@@ -443,3 +563,18 @@ def test_terminate_returns_cleanly_on_already_exited_process():
     proc.wait()
     # Should not raise even though the process has already exited.
     _terminate(proc)
+
+
+def test_terminate_does_not_groupkill_a_shared_group(tmp_path):
+    """Defensive: when the child is NOT its own group leader (no
+    start_new_session), ``_terminate`` must fall back to single-process
+    signals — never ``killpg`` the shared group, which would also signal
+    the daemon / test-runner itself. (If it group-killed, this very test
+    process would die instead of asserting.)"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+    )
+    # Shares the test-runner's process group — not its own leader.
+    assert os.getpgid(proc.pid) != proc.pid
+    _terminate(proc)
+    assert proc.poll() is not None  # the single process was terminated

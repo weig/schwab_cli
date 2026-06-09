@@ -20,11 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import time
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import typer
@@ -38,7 +36,16 @@ from schwab_cli.api.streamer import (
     is_heartbeat,
 )
 from schwab_cli.api.streamer_fields import decode, default_fields
+from schwab_cli.commands._stream_mcp import (
+    McpUnreachable,
+    probe_daemon,
+    stream_quotes_via_mcp,
+)
 from schwab_cli.session import load as load_session
+
+# Back-compat aliases: these names are patched by tests and used below.
+_McpUnreachable = McpUnreachable
+_probe_mcp_daemon = probe_daemon
 
 
 _SERVICE = "LEVELONE_EQUITIES"
@@ -125,9 +132,21 @@ def run(
                     fg=typer.colors.RED, err=True,
                 )
                 raise typer.Exit(code=1)
+            # Auto-selected MCP but the stream dropped. Only fall back to a
+            # direct streamer if the daemon is actually gone — re-probe
+            # first; if it's still up, abort rather than kick its session
+            # (Schwab allows one streamer per account).
+            if _probe_mcp_daemon(mcp_url):
+                typer.secho(
+                    f"MCP daemon at {mcp_url} is still running but its stream "
+                    "connection failed — not opening a direct Schwab WebSocket "
+                    "(it would disconnect the daemon). Retry, or use "
+                    "--direct --force to override.",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
             typer.secho(
-                "(MCP daemon probe succeeded but connection failed; "
-                "falling back to direct streamer)",
+                "(MCP daemon went away; falling back to a direct streamer)",
                 fg=typer.colors.YELLOW, err=True,
             )
             asyncio.run(_run_direct(symbols, fields=fields, as_json=as_json))
@@ -137,78 +156,20 @@ def run(
     asyncio.run(_run_direct(symbols, fields=fields, as_json=as_json))
 
 
-class _McpUnreachable(Exception):
-    """Raised internally when the MCP daemon TCP-accepts but the
-    JSON-RPC handshake fails — caller may fall back to direct mode."""
-
-
-def _probe_mcp_daemon(url: str) -> bool:
-    """Cheap TCP probe for the HTTP port. Doesn't do a full HTTP
-    request — just confirms something is listening, which is enough
-    to decide whether to attempt the full MCP client handshake."""
-    parsed = urlparse(url)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 7234
-    try:
-        with socket.create_connection((host, port), timeout=0.5):
-            return True
-    except (OSError, socket.timeout):
-        return False
-
-
 async def _run_via_mcp(
     symbols: list[str],
     *,
     mcp_url: str,
     as_json: bool,
 ) -> None:
-    """Connect to a running MCP daemon and stream stream_quote
-    progress notifications to stdout. Ctrl+C cancels cleanly.
-
-    Progress notifications are delivered via ``ClientSession``'s
-    ``progress_callback`` parameter — passing a callback causes the
-    SDK to auto-generate a ``progressToken`` for the request and
-    route matching notifications to the callback.
-    """
-    # Deferred imports — avoid pulling in the MCP client unless we
-    # actually need it (direct-mode users shouldn't pay that cost).
-    from mcp.client.session import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
-
-    http_url = mcp_url.rstrip("/")
-    if not http_url.endswith("/mcp"):
-        http_url = http_url + "/mcp"
-
-    async def on_progress(
-        progress: float, total: float | None, message: str | None
-    ) -> None:
-        """Receive and render one progress notification."""
-        if message is None or message == "keepalive":
-            return
-        try:
-            decoded = json.loads(message)
-        except (json.JSONDecodeError, TypeError):
-            typer.echo(str(message))
-            return
-        _render(decoded, as_json=as_json)
-
-    try:
-        async with streamable_http_client(http_url) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                # Fire the streaming tool with a progress callback —
-                # the SDK generates a progressToken automatically and
-                # routes progress notifications to `on_progress`. The
-                # call returns only on cancellation or error.
-                await session.call_tool(
-                    "stream_quote",
-                    arguments={"symbols": [s.upper() for s in symbols]},
-                    progress_callback=on_progress,
-                )
-    except (ConnectionError, OSError) as e:
-        raise _McpUnreachable(str(e))
-    except KeyboardInterrupt:
-        return
+    """Stream ``stream_quote`` updates from a running MCP daemon, rendering
+    each decoded quote to stdout. Ctrl+C cancels cleanly; a dropped
+    connection raises :class:`McpUnreachable` for the caller to fall back."""
+    await stream_quotes_via_mcp(
+        symbols,
+        mcp_url=mcp_url,
+        on_decoded=lambda decoded: _render(decoded, as_json=as_json),
+    )
 
 
 async def _run_direct(

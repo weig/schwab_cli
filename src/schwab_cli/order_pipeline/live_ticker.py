@@ -25,6 +25,103 @@ class TickerConfig:
     interval_s: float = 1.5
 
 
+class StreamQuoteSource:
+    """Background daemon-stream feeding a latest-quote snapshot.
+
+    A drop-in data source for :class:`LiveTicker`'s ``fetch``: instead of
+    REST-polling the underlying every tick, a background thread subscribes
+    to the daemon's *shared* streamer (Schwab allows one streamer per
+    account) and keeps the most recent decoded quote. :meth:`latest`
+    returns it — ``None`` until the first frame, or if the stream never
+    connects — so callers fall back to a REST fetch seamlessly.
+
+    The decoded stream dict and the REST quote share one shape
+    (``bid``/``ask``/``last``/``net_change``/sizes/``volume``), so the
+    same ``render`` works for either source. Best-effort: any failure
+    leaves ``latest()`` at ``None`` and the REST fallback takes over.
+    """
+
+    def __init__(self, symbol: str, *, mcp_url: str) -> None:
+        self._symbol = symbol.upper()
+        self._mcp_url = mcp_url
+        self._latest: dict | None = None
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._loop = None  # the worker thread's event loop
+        self._ready = threading.Event()  # set once _loop is usable
+
+    def latest(self) -> dict | None:
+        with self._lock:
+            return dict(self._latest) if self._latest is not None else None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name="ticker-stream", daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        # Lazy imports: keep asyncio/websockets out of the sync CLI path
+        # unless a daemon ticker is actually started.
+        import asyncio
+
+        from schwab_cli.commands._stream_mcp import (
+            McpUnreachable,
+            stream_quotes_via_mcp,
+        )
+
+        def on_decoded(decoded: dict) -> None:
+            if (decoded.get("symbol") or "").upper() != self._symbol:
+                return
+            with self._lock:
+                self._latest = decoded
+
+        async def _go() -> None:
+            try:
+                await stream_quotes_via_mcp(
+                    [self._symbol], mcp_url=self._mcp_url, on_decoded=on_decoded,
+                )
+            except McpUnreachable:
+                return
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._ready.set()  # _loop is now safe to use from stop()'s thread
+        try:
+            loop.run_until_complete(_go())
+        except BaseException:  # noqa: BLE001 — incl. CancelledError on stop()
+            pass
+        finally:
+            loop.close()
+
+    def _cancel_all(self) -> None:
+        # Runs ON the loop thread (via call_soon_threadsafe) so enumerating
+        # and cancelling tasks is race-free; cancelling lets the stream's
+        # ``async with`` unwind cleanly (graceful close).
+        import asyncio
+        for task in asyncio.all_tasks(self._loop):
+            task.cancel()
+
+    def stop(self) -> None:
+        """Cancel the stream and join the thread. Idempotent.
+
+        Waits for the worker's loop to be ready (eliminates a race where a
+        very early stop() would miss the cancel and leave the thread
+        lingering), then schedules cancellation on the loop thread.
+        """
+        t = self._thread
+        self._thread = None
+        if t is None:
+            return
+        if self._ready.wait(timeout=2.0) and self._loop is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._cancel_all)
+            except RuntimeError:
+                pass  # loop already finished/closed
+        t.join(timeout=2.0)
+
+
 def _supports_ansi() -> bool:
     """Only enable cursor-control + line-clear when stderr is a TTY.
 

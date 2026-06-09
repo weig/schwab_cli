@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from datetime import date, datetime
@@ -59,6 +60,27 @@ from schwab_cli.service.auth import (
 )
 
 
+_DEFAULT_IDLE_LINGER_S = 45.0
+
+
+def _idle_linger_default() -> float:
+    """Idle-linger seconds for the shared streamer, from
+    ``SCHWAB_STREAMER_IDLE_LINGER_S`` (default 45). Keeps the socket open
+    briefly after the last subscriber leaves so a quick re-subscribe
+    reuses it. ``0`` restores close-immediately. Invalid values fall back
+    to the default rather than crashing the daemon."""
+    raw = os.environ.get("SCHWAB_STREAMER_IDLE_LINGER_S")
+    if raw is None:
+        return _DEFAULT_IDLE_LINGER_S
+    try:
+        val = float(raw)
+    except ValueError:
+        return _DEFAULT_IDLE_LINGER_S
+    # Reject negatives AND non-finite (inf/nan): asyncio.sleep(inf) would
+    # mean the socket never auto-closes.
+    return val if (math.isfinite(val) and val >= 0) else _DEFAULT_IDLE_LINGER_S
+
+
 class _ToolArgError(Exception):
     """Bad tool input (wrong type / out of range). Caught by ``_dispatch``
     and returned as a clean message instead of a generic internal error."""
@@ -87,6 +109,7 @@ class SchwabMcpServer:
         admin_token: str | None = None,
         notifier: Notifier | None = None,
         auth_monitor_enabled: bool = True,
+        idle_linger_s: float | None = None,
     ) -> None:
         self._client = client
         self._logbook = logbook
@@ -96,6 +119,10 @@ class SchwabMcpServer:
         self._notifier = notifier or Notifier.from_file(logbook=logbook)
         self._bridge = StreamerBridge(
             client, logbook, self._manager, notifier=self._notifier,
+            idle_linger_s=(
+                _idle_linger_default() if idle_linger_s is None
+                else idle_linger_s
+            ),
         )
         self._server = Server(server_name)
         self._started_at = time.time()
@@ -873,6 +900,10 @@ class SchwabMcpServer:
             # subprocess (if mid-rotation) can wind down.
             if self._auth_monitor is not None:
                 await self._auth_monitor.stop()
+            # Tear down the shared streamer: cancels any pending idle-close
+            # timer (else a lingering task is destroyed as the loop closes,
+            # logging an asyncio warning) and closes the socket.
+            await self._bridge.close()
             self._logbook.info("server.stop", transport="http")
 
     async def _on_rotation_success(self) -> None:
@@ -900,18 +931,20 @@ class SchwabMcpServer:
         self._client._session = new_session  # noqa: SLF001
         self._logbook.info("rotation.session_reloaded")
 
-        # If the streamer is currently connected, reconnect it with
-        # the new access token. The bridge preserves the active
-        # subscription set via the refcount table, so subscribers'
-        # queues keep flowing data after the brief reconnect gap.
-        if self._bridge.streamer_state() == "connected":
-            try:
-                await self._bridge.reconnect_after_rotation()
-            except Exception as e:
-                self._logbook.error(
-                    "rotation.reconnect_failed",
-                    error=f"{type(e).__name__}: {e}",
-                )
+        # Reconnect the streamer with the new access token. Called
+        # unconditionally — reconnect_after_rotation is a no-op when idle
+        # (closes nothing, no resubscribe) and closes a lingering socket —
+        # so we avoid a TOCTOU on streamer_state() (a lock-free read
+        # followed by a separately-locked call). The bridge preserves the
+        # active subscription set via the refcount table, so subscribers'
+        # queues keep flowing after the brief reconnect gap.
+        try:
+            await self._bridge.reconnect_after_rotation()
+        except Exception as e:
+            self._logbook.error(
+                "rotation.reconnect_failed",
+                error=f"{type(e).__name__}: {e}",
+            )
 
     def _admin_auth_ok(self, request) -> bool:
         if self._admin_token is None:
