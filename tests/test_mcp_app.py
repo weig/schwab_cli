@@ -76,6 +76,8 @@ def test_get_quote_upcases_symbols():
 
 
 def test_get_quote_auth_error_returns_text_not_raise():
+    # Auth errors are caught centrally in _dispatch (not per-tool), so the
+    # tool returns text rather than raising.
     from schwab_cli.service.auth import NotAuthenticated
 
     server = _make_server()
@@ -83,7 +85,7 @@ def test_get_quote_auth_error_returns_text_not_raise():
         "schwab_cli.service.quotes.QuoteService.get_quote_payload",
         side_effect=NotAuthenticated("no session"),
     ):
-        result = _call(server._tool_get_quote({"symbols": ["NVDA"]}))
+        result = _call(server._dispatch("get_quote", {"symbols": ["NVDA"]}))
     assert len(result) == 1
     assert "schwab error" in result[0].text
     assert "NotAuthenticated" in result[0].text
@@ -136,7 +138,7 @@ def test_get_chain_auth_error_returns_text_not_raise():
         "schwab_cli.service.chains.ChainsService.get_chain_envelope",
         side_effect=SessionExpired("expired"),
     ):
-        result = _call(server._tool_get_chain({
+        result = _call(server._dispatch("get_chain", {
             "symbol": "AMZN", "expiry": "2026-05-01",
         }))
     assert len(result) == 1
@@ -196,6 +198,8 @@ def test_server_exposes_expected_tool_names():
     names = {t.name for t in result.root.tools}
     assert names == {
         "get_quote", "get_chain", "stream_quote", "server_status",
+        "get_vol", "get_skew", "get_greeks", "get_history",
+        "get_dividends", "get_fundamentals",
         "dataset.history", "dataset.iv_rank", "dataset.status",
     }
 

@@ -41,15 +41,38 @@ from schwab_cli.mcp_server.auth_monitor import (
 from schwab_cli.mcp_server.logbook import LogBook
 from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
+from schwab_cli.history_spec import parse_interval, parse_range
 from schwab_cli.notify import Notifier
 from schwab_cli.service.chains import ChainsService
+from schwab_cli.service.dividends import DividendsService
+from schwab_cli.service.fundamentals import FundamentalsService
+from schwab_cli.service.greeks import GreeksService
+from schwab_cli.service.history import HistoryService
 from schwab_cli.service.quotes import QuoteService
+from schwab_cli.service.skew import SkewService
+from schwab_cli.service.vol import VolService
 from schwab_cli.service.auth import (
     ApiError,
     NotAuthenticated,
     NotConfigured,
     SessionExpired,
 )
+
+
+class _ToolArgError(Exception):
+    """Bad tool input (wrong type / out of range). Caught by ``_dispatch``
+    and returned as a clean message instead of a generic internal error."""
+
+
+def _as_jsonable(obj: Any) -> Any:
+    """Best-effort convert a service result attribute to a JSON-serializable
+    structure. Dataclass instances → ``asdict``; Mappings/lists pass through
+    (``json.dumps(default=str)`` handles leaf types). Guards the loosely-typed
+    ``SkewResult.metrics`` against ever emitting a stringified object."""
+    import dataclasses
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return dataclasses.asdict(obj)
+    return obj
 
 
 class SchwabMcpServer:
@@ -170,6 +193,125 @@ class SchwabMcpServer:
                     inputSchema={"type": "object", "properties": {}},
                 ),
                 Tool(
+                    name="get_vol",
+                    description=(
+                        "Volatility snapshot for one underlying: ATM implied "
+                        "vol, IV rank/percentile (vs stored history), and "
+                        "historical vol. Read-only — pulls a fresh chain but "
+                        "does NOT record a snapshot. Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["symbol"],
+                        "properties": {
+                            "symbol": {"type": "string"},
+                            "hv_window": {"type": "integer", "default": 30},
+                            "hv_lookback": {"type": "integer", "default": 252},
+                            "ivp_lookback": {"type": "integer", "default": 252},
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_skew",
+                    description=(
+                        "Option skew metrics for one underlying at one expiry "
+                        "(put/call IV skew across strikes around ATM). Returns "
+                        "JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["symbol", "expiry"],
+                        "properties": {
+                            "symbol": {"type": "string"},
+                            "expiry": {
+                                "type": "string",
+                                "description": "ISO date YYYY-MM-DD.",
+                            },
+                            "strikes": {"type": "integer", "default": 20},
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_greeks",
+                    description=(
+                        "Greeks (delta/gamma/theta/vega/rho) + IV for one "
+                        "option contract (underlying + strike + expiry + "
+                        "side). Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["underlying", "strike", "expiry", "side"],
+                        "properties": {
+                            "underlying": {"type": "string"},
+                            "strike": {"type": "number"},
+                            "expiry": {
+                                "type": "string",
+                                "description": "ISO date YYYY-MM-DD.",
+                            },
+                            "side": {
+                                "type": "string",
+                                "enum": ["C", "P"],
+                                "description": "C=call, P=put.",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_history",
+                    description=(
+                        "Historical OHLCV candles for one symbol. Returns "
+                        "JSON. `interval` ∈ 1min/5min/10min/15min/30min/"
+                        "1day/1wk/1mo. `range` is ytd/mtd/wtd, or "
+                        "'<start>..<end>' where each endpoint is YYYYMMDD, "
+                        "a relative -Nd/-Nw/-Nmo/-Ny, or now (e.g. -1y..now)."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["symbol"],
+                        "properties": {
+                            "symbol": {"type": "string"},
+                            "interval": {"type": "string", "default": "1day"},
+                            "range": {"type": "string", "default": "-1y..now"},
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_dividends",
+                    description=(
+                        "Dividend yield / amount / ex-date fields for one or "
+                        "more symbols (from the Schwab quote fundamental "
+                        "block). Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["symbols"],
+                        "properties": {
+                            "symbols": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_fundamentals",
+                    description=(
+                        "Fundamental fields (P/E, EPS, market cap, 52-week "
+                        "range, margins, etc.) for one or more symbols. "
+                        "Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["symbols"],
+                        "properties": {
+                            "symbols": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                ),
+                Tool(
                     name="dataset.status",
                     description=(
                         "Get current dataset subscription state (tier, "
@@ -240,40 +382,60 @@ class SchwabMcpServer:
             self._logbook.info(
                 "tool.call", tool=name, args=_redact(arguments)
             )
-            try:
-                if name == "get_quote":
-                    return await self._tool_get_quote(arguments)
-                if name == "get_chain":
-                    return await self._tool_get_chain(arguments)
-                if name == "stream_quote":
-                    return await self._tool_stream_quote(arguments)
-                if name == "server_status":
-                    return await self._tool_server_status()
-                if name.startswith("dataset."):
-                    text = dispatch_dataset_tool(name, arguments=arguments)
-                    return [TextContent(type="text", text=text)]
-                return [TextContent(
-                    type="text",
-                    text=f"unknown tool: {name}",
-                )]
-            except (ApiError, SessionExpired) as e:
-                self._logbook.error("tool.error", tool=name, error=str(e))
-                return [TextContent(
-                    type="text",
-                    # Same format as the per-tool handlers so log/grep
-                    # correlation is consistent across every tool.
-                    text=f"schwab error: {type(e).__name__}: {e}",
-                )]
-            except Exception as e:
-                self._logbook.error(
-                    "tool.error", tool=name, error=f"{type(e).__name__}: {e}"
-                )
-                return [TextContent(
-                    type="text",
-                    text=f"internal error: {type(e).__name__}: {e}",
-                )]
+            return await self._dispatch(name, arguments)
 
     # ---- tool handlers -------------------------------------------------
+
+    async def _dispatch(
+        self, name: str, arguments: dict[str, Any]
+    ) -> list[TextContent]:
+        """Route a tool call to its handler, converting schwab/auth errors
+        and unexpected exceptions into ``TextContent`` (never raises) so a
+        failing tool returns a message instead of dropping the MCP call.
+        Extracted from the ``call_tool`` closure to be unit-testable."""
+        try:
+            if name == "get_quote":
+                return await self._tool_get_quote(arguments)
+            if name == "get_chain":
+                return await self._tool_get_chain(arguments)
+            if name == "get_vol":
+                return await self._tool_get_vol(arguments)
+            if name == "get_skew":
+                return await self._tool_get_skew(arguments)
+            if name == "get_greeks":
+                return await self._tool_get_greeks(arguments)
+            if name == "get_history":
+                return await self._tool_get_history(arguments)
+            if name == "get_dividends":
+                return await self._tool_get_dividends(arguments)
+            if name == "get_fundamentals":
+                return await self._tool_get_fundamentals(arguments)
+            if name == "stream_quote":
+                return await self._tool_stream_quote(arguments)
+            if name == "server_status":
+                return await self._tool_server_status()
+            if name.startswith("dataset."):
+                text = dispatch_dataset_tool(name, arguments=arguments)
+                return [TextContent(type="text", text=text)]
+            return [TextContent(type="text", text=f"unknown tool: {name}")]
+        except _ToolArgError as e:
+            return [TextContent(type="text", text=str(e))]
+        except (
+            ApiError, SessionExpired, NotConfigured, NotAuthenticated,
+        ) as e:
+            self._logbook.error("tool.error", tool=name, error=str(e))
+            return [TextContent(
+                type="text",
+                text=f"schwab error: {type(e).__name__}: {e}",
+            )]
+        except Exception as e:  # noqa: BLE001 — surface, never drop the call
+            self._logbook.error(
+                "tool.error", tool=name, error=f"{type(e).__name__}: {e}"
+            )
+            return [TextContent(
+                type="text",
+                text=f"internal error: {type(e).__name__}: {e}",
+            )]
 
     async def _tool_get_quote(self, args: dict[str, Any]) -> list[TextContent]:
         symbols = args.get("symbols") or []
@@ -284,18 +446,14 @@ class SchwabMcpServer:
         if not symbols:
             return [TextContent(type="text", text="symbols list is empty")]
         upcased = [s.upper() for s in symbols]
-        try:
-            data = QuoteService().get_quote_payload(upcased)
-        except (NotConfigured, NotAuthenticated, ApiError, SessionExpired) as e:
-            return [TextContent(
-                type="text", text=f"schwab error: {type(e).__name__}: {e}",
-            )]
+        # Auth/API errors bubble to _dispatch (uniform "schwab error" text).
+        data = QuoteService().get_quote_payload(upcased)
         return [TextContent(type="text", text=json.dumps(data, default=str))]
 
     async def _tool_get_chain(self, args: dict[str, Any]) -> list[TextContent]:
         symbol = args.get("symbol")
         expiry_str = args.get("expiry")
-        strike_count = int(args.get("strike_count") or 20)
+        strike_count = self._int_arg(args, "strike_count", 20)
         if not symbol or not expiry_str:
             return [TextContent(
                 type="text", text="symbol and expiry are required",
@@ -306,17 +464,157 @@ class SchwabMcpServer:
             return [TextContent(
                 type="text", text=f"invalid expiry {expiry_str!r} (need YYYY-MM-DD)",
             )]
-        try:
-            envelope = ChainsService().get_chain_envelope(
-                symbol.upper(),
-                expiry=expiry,
-                strike_count=strike_count,
-            )
-        except (NotConfigured, NotAuthenticated, ApiError, SessionExpired) as e:
-            return [TextContent(
-                type="text", text=f"schwab error: {type(e).__name__}: {e}",
-            )]
+        envelope = ChainsService().get_chain_envelope(
+            symbol.upper(),
+            expiry=expiry,
+            strike_count=strike_count,
+        )
         return [TextContent(type="text", text=json.dumps(envelope, default=str))]
+
+    @staticmethod
+    def _err_text(msg: str) -> list[TextContent]:
+        return [TextContent(type="text", text=msg)]
+
+    @staticmethod
+    def _json_text(data: Any) -> list[TextContent]:
+        return [TextContent(type="text", text=json.dumps(data, default=str))]
+
+    @staticmethod
+    def _symbol_list(args: dict[str, Any]) -> list[str] | None:
+        symbols = args.get("symbols") or []
+        if not isinstance(symbols, list) or not all(
+            isinstance(s, str) for s in symbols
+        ):
+            return None
+        return [s.upper() for s in symbols]
+
+    @staticmethod
+    def _int_arg(args: dict[str, Any], key: str, default: int) -> int:
+        """Parse an int arg. Missing (``None``) → default; ``0`` is kept
+        (not treated as missing). Bad type → :class:`_ToolArgError` (clean
+        message, not a generic "internal error")."""
+        v = args.get(key)
+        if v is None:
+            return default
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            raise _ToolArgError(f"{key} must be an integer")
+
+    @staticmethod
+    def _float_arg(args: dict[str, Any], key: str) -> float:
+        if key not in args or args[key] is None:
+            raise _ToolArgError(f"{key} is required")
+        try:
+            return float(args[key])
+        except (TypeError, ValueError):
+            raise _ToolArgError(f"{key} must be a number")
+
+    async def _tool_get_vol(self, args: dict[str, Any]) -> list[TextContent]:
+        symbol = args.get("symbol")
+        if not symbol or not isinstance(symbol, str):
+            return self._err_text("symbol is required")
+        # no_record=True: an ad-hoc MCP read must not write a snapshot into
+        # the IV history (that history backs IVR/IVP and is owned by the
+        # scheduled `vol` job).
+        result = VolService().get_vol(
+            symbol.upper(),
+            hv_window=self._int_arg(args, "hv_window", 30),
+            hv_lookback=self._int_arg(args, "hv_lookback", 252),
+            ivp_lookback=self._int_arg(args, "ivp_lookback", 252),
+            no_record=True,
+        )
+        if result is None:
+            return self._err_text(f"no vol data for {symbol.upper()}")
+        return self._json_text(result.envelope)
+
+    async def _tool_get_skew(self, args: dict[str, Any]) -> list[TextContent]:
+        symbol = args.get("symbol")
+        expiry_str = args.get("expiry")
+        if not symbol or not expiry_str:
+            return self._err_text("symbol and expiry are required")
+        try:
+            expiry = date.fromisoformat(expiry_str)
+        except (ValueError, TypeError):
+            return self._err_text(
+                f"invalid expiry {expiry_str!r} (need YYYY-MM-DD)"
+            )
+        result = SkewService().get_skew_l1(
+            symbol.upper(), expiry, strikes=self._int_arg(args, "strikes", 20),
+        )
+        return self._json_text(_as_jsonable(result.metrics))
+
+    async def _tool_get_greeks(self, args: dict[str, Any]) -> list[TextContent]:
+        underlying = args.get("underlying")
+        strike = args.get("strike")
+        expiry_str = args.get("expiry")
+        side = (args.get("side") or "").upper()
+        if not underlying or strike is None or not expiry_str:
+            return self._err_text(
+                "underlying, strike and expiry are required"
+            )
+        if side not in ("C", "P"):
+            return self._err_text("side must be 'C' or 'P'")
+        try:
+            expiry = date.fromisoformat(expiry_str)
+        except (ValueError, TypeError):
+            return self._err_text(
+                f"invalid expiry {expiry_str!r} (need YYYY-MM-DD)"
+            )
+        result = GreeksService().get_greeks(
+            underlying.upper(),
+            strike=self._float_arg(args, "strike"),
+            expiry=expiry,
+            side=side,
+        )
+        return self._json_text(result.envelope)
+
+    async def _tool_get_history(self, args: dict[str, Any]) -> list[TextContent]:
+        symbol = args.get("symbol")
+        if not symbol or not isinstance(symbol, str):
+            return self._err_text("symbol is required")
+        interval_str = args.get("interval") or "1day"
+        range_str = args.get("range") or "-1y..now"
+        try:
+            interval = parse_interval(interval_str)
+        except ValueError as e:
+            return self._err_text(f"invalid interval {interval_str!r}: {e}")
+        try:
+            start, end = parse_range(range_str)
+        except ValueError as e:
+            return self._err_text(f"invalid range {range_str!r}: {e}")
+        result = HistoryService().get_history(
+            symbol.upper(),
+            frequency_type=interval.frequency_type,
+            frequency=interval.frequency,
+            label=interval.label,
+            start=start,
+            end=end,
+            range_str=range_str,
+        )
+        return self._json_text(result.envelope)
+
+    async def _tool_get_dividends(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        symbols = self._symbol_list(args)
+        if symbols is None:
+            return self._err_text("symbols must be a list of strings")
+        if not symbols:
+            return self._err_text("symbols list is empty")
+        result = DividendsService().get_dividends(symbols)
+        return self._json_text(result.payload)
+
+    async def _tool_get_fundamentals(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        symbols = self._symbol_list(args)
+        if symbols is None:
+            return self._err_text("symbols must be a list of strings")
+        if not symbols:
+            return self._err_text("symbols list is empty")
+        result = FundamentalsService().get_fundamentals(symbols)
+        return self._json_text(result.payload)
 
     async def _tool_stream_quote(
         self, args: dict[str, Any]
@@ -680,10 +978,27 @@ def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
         symbol = arguments["symbol"]
         lookback = min(int(arguments.get("lookback_days", 252)), 730)
         fields = arguments.get("fields") or ["atm_iv_30d", "hv_30d"]
-        cols = "captured_at_ms, archive_date, " + ", ".join(fields)
+        if not isinstance(fields, list) or not all(
+            isinstance(f, str) for f in fields
+        ):
+            return _json.dumps({"error": "fields must be a list of strings"})
         with vol_history.connect() as conn:
+            # `fields` is interpolated into the SQL below, and this path is
+            # reachable from any MCP client — validate every requested
+            # column against the real schema (allowlist) to prevent SQL
+            # injection.
+            valid_cols = {
+                r["name"]
+                for r in conn.execute(
+                    "PRAGMA table_info(vol_snapshots)"
+                ).fetchall()
+            }
+            bad = [f for f in fields if f not in valid_cols]
+            if bad:
+                return _json.dumps({"error": f"unknown field(s): {bad}"})
+            cols = "captured_at_ms, archive_date, " + ", ".join(fields)
             rows = conn.execute(
-                f"SELECT {cols} FROM vol_snapshots "
+                f"SELECT {cols} FROM vol_snapshots "  # noqa: S608 — allowlisted
                 f"WHERE symbol = ? "
                 f"ORDER BY captured_at_ms DESC LIMIT ?",
                 (symbol, lookback),
