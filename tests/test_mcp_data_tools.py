@@ -234,3 +234,111 @@ def test_int_arg_keeps_explicit_zero():
     with patch("schwab_cli.service.vol.VolService.get_vol", fake_get_vol):
         _call(s._tool_get_vol({"symbol": "NVDA", "ivp_lookback": 0}))
     assert captured["kw"]["ivp_lookback"] == 0
+
+
+# ---- Tier B: account data --------------------------------------------------
+
+
+def test_get_accounts_happy():
+    s = _server()
+    with patch(
+        "schwab_cli.service.accounts.AccountsService.list_accounts",
+        return_value=SimpleNamespace(accounts=({"acct": "...1234", "eq": 100},)),
+    ):
+        out = _text(_call(s._tool_get_accounts({})))
+    assert json.loads(out)[0]["acct"] == "...1234"
+
+
+def test_get_account_requires_account():
+    s = _server()
+    assert "account is required" in _text(_call(s._tool_get_account({})))
+
+
+def test_get_account_happy():
+    s = _server()
+    with patch(
+        "schwab_cli.service.accounts.AccountsService.get_account",
+        return_value=SimpleNamespace(account={"eq": 250}),
+    ):
+        out = _text(_call(s._tool_get_account({"account": "1234"})))
+    assert json.loads(out)["eq"] == 250
+
+
+def test_get_positions_all_accounts_when_omitted():
+    captured = {}
+
+    def fake(self, account):
+        captured["account"] = account
+        return SimpleNamespace(positions=({"symbol": "NVDA", "qty": 10},))
+
+    s = _server()
+    with patch(
+        "schwab_cli.service.accounts.AccountsService.get_positions", fake
+    ):
+        out = _text(_call(s._tool_get_positions({})))
+    assert captured["account"] is None  # omitted → all accounts
+    assert json.loads(out)[0]["symbol"] == "NVDA"
+
+
+def test_get_transactions_happy_and_bad_range():
+    s = _server()
+    with patch(
+        "schwab_cli.service.transactions.TransactionsService.get_transactions",
+        return_value=SimpleNamespace(rows=({"type": "TRADE"},), show_account=True),
+    ):
+        out = _text(_call(s._tool_get_transactions({"range": "-30d..now"})))
+    assert json.loads(out)[0]["type"] == "TRADE"
+    bad = _text(_call(s._tool_get_transactions({"range": "garbage"})))
+    assert "invalid range" in bad
+
+
+# ---- Tier C: order reads (no mutation) -------------------------------------
+
+
+def test_get_order_resolves_account_and_reads():
+    s = _server()
+    s._client.resolve_account = lambda u: SimpleNamespace(hash_value="HASH")
+    with patch(
+        "schwab_cli.mcp_server.app.api_orders.get_order",
+        return_value={"orderId": 42, "status": "FILLED"},
+    ) as go:
+        out = _text(_call(s._tool_get_order(
+            {"account": "1234", "order_id": "42"}
+        )))
+    go.assert_called_once()
+    assert go.call_args.args[1] == "HASH"  # resolved hash passed through
+    assert json.loads(out)["orderId"] == 42
+
+
+def test_get_order_requires_args():
+    s = _server()
+    assert "required" in _text(_call(s._tool_get_order({"account": "1234"})))
+
+
+def test_list_orders_all_accounts_when_omitted():
+    s = _server()
+    with patch(
+        "schwab_cli.mcp_server.app.api_orders.list_orders_all_accounts",
+        return_value=[{"orderId": 1}],
+    ) as la, patch(
+        "schwab_cli.mcp_server.app.api_orders.list_orders_for_account",
+    ) as lf:
+        out = _text(_call(s._tool_list_orders({})))
+    la.assert_called_once()
+    lf.assert_not_called()
+    assert json.loads(out)[0]["orderId"] == 1
+
+
+def test_list_orders_for_account_when_given():
+    s = _server()
+    s._client.resolve_account = lambda u: SimpleNamespace(hash_value="H")
+    with patch(
+        "schwab_cli.mcp_server.app.api_orders.list_orders_for_account",
+        return_value=[{"orderId": 7}],
+    ) as lf, patch(
+        "schwab_cli.mcp_server.app.api_orders.list_orders_all_accounts",
+    ) as la:
+        out = _text(_call(s._tool_list_orders({"account": "1234"})))
+    lf.assert_called_once()
+    la.assert_not_called()
+    assert json.loads(out)[0]["orderId"] == 7
