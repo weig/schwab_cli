@@ -731,18 +731,40 @@ class ConfirmRule:
         # and (b) we have an underlying symbol from the panel-time fetch.
         skip_prompt = ctx.yes and not ctx.overriding
         ticker = None
+        stream_src = None
         if not skip_prompt:
             # Blank-line separator between panel and prompt; emitted here
             # (not inside _confirm_or_abort) so the ticker's initial line
             # lands directly above the prompt for deterministic repaint.
             typer.echo("", err=True)
             if ctx.underlying_quote is not None:
-                from .live_ticker import LiveTicker
+                from schwab_cli.commands._stream_mcp import probe_daemon
+
+                from .live_ticker import LiveTicker, StreamQuoteSource
                 initial = _format_live_line(ctx.underlying_quote)
+
+                def _rest_fetch() -> dict | None:
+                    return _fetch_underlying_quote_safe(ctx.client, ctx.body)
+
+                underlying = (ctx.underlying_quote.get("symbol") or "").upper()
+                mcp_url = _ticker_mcp_url()
+                if underlying and probe_daemon(mcp_url):
+                    # Source live ticks from the daemon's shared streamer
+                    # (Schwab allows one streamer per account — no second
+                    # connection). REST is the fallback until the first
+                    # frame, or if the stream can't connect.
+                    stream_src = StreamQuoteSource(underlying, mcp_url=mcp_url)
+                    stream_src.start()
+                    _src = stream_src
+
+                    def _fetch() -> dict | None:
+                        snap = _src.latest()
+                        return snap if snap is not None else _rest_fetch()
+                else:
+                    _fetch = _rest_fetch
+
                 ticker = LiveTicker(
-                    fetch=lambda: _fetch_underlying_quote_safe(
-                        ctx.client, ctx.body,
-                    ),
+                    fetch=_fetch,
                     render=_format_live_line,
                     initial_line=initial,
                 )
@@ -770,7 +792,18 @@ class ConfirmRule:
         finally:
             if ticker is not None:
                 ticker.stop()
+            if stream_src is not None:
+                stream_src.stop()
         return RuleResult()
+
+
+def _ticker_mcp_url() -> str:
+    """MCP daemon URL the confirm ticker streams through. Env-overridable
+    via ``SCHWAB_MCP_URL`` for non-default daemon ports."""
+    import os
+
+    from schwab_cli.commands._stream_mcp import DEFAULT_MCP_URL
+    return os.environ.get("SCHWAB_MCP_URL", DEFAULT_MCP_URL)
 
 
 def _format_live_line(q: dict) -> str:

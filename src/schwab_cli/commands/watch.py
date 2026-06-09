@@ -28,6 +28,9 @@ from schwab_cli import config as config_module
 from schwab_cli.api.client import SchwabClient
 from schwab_cli.api.quotes import get_quotes
 from schwab_cli.commands._stream_mcp import (
+    DEFAULT_MCP_URL as _DEFAULT_MCP_URL,
+)
+from schwab_cli.commands._stream_mcp import (
     McpUnreachable,
     probe_daemon,
     stream_quotes_via_mcp,
@@ -35,8 +38,6 @@ from schwab_cli.commands._stream_mcp import (
 from schwab_cli.session import load as load_session
 from schwab_cli.storage import vol_history
 from schwab_cli.storage.groups import GROUP_OHLCV, GROUP_VOLATILITY
-
-_DEFAULT_MCP_URL = "http://127.0.0.1:7234/mcp"
 _SERVICE = "LEVELONE_EQUITIES"
 
 

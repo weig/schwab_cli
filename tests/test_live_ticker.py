@@ -20,7 +20,11 @@ from unittest.mock import patch
 
 import pytest
 
-from schwab_cli.order_pipeline.live_ticker import LiveTicker, TickerConfig
+from schwab_cli.order_pipeline.live_ticker import (
+    LiveTicker,
+    StreamQuoteSource,
+    TickerConfig,
+)
 
 
 @contextmanager
@@ -149,3 +153,81 @@ def test_repaint_writes_ansi_only_when_tty():
     assert "initial" in out
     assert "REPAINT" not in out
     assert "\x1b[" not in out
+
+
+# ---- StreamQuoteSource (daemon-stream → latest snapshot) -------------------
+
+_STREAM_FN = "schwab_cli.commands._stream_mcp.stream_quotes_via_mcp"
+
+
+def _fake_stream(frames, *, block=True):
+    async def _streamer(symbols, *, mcp_url, on_decoded):
+        for f in frames:
+            on_decoded(f)
+        if block:
+            import asyncio
+            await asyncio.Event().wait()  # hold open until cancelled by stop()
+    return _streamer
+
+
+def _wait_until(pred, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_stream_source_latest_updates_for_target_symbol():
+    frames = [{"symbol": "SPY", "bid": 1.0, "ask": 2.0,
+               "last": 1.5, "net_change": 0.1}]
+    with patch(_STREAM_FN, _fake_stream(frames)):
+        src = StreamQuoteSource("spy", mcp_url="http://x/mcp")
+        src.start()
+        try:
+            assert _wait_until(lambda: src.latest() is not None)
+            snap = src.latest()
+            assert snap["bid"] == 1.0 and snap["last"] == 1.5
+        finally:
+            src.stop()
+    assert src._thread is None
+
+
+def test_stream_source_ignores_other_symbols():
+    with patch(_STREAM_FN, _fake_stream([{"symbol": "NVDA", "bid": 9.9}])):
+        src = StreamQuoteSource("SPY", mcp_url="http://x/mcp")
+        src.start()
+        try:
+            time.sleep(0.2)
+            assert src.latest() is None
+        finally:
+            src.stop()
+    assert src._thread is None
+
+
+def test_stream_source_handles_unreachable_daemon():
+    from schwab_cli.commands._stream_mcp import McpUnreachable
+
+    async def _raises(symbols, *, mcp_url, on_decoded):
+        raise McpUnreachable("nope")
+
+    with patch(_STREAM_FN, _raises):
+        src = StreamQuoteSource("SPY", mcp_url="http://x/mcp")
+        src.start()
+        time.sleep(0.2)
+        assert src.latest() is None
+        src.stop()  # clean even though the stream errored
+    assert src._thread is None
+
+
+def test_stream_source_stop_is_idempotent():
+    with patch(_STREAM_FN, _fake_stream([], block=True)):
+        src = StreamQuoteSource("SPY", mcp_url="http://x/mcp")
+        src.start()
+        worker = src._thread
+        src.stop()
+        src.stop()  # no raise
+    assert src._thread is None
+    # stop() actually tore the thread down (not just cleared the ref).
+    assert worker is not None and not worker.is_alive()

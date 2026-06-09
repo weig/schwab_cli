@@ -17,6 +17,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+DEFAULT_MCP_URL = "http://127.0.0.1:7234/mcp"
+
+
 class McpUnreachable(Exception):
     """The MCP daemon TCP-accepts but the JSON-RPC stream fails — the
     caller may fall back to a direct Schwab connection."""
