@@ -51,6 +51,10 @@ class Config:
     auth_flow: str = "local_server"
     auto_login_command: tuple[str, ...] | None = None
     auto_login_timeout_seconds: int = 300
+    # webauth peer allowlist (nginx-style `allow`, implicit deny): which
+    # DIRECT peer addresses may reach /api/* — i.e. which reverse proxy
+    # may front the resource server. Loopback is always implied.
+    web_allow: tuple[str, ...] = ("127.0.0.1", "::1")
     version: int = 1
 
     def to_payload(self) -> dict:
@@ -70,6 +74,8 @@ class Config:
         if self.auto_login_command is not None:
             payload["auto_login_command"] = list(self.auto_login_command)
             payload["auto_login_timeout_seconds"] = self.auto_login_timeout_seconds
+        if self.web_allow != ("127.0.0.1", "::1"):
+            payload["web"] = {"allow": list(self.web_allow)}
         return payload
 
 
@@ -132,8 +138,46 @@ def load() -> Config | None:
         auth_flow=auth_flow,
         auto_login_command=auto_login_command,
         auto_login_timeout_seconds=auto_login_timeout_seconds,
+        web_allow=_parse_web_allow(raw.get("web"), path),
         version=version,
     )
+
+
+def _parse_web_allow(raw: object, path: Path) -> tuple[str, ...]:
+    """Validate the optional ``web.allow`` peer allowlist.
+
+    Accepted shapes:
+      * absent / null → loopback-only default
+      * {"allow": ["ip-or-cidr", ...]} with non-empty strings
+
+    Entries must parse as IP addresses or CIDR networks (nginx ``allow``
+    semantics) — a typo'd hostname would otherwise never match any peer
+    and silently lock the proxy out. Anything else is a ``ConfigError``.
+    """
+    default = ("127.0.0.1", "::1")
+    if raw is None:
+        return default
+    if not isinstance(raw, dict):
+        raise ConfigError(f"web in {path} must be an object")
+    allow = raw.get("allow", list(default))
+    if (
+        not isinstance(allow, list)
+        or not all(isinstance(a, str) and a for a in allow)
+    ):
+        raise ConfigError(
+            f"web.allow in {path} must be a list of non-empty strings"
+        )
+    import ipaddress
+
+    for entry in allow:
+        try:
+            ipaddress.ip_network(entry, strict=False)
+        except ValueError as e:
+            raise ConfigError(
+                f"web.allow entry {entry!r} in {path} is not an IP "
+                f"address or CIDR network"
+            ) from e
+    return tuple(allow)
 
 
 def _parse_auto_login_command(

@@ -1,11 +1,14 @@
-"""REST PoC — proves the REST -> service path end-to-end.
+"""REST surface.
 
-A single unauthenticated ``GET /quote/{symbol}`` (plus a ``/health``
-probe) that goes straight through the SERVICE layer
-(:func:`schwab_cli.service.quotes.get_quote_payload`) and returns the
-raw Schwab payload as JSON. There is deliberately NO auth or symbol
-allowlisting here — that is a later, separate step. This exists only to
-demonstrate that a Starlette route can reach the service layer cleanly.
+Two route sets:
+
+* :func:`rest_routes` — the original loopback PoC (``/health``,
+  ``/quote/{symbol}``), unauthenticated; the webauth middleware's tier-2
+  rule confines them to loopback peers.
+* :func:`api_routes` — the public resource-server surface under
+  ``/api/v1/``. The webauth middleware authenticates the caller and
+  attaches a Principal; each route declares its required scope via
+  :func:`schwab_cli.webauth.middleware.scope_denial`.
 """
 
 from __future__ import annotations
@@ -17,10 +20,18 @@ from schwab_cli.service.auth import (
     NotConfigured,
     SessionExpired,
 )
+from schwab_cli.webauth.middleware import scope_denial
 
 
 async def _health(request):
     return _json_response({"ok": True})
+
+
+async def _api_quote(request):
+    denial = scope_denial(request, "marketdata")
+    if denial is not None:
+        return denial
+    return await _quote(request)
 
 
 async def _quote(request):
@@ -55,7 +66,7 @@ def _json_response(data, *, status_code: int = 200):
 
 
 def rest_routes():
-    """Return the REST PoC route objects.
+    """Return the loopback REST PoC route objects.
 
     Exposed separately so the ``--enable-mcp --enable-rest`` path can
     mount these same routes onto the MCP server's Starlette app (shared
@@ -69,9 +80,25 @@ def rest_routes():
     ]
 
 
+def api_routes():
+    """Return the public ``/api/v1`` resource-server routes.
+
+    The webauth middleware fronts these: peer allowlist + JWT; each
+    handler then enforces its own required scope. ``/api/v1/health`` is
+    the JWT-exempt proxy liveness probe.
+    """
+    from starlette.routing import Route
+
+    return [
+        Route("/api/v1/health", _health, methods=["GET"]),
+        Route("/api/v1/quote/{symbol}", _api_quote, methods=["GET"]),
+    ]
+
+
 def build_rest_app():
-    """Starlette app for the REST PoC. UNAUTHENTICATED — a proof of the
-    REST -> service path; auth/allowlisting is a deliberate later step."""
+    """Starlette app for the standalone REST mode: loopback PoC routes
+    plus the /api/v1 surface (auth is applied by the caller wrapping
+    the app in WebAuthMiddleware)."""
     from starlette.applications import Starlette
 
-    return Starlette(routes=rest_routes())
+    return Starlette(routes=rest_routes() + api_routes())

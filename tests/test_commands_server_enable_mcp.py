@@ -114,9 +114,10 @@ def _patch_happy_path(monkeypatch, tmp_path):
         def schedule_session_replaced(self, fresh):
             rec["handoffs"].append(fresh)
 
-        async def run_http(self, host, port, *, extra_routes=None):
+        async def run_http(self, host, port, *, extra_routes=None, asgi_wrap=None):
             rec["run_http_args"].append((host, port))
             rec.setdefault("run_http_extra_routes", []).append(extra_routes)
+            rec.setdefault("run_http_asgi_wrap", []).append(asgi_wrap)
 
     monkeypatch.setattr(
         "schwab_cli.mcp_server.app.SchwabMcpServer", _FakeServer
@@ -389,19 +390,31 @@ class TestEnableMcpWithRest:
         assert len(extra) == 1
         assert extra[0]  # non-empty list of Route objects
         paths = {r.path for r in extra[0]}
-        # Phase 3 always mounts the /admin/jobs control-plane route in
-        # addition to the REST PoC routes.
-        assert paths == {"/health", "/quote/{symbol}", "/admin/jobs"}
+        # /admin/jobs is always mounted; REST adds the loopback PoC routes
+        # AND the authenticated /api/v1 surface.
+        assert paths == {
+            "/health", "/quote/{symbol}",
+            "/api/v1/health", "/api/v1/quote/{symbol}",
+            "/admin/jobs",
+        }
 
     def test_no_rest_still_mounts_admin_jobs(self, monkeypatch, tmp_path):
         rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, enable_rest=False, interval_s=60)
         extra = rec["run_http_extra_routes"]
-        # Phase 3 always mounts /admin/jobs even without REST; the REST PoC
-        # routes (/health, /quote/{symbol}) must NOT be present.
+        # /admin/jobs is always mounted even without REST; the REST routes
+        # (loopback PoC + /api/v1) must NOT be present.
         assert len(extra) == 1
         paths = {r.path for r in extra[0]}
         assert paths == {"/admin/jobs"}
+
+    def test_webauth_gate_always_wraps_the_app(self, monkeypatch, tmp_path):
+        """The two-tier gate applies even WITHOUT --enable-rest so a wide
+        bind can never expose /admin //auth //mcp."""
+        rec = _patch_happy_path(monkeypatch, tmp_path)
+        server_cmd.run(enable_mcp=True, enable_rest=False, interval_s=60)
+        (wrap,) = rec["run_http_asgi_wrap"]
+        assert callable(wrap)
 
 
 # ---------------------------------------------------------------------------

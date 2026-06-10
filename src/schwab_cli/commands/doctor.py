@@ -249,6 +249,42 @@ def _check_mcp() -> None:
 # ---- 3. Schwab auth ---------------------------------------------------
 
 
+def _webauth_provider_rows(loaded) -> list[tuple[str, str, str]]:
+    """(status, label, detail) rows for the webauth section.
+
+    status ∈ {"ok", "bad", "info"} — pure so tests can lock the
+    rendering contract without touching the filesystem.
+    """
+    from pathlib import Path as _Path
+
+    rows: list[tuple[str, str, str]] = []
+    if not loaded.providers and not loaded.errors and not loaded.disabled:
+        return [(
+            "info", "No providers configured",
+            "REST /api stays loopback-unauthenticated",
+        )]
+    for p in loaded.providers:
+        subjects = (
+            "any subject (*)" if p.allow_all_subjects
+            else f"{len(p.subject_scopes)} subject(s)"
+        )
+        rows.append(("ok", p.name, f"{p.issuer} — {subjects}"))
+    for e in loaded.errors:
+        rows.append(("bad", _Path(e.path).name, e.reason))
+    for name in loaded.disabled:
+        rows.append(("info", name, "disabled (enabled=false)"))
+    return rows
+
+
+def _check_webauth() -> None:
+    _section("Web auth providers (REST /api)")
+    from schwab_cli.webauth.config import load_providers
+
+    emit = {"ok": _ok, "bad": _bad, "info": _info}
+    for status, label, detail in _webauth_provider_rows(load_providers()):
+        emit[status](label, detail)
+
+
 def _access_token_state(expires_at: int, *, now: int) -> str:
     """Access-token line: remaining minutes + absolute local expiry.
 
@@ -675,6 +711,7 @@ def run() -> None:
     _check_install()
     _check_mcp()
     _check_auth()
+    _check_webauth()
     _check_telegram()
     _check_dataset()
     _check_data_sync_service()
