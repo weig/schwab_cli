@@ -1,13 +1,12 @@
-"""Tests for `schwab server --enable-mcp` (Phase 3c-ii).
+"""Tests for `schwab server --enable-mcp`.
 
-`schwab server` (no flags) stays the Phase 2 maintenance-only loop.
-`schwab server --enable-mcp` composes the Streamable HTTP MCP server on
-top of the always-running maintenance loop:
+`schwab server` (no flags) runs the TokenManager daemon (single owner of
+the OAuth token pair). `schwab server --enable-mcp` composes the
+Streamable HTTP MCP server on top:
 
-* the maintenance loop runs in a daemon thread (single proactive
-  refresh-token renewer);
-* the MCP server runs on the main thread with
-  ``auth_monitor_enabled=False``.
+* the TokenManager's two tracks run as daemon threads;
+* the MCP server runs on the main thread with the manager attached
+  (/auth/* routes + session-handoff bridge).
 
 All tests use mocking — NO real network, uvicorn, or thread sleeping.
 """
@@ -65,12 +64,12 @@ def _future_session() -> "Session":
 # ---------------------------------------------------------------------------
 
 def _patch_happy_path(monkeypatch, tmp_path):
-    """Patch cfg/session present, MCP server, run_loop, asyncio.run.
+    """Patch cfg/session present, MCP server, token runtime, asyncio.run.
 
     Returns a dict of recording structures the tests inspect.
 
     Isolation: points ``SCHWAB_CLI_CONFIG_DIR`` at ``tmp_path`` so the
-    Phase-3 job scheduler startup (reconcile/apply_reload/write_pidfile,
+    job scheduler startup (reconcile/apply_reload/write_pidfile,
     ``jobs/.current/state.json``) writes into the tmp dir instead of the
     real ``~/.config/schwab_cli``. ``paths.config_dir()`` reads this env
     var dynamically and ``runtime.jobs_dir``/``current_dir`` resolve
@@ -92,8 +91,10 @@ def _patch_happy_path(monkeypatch, tmp_path):
         classmethod(lambda cls, **k: MagicMock()),
     )
     rec: dict = {
-        "server_kwargs": [], "run_http_args": [], "run_loop_kwargs": [],
+        "run_http_args": [],
         "clients": [],
+        "attached": [],
+        "handoffs": [],
     }
 
     def _make_client(*a, **k):
@@ -104,11 +105,14 @@ def _patch_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr("schwab_cli.api.client.SchwabClient", _make_client)
 
     class _FakeServer:
-        def __init__(self, client, logbook, *, notifier=None,
-                     auth_monitor_enabled=True):
-            rec["server_kwargs"].append(
-                {"auth_monitor_enabled": auth_monitor_enabled}
-            )
+        def __init__(self, client, logbook, *, notifier=None):
+            rec["server"] = self
+
+        def attach_token_manager(self, tm):
+            rec["attached"].append(tm)
+
+        def schedule_session_replaced(self, fresh):
+            rec["handoffs"].append(fresh)
 
         async def run_http(self, host, port, *, extra_routes=None):
             rec["run_http_args"].append((host, port))
@@ -118,22 +122,31 @@ def _patch_happy_path(monkeypatch, tmp_path):
         "schwab_cli.mcp_server.app.SchwabMcpServer", _FakeServer
     )
 
-    threads_started: list = []
-    real_thread = server_cmd.threading.Thread
+    # Token runtime: capture wiring; never start real threads.
+    def _fake_build(cfg, *, notifier=None, on_session_replaced=None, **kw):
+        rec["tm_cfg"] = cfg
+        rec["on_session_replaced"] = on_session_replaced
+        tm = MagicMock(name="token_manager")
+        rec["tm"] = tm
+        return tm
 
-    def _record_thread(*args, **kwargs):
-        rec["run_loop_kwargs"].append(kwargs.get("kwargs", {}))
-        t = real_thread(*args, **kwargs)
-        threads_started.append(t)
-        return t
+    def _fake_start(mgr, stop):
+        rec["tm_started"] = mgr
+        rec["stop_event"] = stop
+        return ()
 
-    monkeypatch.setattr(server_cmd.threading, "Thread", _record_thread)
-    rec["threads"] = threads_started
+    def _fake_stop(mgr, stop, threads, **kw):
+        rec["tm_stopped"] = True
+        stop.set()
 
-    # run_loop must not actually loop — return immediately.
     monkeypatch.setattr(
-        "schwab_cli.server.maintenance.run_loop",
-        lambda *a, **k: None,
+        "schwab_cli.server.token_runtime.build_token_manager", _fake_build,
+    )
+    monkeypatch.setattr(
+        "schwab_cli.server.token_runtime.start_token_threads", _fake_start,
+    )
+    monkeypatch.setattr(
+        "schwab_cli.server.token_runtime.stop_token_threads", _fake_stop,
     )
 
     # asyncio.run drives server.run_http synchronously without a loop
@@ -172,46 +185,35 @@ class TestEnableMcpHappyPath:
         )
         assert rec["run_http_args"] == [("0.0.0.0", 9999)]
 
-    def test_mcp_server_auth_monitor_disabled(self, monkeypatch, tmp_path):
+    def test_token_manager_built_and_attached(self, monkeypatch, tmp_path):
         rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=60)
-        assert rec["server_kwargs"][0]["auth_monitor_enabled"] is False
+        assert rec["tm_cfg"] is _CFG
+        assert rec["attached"] == [rec["tm"]]
 
-    def test_maintenance_thread_started_with_stop_and_sleep(self, monkeypatch, tmp_path):
+    def test_token_threads_started_and_stopped(self, monkeypatch, tmp_path):
         rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=120)
+        assert rec["tm_started"] is rec["tm"]
+        assert rec.get("tm_stopped") is True
 
-        # Phase 3 starts a SECOND daemon thread (the job scheduler) on top
-        # of the maintenance thread.
-        assert len(rec["threads"]) == 2
-        # Identify the maintenance run_loop call by its keyword shape rather
-        # than positional index.
-        maint = [
-            kw for kw in rec["run_loop_kwargs"]
-            if {"stop", "sleep", "interval_s"} <= kw.keys()
-        ]
-        assert len(maint) == 1
-        kwargs = maint[0]
-        assert callable(kwargs["stop"])
-        assert callable(kwargs["sleep"])
-        assert kwargs["interval_s"] == 120
-
-    def test_maintenance_thread_is_daemon_and_joined(self, monkeypatch, tmp_path):
+    def test_session_handoff_wired_to_server(self, monkeypatch, tmp_path):
+        """The TokenManager's on_session_replaced must route to the MCP
+        server's schedule_session_replaced (in-memory rebind + streamer
+        reconnect on full rotation)."""
         rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=60)
-
-        thread = rec["threads"][0]
-        assert thread.daemon is True
-        # run_loop returns immediately, so by the time run() returns
-        # the thread has finished and the stop flag was set.
-        assert not thread.is_alive()
+        handoff = rec["on_session_replaced"]
+        assert callable(handoff)
+        fresh = _future_session()
+        handoff(fresh)
+        assert rec["handoffs"] == [fresh]
 
     def test_stop_event_set_on_return(self, monkeypatch, tmp_path):
-        """stop callable reports True after run() returns (event set)."""
+        """The shared stop event is set after run() returns."""
         rec = _patch_happy_path(monkeypatch, tmp_path)
         server_cmd.run(enable_mcp=True, interval_s=60)
-        stop = rec["run_loop_kwargs"][0]["stop"]
-        assert stop() is True
+        assert rec["stop_event"].is_set() is True
 
     def test_returns_zero(self, monkeypatch, tmp_path):
         _patch_happy_path(monkeypatch, tmp_path)
@@ -247,9 +249,9 @@ class TestEnableMcpMissingPrereqs:
 # ---------------------------------------------------------------------------
 
 class TestEnableMcpFalse:
-    def test_maintenance_only_does_not_run_http(self, monkeypatch, tmp_path):
-        # Phase 3: even the bare maintenance path starts the job scheduler,
-        # which writes jobs/.current — isolate it to a tmp config dir.
+    def test_bare_server_does_not_run_http(self, monkeypatch, tmp_path):
+        # Even the bare path starts the job scheduler, which writes
+        # jobs/.current — isolate it to a tmp config dir.
         monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
 
@@ -266,7 +268,19 @@ class TestEnableMcpFalse:
             "schwab_cli.mcp_server.app.SchwabMcpServer", _FakeServer
         )
         monkeypatch.setattr(
-            "schwab_cli.server.maintenance.run_loop",
+            "schwab_cli.server.token_runtime.build_token_manager",
+            lambda cfg, **kw: MagicMock(name="token_manager"),
+        )
+
+        def _fake_start(mgr, stop):
+            stop.set()  # the bare path parks on stop_event — release it
+            return ()
+
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.start_token_threads", _fake_start,
+        )
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.stop_token_threads",
             lambda *a, **k: None,
         )
 
@@ -347,35 +361,19 @@ class TestCLIEnableMcpWiring:
 
 @pytest.mark.skipif(Session is None, reason="Session not importable")
 class TestSessionHandoff:
-    """The maintenance loop's notifier must hand a renewed session back to
-    the persistent client's in-memory state (regression: otherwise the
-    client keeps a refresh token the loop just rotated out)."""
+    """A replaced session must reach the persistent client's in-memory
+    state via the server's schedule_session_replaced bridge (regression:
+    otherwise the client keeps a refresh token the manager just rotated
+    out). The bridge's rebind/reconnect behavior itself is covered in
+    tests/test_mcp_auth_endpoints.py."""
 
-    def _tick(self, action):
-        from schwab_cli.server.maintenance import MaintenanceTick
-        return MaintenanceTick(action=action, detail="x")
-
-    def test_renewed_tick_updates_client_session(self, monkeypatch, tmp_path):
+    def test_handoff_callback_reaches_server_bridge(self, monkeypatch, tmp_path):
         rec = _patch_happy_path(monkeypatch, tmp_path)
+        server_cmd.run(enable_mcp=True, interval_s=60)
+
         fresh = _future_session()
-        monkeypatch.setattr("schwab_cli.session.load", lambda: fresh)
-        server_cmd.run(enable_mcp=True, interval_s=60)
-
-        client = rec["clients"][0]
-        notifier = rec["run_loop_kwargs"][0]["notifier"]
-        notifier(self._tick("renewed"))
-        assert client._session is fresh
-
-    def test_renew_failed_tick_does_not_touch_client_session(self, monkeypatch, tmp_path):
-        rec = _patch_happy_path(monkeypatch, tmp_path)
-        server_cmd.run(enable_mcp=True, interval_s=60)
-
-        client = rec["clients"][0]
-        sentinel = object()
-        client._session = sentinel
-        notifier = rec["run_loop_kwargs"][0]["notifier"]
-        notifier(self._tick("renew_failed"))  # must not raise / must not reload
-        assert client._session is sentinel
+        rec["on_session_replaced"](fresh)
+        assert rec["handoffs"] == [fresh]
 
 
 # ---------------------------------------------------------------------------
@@ -412,12 +410,12 @@ class TestEnableMcpWithRest:
 
 class TestEnableRestStandalone:
     def _patch(self, monkeypatch, tmp_path):
-        """Patch cfg+session present, maintenance.run_loop, uvicorn,
-        asyncio.run — fully hermetic (no reliance on a real ~/.config).
+        """Patch cfg+session present, token runtime, uvicorn, asyncio.run
+        — fully hermetic (no reliance on a real ~/.config).
 
         Isolation: points ``SCHWAB_CLI_CONFIG_DIR`` at ``tmp_path`` so the
-        Phase-3 job scheduler startup writes ``jobs/.current`` into the tmp
-        dir, never the real ``~/.config/schwab_cli``.
+        job scheduler startup writes ``jobs/.current`` into the tmp dir,
+        never the real ``~/.config/schwab_cli``.
         """
         monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
@@ -433,19 +431,31 @@ class TestEnableRestStandalone:
             "schwab_cli.notify.Notifier.from_file",
             classmethod(lambda cls, **k: MagicMock()),
         )
-        rec: dict = {"run_loop_kwargs": [], "served": False, "threads": []}
+        rec: dict = {"served": False}
 
-        real_thread = server_cmd.threading.Thread
+        def _fake_build(cfg, **kw):
+            rec["tm_cfg"] = cfg
+            tm = MagicMock(name="token_manager")
+            rec["tm"] = tm
+            return tm
 
-        def _record_thread(*args, **kwargs):
-            rec["run_loop_kwargs"].append(kwargs.get("kwargs", {}))
-            t = real_thread(*args, **kwargs)
-            rec["threads"].append(t)
-            return t
+        def _fake_start(mgr, stop):
+            rec["tm_started"] = mgr
+            rec["stop_event"] = stop
+            return ()
 
-        monkeypatch.setattr(server_cmd.threading, "Thread", _record_thread)
+        def _fake_stop(mgr, stop, threads, **kw):
+            rec["tm_stopped"] = True
+            stop.set()
+
         monkeypatch.setattr(
-            "schwab_cli.server.maintenance.run_loop", lambda *a, **k: None
+            "schwab_cli.server.token_runtime.build_token_manager", _fake_build,
+        )
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.start_token_threads", _fake_start,
+        )
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.stop_token_threads", _fake_stop,
         )
 
         # build_rest_app must not pull in a real Schwab client.
@@ -480,7 +490,7 @@ class TestEnableRestStandalone:
         monkeypatch.setattr(server_cmd.asyncio, "run", _fake_asyncio_run)
         return rec
 
-    def test_starts_maintenance_thread_and_serves(self, monkeypatch, tmp_path):
+    def test_starts_token_runtime_and_serves(self, monkeypatch, tmp_path):
         rec = self._patch(monkeypatch, tmp_path)
         result = server_cmd.run(
             enable_rest=True, rest_host="127.0.0.1", rest_port=8000,
@@ -488,26 +498,14 @@ class TestEnableRestStandalone:
         )
         assert result == 0
         assert rec["served"] is True
-        # Phase 3 starts a SECOND daemon thread (the job scheduler) on top
-        # of the maintenance thread.
-        assert len(rec["threads"]) == 2
-        maint = [
-            kw for kw in rec["run_loop_kwargs"]
-            if {"stop", "sleep", "interval_s"} <= kw.keys()
-        ]
-        assert len(maint) == 1
-        kwargs = maint[0]
-        assert callable(kwargs["stop"])
-        assert callable(kwargs["sleep"])
-        assert kwargs["interval_s"] == 90
+        assert rec["tm_cfg"] is _CFG
+        assert rec["tm_started"] is rec["tm"]
 
-    def test_maintenance_thread_is_daemon_and_stop_set(self, monkeypatch, tmp_path):
+    def test_token_runtime_stopped_on_shutdown(self, monkeypatch, tmp_path):
         rec = self._patch(monkeypatch, tmp_path)
         server_cmd.run(enable_rest=True, interval_s=60)
-        thread = rec["threads"][0]
-        assert thread.daemon is True
-        assert not thread.is_alive()
-        assert rec["run_loop_kwargs"][0]["stop"]() is True
+        assert rec.get("tm_stopped") is True
+        assert rec["stop_event"].is_set() is True
 
     def test_rest_host_port_passed_to_uvicorn_config(self, monkeypatch, tmp_path):
         rec = self._patch(monkeypatch, tmp_path)

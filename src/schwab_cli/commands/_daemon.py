@@ -14,7 +14,6 @@ The default structured-log path is also exported here.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 
@@ -35,40 +34,43 @@ def resolve_log_file(log_file: str | None, no_log_file: bool) -> Path | None:
 
 
 def attempt_startup_autologin(
+    cfg,
     logbook,
     notifier,
     *,
-    monitor_cls=None,
-    session_loader=None,
+    full_auth=None,
 ):
-    """One-shot rotation at daemon startup when the refresh token is
-    already dead. Returns the freshly-loaded Session on success,
-    ``None`` on failure.
+    """One-shot full re-auth at daemon startup when the refresh token is
+    already dead. Returns the fresh Session on success, ``None`` on
+    failure.
 
-    Reuses ``AuthMonitor.run_once`` so the subprocess, env, anti-thrash,
-    and notification code is identical to the steady-state rotation path.
-    Runs synchronously via ``asyncio.run`` because we're still in the
-    setup phase — the server event loop hasn't started yet.
+    Runs :func:`schwab_cli.auth_flows.perform_full_auth` in-process (the
+    same flow ``schwab auth --force`` drives) — we're still in the setup
+    phase, before the server event loop and before the TokenManager
+    threads exist, so a plain synchronous call is fine. Steady-state
+    renewal afterwards belongs to the TokenManager's refresh track.
 
-    Accepts ``monitor_cls`` / ``session_loader`` overrides for tests —
-    the defaults import the real AuthMonitor and session loader.
+    ``full_auth`` is injectable for tests.
     """
-    if monitor_cls is None:
-        from schwab_cli.mcp_server.auth_monitor import AuthMonitor
-        monitor_cls = AuthMonitor
-    if session_loader is None:
-        from schwab_cli.session import load as load_session
-        session_loader = load_session
+    if full_auth is None:
+        from schwab_cli.auth_flows import perform_full_auth
+        full_auth = perform_full_auth
 
-    monitor = monitor_cls(logbook, notifier)
-    result = asyncio.run(monitor.run_once(reason="startup"))
-    if not result.ok:
+    def _notify(event: str, **fields) -> None:
+        try:
+            notifier.emit(event, **fields)
+        except Exception:  # noqa: BLE001 — notification is best-effort
+            pass
+
+    try:
+        fresh = full_auth(cfg)
+    except Exception as e:  # noqa: BLE001 — surfaced via log + notification
+        logbook.error(
+            "daemon.startup_autologin_failed",
+            error=f"{type(e).__name__}: {e}",
+        )
+        _notify("auth.auto_login.failed", trigger="startup")
         return None
-    return session_loader()
-
-
-# Backwards-compatible aliases — the old ``commands/mcp.py`` exposed
-# these underscore-prefixed names; keep them so any lingering importer
-# (and the migrated server code) can use either spelling.
-_resolve_log_file = resolve_log_file
-_attempt_startup_autologin = attempt_startup_autologin
+    logbook.info("daemon.startup_autologin_succeeded")
+    _notify("auth.auto_login.succeeded", trigger="startup")
+    return fresh

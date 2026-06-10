@@ -455,6 +455,27 @@ class TestStartJobsRaisesInFinally:
         monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(config_dir))
         return config_dir
 
+    @staticmethod
+    def _stub_token_runtime(monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.build_token_manager",
+            lambda cfg, **kw: MagicMock(name="token_manager"),
+        )
+
+        def _fake_start(mgr, stop):
+            stop.set()  # never park: release the stop event immediately
+            return ()
+
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.start_token_threads", _fake_start,
+        )
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.stop_token_threads",
+            lambda *a, **k: None,
+        )
+
     def test_default_run_propagates_start_jobs_error(
         self, isolated_config, monkeypatch
     ):
@@ -464,13 +485,9 @@ class TestStartJobsRaisesInFinally:
             raise sentinel
 
         monkeypatch.setattr(server_cmd, "_start_jobs", _boom)
-        # Off the main thread under pytest, signal install is a no-op anyway,
-        # but guard maintenance.run_loop so a regression that skips the raise
-        # can't hang the test.
-        monkeypatch.setattr(
-            server_cmd.maintenance, "run_loop",
-            lambda *a, **k: pytest.fail("run_loop reached despite _start_jobs error"),
-        )
+        # Keep the token runtime hermetic: no real threads, and the stop
+        # event released so a regression that skips the raise can't hang.
+        self._stub_token_runtime(monkeypatch)
 
         with pytest.raises(RuntimeError) as exc:
             server_cmd.run()
@@ -485,10 +502,7 @@ class TestStartJobsRaisesInFinally:
             server_cmd, "_start_jobs",
             lambda *_a, **_k: (_ for _ in ()).throw(ValueError("nope")),
         )
-        monkeypatch.setattr(
-            server_cmd.maintenance, "run_loop",
-            lambda *a, **k: None,
-        )
+        self._stub_token_runtime(monkeypatch)
         # Must raise the ValueError, and the finally (None-safe _stop_jobs +
         # remove_pidfile) must not itself raise.
         with pytest.raises(ValueError, match="nope"):

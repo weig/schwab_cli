@@ -20,12 +20,6 @@ try:
 except (ModuleNotFoundError, ImportError):
     _CMD_MODULE_AVAILABLE = False
 
-try:
-    from schwab_cli.server.maintenance import DEFAULT_INTERVAL_S
-    _MAINTENANCE_AVAILABLE = True
-except (ModuleNotFoundError, ImportError):
-    _MAINTENANCE_AVAILABLE = False
-
 pytestmark = pytest.mark.skipif(
     not _CMD_MODULE_AVAILABLE,
     reason="schwab_cli.commands.server not implemented yet",
@@ -87,75 +81,74 @@ class TestRunNoConfig:
 
 
 class TestRunWithConfig:
-    """run() with config present delegates to maintenance.run_loop."""
+    """run() with config present starts the TokenManager runtime."""
 
     @pytest.fixture(autouse=True)
     def _isolate_config_dir(self, monkeypatch, tmp_path):
-        # Phase 3: the bare server path starts the job scheduler, which
-        # writes jobs/.current into config_dir(). Redirect it to a tmp dir
-        # so these tests never touch the real ~/.config/schwab_cli.
+        # The bare server path starts the job scheduler, which writes
+        # jobs/.current into config_dir(). Redirect it to a tmp dir so
+        # these tests never touch the real ~/.config/schwab_cli.
         monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path))
 
-    def test_run_calls_run_loop(self, monkeypatch):
-        monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
-        run_loop_calls = []
+    def _patch_runtime(self, monkeypatch, record):
+        """Stub the token runtime: capture wiring and drive an immediate
+        shutdown (the fake start sets the stop event run() parks on)."""
+        def _fake_build(cfg, *, notifier=None, **kw):
+            record["cfg"] = cfg
+            mgr = MagicMock(name="token_manager")
+            record["mgr"] = mgr
+            return mgr
 
-        def _fake_run_loop(cfg, *, stop, interval_s, **kw):
-            run_loop_calls.append({"cfg": cfg, "interval_s": interval_s})
-            # Immediately stop (simulate stop flag already True)
+        def _fake_start(mgr, stop):
+            record["started"] = mgr
+            stop.set()  # run() parks on stop_event — release it at once
+            return ()
 
-        monkeypatch.setattr(
-            "schwab_cli.server.maintenance.run_loop",
-            _fake_run_loop,
-        )
-        server_cmd.run(interval_s=3600)
-
-        assert len(run_loop_calls) == 1
-        assert run_loop_calls[0]["interval_s"] == 3600
-
-    def test_run_passes_config_to_run_loop(self, monkeypatch):
-        monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
-        received_cfg = []
-
-        def _fake_run_loop(cfg, *, stop, interval_s, **kw):
-            received_cfg.append(cfg)
+        def _fake_stop(mgr, stop, threads, **kw):
+            record["stopped"] = True
 
         monkeypatch.setattr(
-            "schwab_cli.server.maintenance.run_loop",
-            _fake_run_loop,
+            "schwab_cli.server.token_runtime.build_token_manager", _fake_build,
         )
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.start_token_threads", _fake_start,
+        )
+        monkeypatch.setattr(
+            "schwab_cli.server.token_runtime.stop_token_threads", _fake_stop,
+        )
+
+    def test_run_starts_token_runtime(self, monkeypatch):
+        monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
+        record: dict = {}
+        self._patch_runtime(monkeypatch, record)
         server_cmd.run(interval_s=3600)
 
-        assert received_cfg[0] is _CFG
+        assert record["cfg"] is _CFG
+        assert record["started"] is record["mgr"]
+
+    def test_run_stops_token_runtime_on_shutdown(self, monkeypatch):
+        monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
+        record: dict = {}
+        self._patch_runtime(monkeypatch, record)
+        server_cmd.run(interval_s=3600)
+
+        assert record.get("stopped") is True
 
     def test_run_returns_0_on_graceful_stop(self, monkeypatch):
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
-        monkeypatch.setattr(
-            "schwab_cli.server.maintenance.run_loop",
-            lambda *a, **kw: None,  # completes immediately
-        )
+        record: dict = {}
+        self._patch_runtime(monkeypatch, record)
         result = server_cmd.run(interval_s=60)
         # run() should return 0 or None (graceful exit)
         assert result in (0, None)
 
-    def test_run_uses_default_interval(self, monkeypatch):
-        """When called without interval_s, it should use DEFAULT_INTERVAL_S."""
-        if not _MAINTENANCE_AVAILABLE:
-            pytest.skip("maintenance module not available")
-
+    def test_run_works_with_default_args(self, monkeypatch):
         monkeypatch.setattr("schwab_cli.config.load", lambda: _CFG)
-        received = []
-
-        def _fake_run_loop(cfg, *, stop, interval_s, **kw):
-            received.append(interval_s)
-
-        monkeypatch.setattr(
-            "schwab_cli.server.maintenance.run_loop",
-            _fake_run_loop,
-        )
-        server_cmd.run()  # no interval_s arg
-
-        assert received[0] == DEFAULT_INTERVAL_S
+        record: dict = {}
+        self._patch_runtime(monkeypatch, record)
+        result = server_cmd.run()  # legacy interval default accepted
+        assert result in (0, None)
+        assert record["cfg"] is _CFG
 
 
 # ---------------------------------------------------------------------------

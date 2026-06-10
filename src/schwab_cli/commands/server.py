@@ -1,7 +1,8 @@
 """`server` command — long-lived daemon + launchd install + diagnostics.
 
 ``schwab server`` is the **only** daemon. Bare ``schwab server`` runs the
-maintenance loop (keeps the OAuth refresh token alive); ``--enable-mcp``
+TokenManager (the single owner of the OAuth token pair — access-token
+half-life exchange + refresh-token renewal checkpoints); ``--enable-mcp``
 ALSO runs the Streamable HTTP MCP server on top of it; ``--enable-rest``
 adds the REST PoC.
 
@@ -45,7 +46,7 @@ from schwab_cli.commands._daemon import (
     attempt_startup_autologin as _attempt_startup_autologin,
     resolve_log_file as _resolve_log_file,
 )
-from schwab_cli.server import maintenance
+from schwab_cli.server import token_runtime
 from schwab_cli.server.jobs import runner as jobs_runner
 from schwab_cli.server.jobs import runtime as jobs_runtime
 from schwab_cli.server.jobs.scheduler import JobScheduler
@@ -56,8 +57,12 @@ from schwab_cli.server.launchd import (
     ServerPlistSpec,
     write_plist,
 )
-from schwab_cli.server.maintenance import DEFAULT_INTERVAL_S
 
+
+# Legacy `--interval-hours` default. The TokenManager self-schedules from
+# token expiries, so the flag is accepted for plist compatibility but no
+# longer drives any loop cadence.
+DEFAULT_INTERVAL_S = 8 * 3600
 
 DEFAULT_MCP_URL = "http://127.0.0.1:7234"
 
@@ -80,22 +85,24 @@ def run(
 ) -> int | None:
     """Entry point for the bare ``schwab server`` call.
 
-    Without ``--enable-mcp`` (the Phase 2 default) this loads config,
-    installs SIGTERM/SIGINT handlers that flip a stop flag, then drives
-    :func:`maintenance.run_loop` until stopped. Returns 0 on graceful
+    Without ``--enable-mcp`` this loads config, installs SIGTERM/SIGINT
+    handlers that flip a stop flag, starts the TokenManager's two tracks
+    as daemon threads, and parks until stopped. Returns 0 on graceful
     exit.
 
     With ``enable_mcp=True`` it ALSO composes the Streamable HTTP MCP
-    server on top of the maintenance loop: the maintenance loop runs in
-    a daemon thread as the single proactive refresh-token renewer, and
-    the MCP server runs on the main thread with
-    ``auth_monitor_enabled=False`` so there is no competing rotation.
-    ``enable_rest=True`` additionally mounts the REST PoC routes onto
-    that same MCP Starlette app (one shared port).
+    server on top: the TokenManager remains the single owner of token
+    renewal, the MCP server exposes its ``/auth/*`` surface and receives
+    session handoffs (in-memory rebind + streamer reconnect after a full
+    rotation). ``enable_rest=True`` additionally mounts the REST PoC
+    routes onto that same MCP Starlette app (one shared port).
 
     With ``enable_rest=True`` but WITHOUT ``--enable-mcp`` it serves the
     standalone REST PoC app via uvicorn on ``rest_host:rest_port`` with
-    the maintenance loop underneath in a daemon thread.
+    the TokenManager underneath in daemon threads.
+
+    ``interval_s`` is legacy (the old maintenance-loop cadence): accepted
+    for installed-plist compatibility, no longer drives any schedule.
     """
     if enable_mcp:
         return _run_with_mcp(
@@ -151,11 +158,14 @@ def run(
 
     _install_signal_handlers(_handle_signal, hup_handler=_handle_hup)
 
-    notifier = _build_notifier()
+    notifier = _load_notifier()
 
-    # Jobs scheduler runs in its own daemon thread. The maintenance loop stays
-    # on the MAIN thread (as in Phase 2) so a SIGTERM that flips stop_event
-    # wakes its interruptible sleep and returns — driving the whole shutdown.
+    # The TokenManager owns both tokens: its two tracks run as daemon
+    # threads; the main thread just parks on stop_event so a SIGTERM/SIGINT
+    # (which sets it) drives the whole shutdown.
+    token_manager = token_runtime.build_token_manager(cfg, notifier=notifier)
+    token_threads = token_runtime.start_token_threads(token_manager, stop_event)
+
     # Initialise to None BEFORE the try so the finally's _stop_jobs is safe
     # (and never raises UnboundLocalError) if _start_jobs itself raises.
     scheduler = None
@@ -167,26 +177,21 @@ def run(
             stop_event=stop_event,
             reload_event=reload_event,
             wake=wake,
-            renew=_jobs_renew(cfg),
+            renew=_jobs_renew(token_manager),
             notify=_jobs_notify(),
         )
 
         typer.secho(
-            f"server: starting auth-maintenance loop + job scheduler "
-            f"(interval {interval_s}s)",
+            "server: starting token manager + job scheduler",
             fg=typer.colors.CYAN, err=True,
         )
-        maintenance.run_loop(
-            cfg,
-            stop=stop_event.is_set,
-            interval_s=interval_s,
-            # Event.wait(timeout) is the interruptible sleep — returns early
-            # the instant a signal handler sets the event.
-            sleep=stop_event.wait,
-            now=lambda: int(time.time()),
-            notifier=notifier,
-        )
+        # Event.wait is interruptible — returns the instant a signal
+        # handler sets stop_event.
+        stop_event.wait()
     finally:
+        token_runtime.stop_token_threads(
+            token_manager, stop_event, token_threads,
+        )
         _stop_jobs(
             scheduler, jobs_thread,
             stop_event=stop_event, wake=wake, current=curr,
@@ -205,13 +210,14 @@ def _run_with_mcp(
     no_log_file: bool,
     no_auto_login: bool,
 ) -> int | None:
-    """``schwab server --enable-mcp`` — maintenance loop + MCP HTTP server.
+    """``schwab server --enable-mcp`` — TokenManager + MCP HTTP server.
 
-    Mirrors :func:`schwab_cli.commands.mcp.run`'s startup (cfg + session
-    presence, logbook + notifier, refresh-expiry startup auto-login),
-    then runs the maintenance loop in a daemon thread (the single
-    refresh-token renewer) and the Streamable HTTP MCP server on the
-    main thread with ``auth_monitor_enabled=False``. uvicorn owns
+    Startup checks cfg + session presence, builds logbook + notifier,
+    and recovers an expired refresh token via startup auto-login. The
+    TokenManager's two tracks run as daemon threads (the single owner of
+    token renewal); the Streamable HTTP MCP server runs on the main
+    thread with the manager attached (enables ``/auth/refresh`` +
+    ``/auth/status`` and the session-handoff bridge). uvicorn owns
     SIGINT/SIGTERM, so we install NO signal handlers here.
     """
     from schwab_cli.api.client import SchwabClient
@@ -255,7 +261,7 @@ def _run_with_mcp(
             "daemon.startup_refresh_expired",
             attempting_autologin=True,
         )
-        fresh = _attempt_startup_autologin(logbook, notifier)
+        fresh = _attempt_startup_autologin(cfg, logbook, notifier)
         if fresh is None:
             typer.secho(
                 "Startup auto-login failed. Check the log for details, "
@@ -267,65 +273,24 @@ def _run_with_mcp(
         session = fresh
         logbook.info("daemon.startup_refresh_recovered")
 
-    # The MCP server runs with auth_monitor_enabled=False: the
-    # maintenance loop is the single proactive renewer, so the MCP
-    # server must not run a competing rotation.
     client = SchwabClient(cfg, session)
-    server = SchwabMcpServer(
-        client, logbook,
-        notifier=notifier,
-        auth_monitor_enabled=False,
-    )
+    server = SchwabMcpServer(client, logbook, notifier=notifier)
 
-    # Maintenance notifier: forwards tick events through the SAME notifier
-    # the MCP server uses (no second notification.json load) AND hands the
-    # freshly-renewed session to the persistent client's in-memory state.
-    # Without this handoff, after the loop rotates the refresh token the
-    # client would keep its boot-time refresh token in memory and fail its
-    # next 401 refresh against a token Schwab already invalidated — even
-    # though session.json on disk is valid. Mirrors the auth_monitor's
-    # `_on_rotation_success` handoff (which is disabled here).
-    _event_for = {
-        "renewed": "scheduler.proactive_auth_succeeded",
-        "renew_failed": "scheduler.proactive_auth_failed",
-        "token_ensured": "scheduler.proactive_auth_skipped",
-        "token_failed": "scheduler.proactive_auth_failed",
-    }
-
-    def _maint_notify(tick) -> None:
-        if tick.action in ("renewed", "token_ensured"):
-            fresh = load_session()
-            if fresh is not None:
-                # Atomic attribute rebind — the same in-memory handoff
-                # `_on_rotation_success` performs on `_client._session`.
-                client._session = fresh
-                logbook.info("daemon.session_handoff", action=tick.action)
-        event = _event_for.get(tick.action)
-        if event is not None:
-            try:
-                notifier.emit(event, detail=tick.detail)
-            except Exception:  # noqa: BLE001 — never break a tick
-                pass
-
-    # The maintenance loop owns ongoing refresh-token renewal — start it
-    # in a daemon thread.
+    # The TokenManager is the single owner of both tokens. Its
+    # on_session_replaced handoff rebinds the persistent client's
+    # in-memory session (so in-flight REST calls pick up the fresh
+    # token) and reconnects the shared streamer after a full rotation;
+    # attaching it to the server enables the /auth/* routes.
     stop_event = threading.Event()
     reload_event = threading.Event()
     wake = threading.Event()
-    maint = threading.Thread(
-        target=maintenance.run_loop,
-        args=(cfg,),
-        kwargs=dict(
-            stop=stop_event.is_set,
-            sleep=stop_event.wait,
-            now=lambda: int(time.time()),
-            interval_s=interval_s,
-            notifier=_maint_notify,
-        ),
-        daemon=True,
-        name="schwab-server-maintenance",
+    token_manager = token_runtime.build_token_manager(
+        cfg,
+        notifier=notifier,
+        on_session_replaced=server.schedule_session_replaced,
     )
-    maint.start()
+    server.attach_token_manager(token_manager)
+    token_threads = token_runtime.start_token_threads(token_manager, stop_event)
 
     # Jobs scheduler thread. uvicorn owns SIGINT/SIGTERM (installed inside
     # asyncio.run); we install ONLY SIGHUP on the main thread BEFORE asyncio.run
@@ -348,7 +313,7 @@ def _run_with_mcp(
             stop_event=stop_event,
             reload_event=reload_event,
             wake=wake,
-            renew=_jobs_renew(cfg),
+            renew=_jobs_renew(token_manager),
             notify=_jobs_notify(notifier),
         )
 
@@ -357,13 +322,12 @@ def _run_with_mcp(
             pid=os.getpid(),
             transport="http",
             bind=f"{mcp_host}:{mcp_port}",
-            maintenance=True,
-            interval_s=interval_s,
+            token_manager=True,
             log_file=str(resolved_log_file) if resolved_log_file else None,
         )
         typer.secho(
             f"server: starting MCP HTTP server on {mcp_host}:{mcp_port} "
-            f"+ auth-maintenance loop + job scheduler (interval {interval_s}s)",
+            f"+ token manager + job scheduler",
             fg=typer.colors.CYAN, err=True,
         )
         # --enable-rest mounts the REST PoC routes onto the MCP server's
@@ -385,12 +349,13 @@ def _run_with_mcp(
         logbook.error("daemon.crash", error=f"{type(e).__name__}: {e}")
         raise
     finally:
-        stop_event.set()
-        maint.join(timeout=5)
-        if maint.is_alive():
-            logbook.warning("daemon.maintenance_stop_timeout")
+        token_runtime.stop_token_threads(
+            token_manager, stop_event, token_threads,
+        )
+        if any(t.is_alive() for t in token_threads):
+            logbook.warning("daemon.token_threads_stop_timeout")
         elif not crashed:
-            logbook.info("daemon.stop", reason="maintenance_stopped")
+            logbook.info("daemon.stop", reason="token_threads_stopped")
         _stop_jobs(
             scheduler, jobs_thread,
             stop_event=stop_event, wake=wake, current=curr,
@@ -411,9 +376,8 @@ def _run_with_rest(
     """``schwab server --enable-rest`` (without ``--enable-mcp``).
 
     Serves the standalone REST PoC Starlette app via uvicorn on
-    ``rest_host:rest_port`` with the auth-maintenance loop running
-    underneath in a daemon thread (the single proactive refresh-token
-    renewer). Mirrors :func:`_run_with_mcp`'s startup (cfg + session
+    ``rest_host:rest_port`` with the TokenManager running underneath
+    in daemon threads (the single owner of token renewal). Mirrors :func:`_run_with_mcp`'s startup (cfg + session
     presence, logbook + notifier, refresh-expiry startup auto-login) and
     its thread + ``asyncio.run`` + ``stop_event`` + join structure;
     uvicorn owns SIGINT/SIGTERM, so we install NO signal handlers here.
@@ -455,7 +419,7 @@ def _run_with_rest(
             )
             raise SystemExit(1)
         logbook.warning("daemon.startup_refresh_expired", attempting_autologin=True)
-        fresh = _attempt_startup_autologin(logbook, base_notifier)
+        fresh = _attempt_startup_autologin(cfg, logbook, base_notifier)
         if fresh is None:
             typer.secho(
                 "Startup auto-login failed. Check the log for details, "
@@ -466,30 +430,16 @@ def _run_with_rest(
             raise SystemExit(1)
         logbook.info("daemon.startup_refresh_recovered")
 
-    # Forward maintenance ticks through the logbook-aware notifier (no
-    # second notification.json load). REST calls the service per-request,
-    # so there is no persistent client needing an in-memory session handoff.
-    notifier = _build_notifier(base_notifier)
-
-    # The maintenance loop owns ongoing refresh-token renewal — start it
-    # in a daemon thread, exactly as the --enable-mcp path does.
+    # The TokenManager owns ongoing renewal of both tokens. REST calls
+    # the service per-request, so there is no persistent client needing
+    # an in-memory session handoff.
     stop_event = threading.Event()
     reload_event = threading.Event()
     wake = threading.Event()
-    maint = threading.Thread(
-        target=maintenance.run_loop,
-        args=(cfg,),
-        kwargs=dict(
-            stop=stop_event.is_set,
-            sleep=stop_event.wait,
-            now=lambda: int(time.time()),
-            interval_s=interval_s,
-            notifier=notifier,
-        ),
-        daemon=True,
-        name="schwab-server-maintenance",
+    token_manager = token_runtime.build_token_manager(
+        cfg, notifier=base_notifier,
     )
-    maint.start()
+    token_threads = token_runtime.start_token_threads(token_manager, stop_event)
 
     # uvicorn owns SIGINT/SIGTERM; install ONLY SIGHUP on the main thread
     # BEFORE asyncio.run so it survives and drives a job-config reload.
@@ -510,14 +460,13 @@ def _run_with_rest(
             stop_event=stop_event,
             reload_event=reload_event,
             wake=wake,
-            renew=_jobs_renew(cfg),
+            renew=_jobs_renew(token_manager),
             notify=_jobs_notify(base_notifier),
         )
 
         typer.secho(
             f"server: starting REST PoC (unauthenticated) on "
-            f"{rest_host}:{rest_port} + auth-maintenance loop + job scheduler "
-            f"(interval {interval_s}s)",
+            f"{rest_host}:{rest_port} + token manager + job scheduler",
             fg=typer.colors.CYAN, err=True,
         )
 
@@ -542,11 +491,12 @@ def _run_with_rest(
     except KeyboardInterrupt:
         pass
     finally:
-        stop_event.set()
-        maint.join(timeout=5)
+        token_runtime.stop_token_threads(
+            token_manager, stop_event, token_threads,
+        )
         # Mirror _run_with_mcp's post-join observability check.
-        if maint.is_alive():
-            logbook.warning("daemon.maintenance_stop_timeout")
+        if any(t.is_alive() for t in token_threads):
+            logbook.warning("daemon.token_threads_stop_timeout")
         _stop_jobs(
             scheduler, jobs_thread,
             stop_event=stop_event, wake=wake, current=curr,
@@ -591,40 +541,18 @@ def _install_sighup(hup_handler) -> None:
         pass
 
 
-def _build_notifier(notifier=None):
-    """Build a maintenance-tick forwarder over the Notifier infra.
+def _load_notifier():
+    """Best-effort Notifier construction for the bare server mode.
 
-    Pass an already-constructed ``notifier`` (e.g. a logbook-aware one) to
-    reuse it and avoid a second ``notification.json`` load; omit it to build
-    a fresh one. Returns ``None`` if the notification stack can't be
-    constructed, so the loop degrades to silent maintenance rather than
-    crashing.
+    Returns ``None`` if the notification stack can't be built — the
+    TokenManager degrades to silent operation rather than crashing.
     """
-    if notifier is None:
-        try:
-            from schwab_cli.notify import Notifier
+    try:
+        from schwab_cli.notify import Notifier
 
-            notifier = Notifier.from_file()
-        except Exception:  # noqa: BLE001 — notifications are optional
-            return None
-
-    _event_for = {
-        "renewed": "scheduler.proactive_auth_succeeded",
-        "renew_failed": "scheduler.proactive_auth_failed",
-        "token_ensured": "scheduler.proactive_auth_skipped",
-        "token_failed": "scheduler.proactive_auth_failed",
-    }
-
-    def _forward(tick) -> None:
-        event = _event_for.get(tick.action)
-        if event is None:
-            return
-        try:
-            notifier.emit(event, detail=tick.detail)
-        except Exception:  # noqa: BLE001 — never break a tick
-            pass
-
-    return _forward
+        return Notifier.from_file()
+    except Exception:  # noqa: BLE001 — notifications are optional
+        return None
 
 
 # ---- jobs scheduler wiring -------------------------------------------
@@ -794,11 +722,15 @@ def _jobs_admin_route(scheduler: JobScheduler):
     return Route("/admin/jobs", _admin_jobs, methods=["GET"])
 
 
-def _jobs_renew(cfg):
-    """Best-effort one-shot maintenance run used as the scheduler ``renew``."""
+def _jobs_renew(token_manager):
+    """Best-effort pre-dispatch token freshen used as the scheduler ``renew``.
+
+    Delegates to the TokenManager's single-flight exchange so a job tick
+    never races the access track's own refresh.
+    """
     def _renew() -> None:
         try:
-            maintenance.run_once(cfg)
+            token_manager.force_exchange()
         except Exception:  # noqa: BLE001 — renew must never break a tick
             pass
     return _renew
@@ -820,7 +752,7 @@ def run_install(
 ) -> None:
     """Write the LaunchAgent plist and ``launchctl load`` it.
 
-    With no mode flags the plist runs the bare maintenance loop. The
+    With no mode flags the plist runs the bare token-manager daemon. The
     ``enable_mcp`` / ``enable_rest`` / ``host`` / ``port`` /
     ``mcp_log_file`` options are baked into the plist's
     ProgramArguments so launchd starts e.g.
@@ -848,7 +780,7 @@ def run_install(
     typer.echo("Proposed LaunchAgent:")
     typer.echo(f"  Label:     {LABEL}")
     typer.echo(f"  Binary:    {binary}")
-    typer.echo(f"  Modes:     {' '.join(modes) if modes else 'bare maintenance loop'}")
+    typer.echo(f"  Modes:     {' '.join(modes) if modes else 'bare token manager'}")
     if enable_mcp:
         typer.echo(f"  MCP bind:  {host or '127.0.0.1'}:{port or 7234}")
     typer.echo(f"  Plist:     {target}")
