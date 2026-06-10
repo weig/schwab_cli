@@ -1216,6 +1216,12 @@ class SchwabMcpServer:
         return self._manager
 
     @property
+    def streamer_bridge(self) -> StreamerBridge:
+        """The shared Schwab-websocket bridge (one per daemon). Exposed
+        for the REST /api/v1/stream WebSocket endpoint."""
+        return self._bridge
+
+    @property
     def logbook(self) -> LogBook:
         return self._logbook
 
