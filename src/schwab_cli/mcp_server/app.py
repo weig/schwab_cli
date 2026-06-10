@@ -33,13 +33,8 @@ import anyio
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from schwab_cli import config as config_module
 from schwab_cli.api import orders as api_orders
 from schwab_cli.api.client import SchwabClient
-from schwab_cli.mcp_server.auth_monitor import (
-    DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
-    AuthMonitor,
-)
 from schwab_cli.mcp_server.logbook import LogBook
 from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
@@ -111,7 +106,6 @@ class SchwabMcpServer:
         server_name: str = "schwab",
         admin_token: str | None = None,
         notifier: Notifier | None = None,
-        auth_monitor_enabled: bool = True,
         idle_linger_s: float | None = None,
     ) -> None:
         self._client = client
@@ -133,12 +127,16 @@ class SchwabMcpServer:
         self._shutdown_event: asyncio.Event | None = None
         self._transport = "idle"
         self._stream_counter = 0
-        # Auth monitor — proactive refresh-token rotation. Shares
-        # the notifier already built above. The daemon is HTTP-only,
-        # so the monitor always runs (started in run_http).
-        self._auth_monitor_enabled = auth_monitor_enabled
-        self._auth_monitor: AuthMonitor | None = None
+        # Token maintenance lives in the daemon's TokenManager (attached
+        # by commands/server.py); the server only exposes its /auth/*
+        # surface and receives session handoffs from its threads.
+        self._token_manager = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._register_tools()
+
+    def attach_token_manager(self, token_manager) -> None:
+        """Attach the daemon's TokenManager (enables the /auth/* routes)."""
+        self._token_manager = token_manager
 
     def _register_tools(self) -> None:
         server = self._server
@@ -976,26 +974,15 @@ class SchwabMcpServer:
 
         self._transport = "http"
         self._shutdown_event = asyncio.Event()
+        # Captured so TokenManager threads can schedule the async session
+        # handoff (streamer reconnect) onto this loop from outside it.
+        self._loop = asyncio.get_running_loop()
         # The session manager owns MCP session create/route/teardown. Its
         # task group must be active for the lifetime of the server, so we
         # drive ``run()`` from the Starlette lifespan below.
         session_manager = StreamableHTTPSessionManager(
             app=self._server, json_response=False, stateless=False,
         )
-
-        # Launch the auth monitor — proactive refresh-token rotation
-        # + expiry notifications. The daemon is long-lived, so the
-        # monitor always runs alongside the HTTP transport.
-        if self._auth_monitor_enabled:
-            self._auth_monitor = AuthMonitor(
-                self._logbook,
-                self._notifier,
-                subprocess_timeout_seconds=_resolve_auth_subprocess_timeout(
-                    self._logbook,
-                ),
-                on_rotation_success=self._on_rotation_success,
-            )
-            self._auth_monitor.start()
 
         async def handle_mcp(scope, receive, send):
             # Bare ASGI app: the session manager reads/writes the stream
@@ -1062,6 +1049,11 @@ class SchwabMcpServer:
             Route("/admin/status", endpoint=admin_status, methods=["GET"]),
             Route("/admin/shutdown", endpoint=admin_shutdown, methods=["POST"]),
             Route("/admin/flush", endpoint=admin_flush, methods=["POST"]),
+            # Token surface for out-of-process consumers (service layer).
+            # Loopback-bound and metadata-only (no token material), so
+            # unauthenticated like /health.
+            Route("/auth/refresh", endpoint=self._auth_refresh, methods=["POST"]),
+            Route("/auth/status", endpoint=self._auth_status, methods=["GET"]),
         ]
         if extra_routes:
             routes.extend(extra_routes)
@@ -1085,51 +1077,102 @@ class SchwabMcpServer:
             await uvi.serve()
         finally:
             watcher.cancel()
-            # Stop the auth monitor cleanly on shutdown so the
-            # subprocess (if mid-rotation) can wind down.
-            if self._auth_monitor is not None:
-                await self._auth_monitor.stop()
             # Tear down the shared streamer: cancels any pending idle-close
             # timer (else a lingering task is destroyed as the loop closes,
             # logging an asyncio warning) and closes the socket.
             await self._bridge.close()
+            # Cleared only AFTER the bridge close so a TokenManager thread
+            # handing off a session mid-shutdown still schedules onto a
+            # live loop for as long as one exists; once cleared (or if the
+            # loop stops first), schedule_session_replaced falls back to a
+            # bare rebind — correct, since the streamer is gone anyway.
+            self._loop = None
             self._logbook.info("server.stop", transport="http")
 
-    async def _on_rotation_success(self) -> None:
-        """Called by the auth monitor after a successful rotation.
+    # ---- token surface (TokenManager attach + /auth routes) -------------
 
-        Reloads ``session.json`` from disk (the monitor's subprocess
-        wrote the fresh tokens there) and nudges the streamer bridge
-        to restart its Schwab WebSocket with the new access token.
-        Subscriptions are preserved through the refcount table; the
-        bridge will resubscribe the aggregate symbol set on reconnect.
+    async def _auth_refresh(self, request):
+        """``POST /auth/refresh`` — on-demand single-flight token exchange.
+
+        The TokenManager collapses concurrent callers onto one Schwab
+        round-trip; an ``invalid_grant`` kicks its recovery track and
+        reports failure immediately rather than blocking on a browser
+        flow. Responses carry expiry metadata only — never token values.
         """
-        # Deferred import to avoid an import cycle with cli.py.
-        from schwab_cli.session import load as load_session
+        from starlette.responses import JSONResponse
 
-        new_session = load_session()
-        if new_session is None:
-            self._logbook.warning(
-                "rotation.reload_missing_session",
+        tm = self._token_manager
+        if tm is None:
+            return JSONResponse(
+                {"ok": False, "error": "token manager not attached"},
+                status_code=503,
             )
-            return
-        # Mutate the client's session in place so any in-flight REST
-        # calls use the fresh token too. SchwabClient exposes it via
-        # the `session` property but reassignment happens through its
-        # private attr.
-        self._client._session = new_session  # noqa: SLF001
-        self._logbook.info("rotation.session_reloaded")
+        # to_thread: force_exchange blocks on the Schwab HTTP round-trip
+        # (and possibly on another in-flight exchange). Its success path
+        # fires on_session_replaced → schedule_session_replaced, which
+        # enqueues handle_session_replaced back onto THIS loop via
+        # run_coroutine_threadsafe — safe (it runs after this await
+        # resumes), as long as the bridge never shares locks with the
+        # exchange path (it doesn't: bridge locks are asyncio-side only).
+        fresh = await asyncio.to_thread(tm.force_exchange)
+        payload = {"ok": fresh is not None, **tm.state()}
+        return JSONResponse(payload, status_code=200 if fresh else 503)
 
-        # Reconnect the streamer with the new access token. Called
-        # unconditionally — reconnect_after_rotation is a no-op when idle
-        # (closes nothing, no resubscribe) and closes a lingering socket —
-        # so we avoid a TOCTOU on streamer_state() (a lock-free read
-        # followed by a separately-locked call). The bridge preserves the
-        # active subscription set via the refcount table, so subscribers'
-        # queues keep flowing after the brief reconnect gap.
+    async def _auth_status(self, request):
+        """``GET /auth/status`` — TokenManager state snapshot."""
+        from starlette.responses import JSONResponse
+
+        tm = self._token_manager
+        if tm is None:
+            return JSONResponse(
+                {"error": "token manager not attached"}, status_code=503,
+            )
+        return JSONResponse({**tm.state(), "now": int(time.time())})
+
+    def schedule_session_replaced(self, fresh) -> None:
+        """Cross-thread session handoff (TokenManager threads call this).
+
+        With the HTTP loop running, schedule the full async handoff
+        (rebind + conditional streamer reconnect) onto it; before/after
+        the loop's lifetime just rebind so in-flight REST calls still
+        pick up the fresh token.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            self._client._session = fresh  # noqa: SLF001
+            return
+        coro = self.handle_session_replaced(fresh)
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            # TOCTOU on is_running(): the loop stopped between the check
+            # and the call (uvicorn shutdown). The streamer is being torn
+            # down with it, so a bare rebind is the complete handoff.
+            coro.close()  # never scheduled — avoid a never-awaited warning
+            self._client._session = fresh  # noqa: SLF001
+
+    async def handle_session_replaced(self, fresh) -> None:
+        """Adopt a replaced session: rebind the client's in-memory copy
+        and reconnect the streamer ONLY on a full rotation.
+
+        An access-only exchange (~every 15 min) keeps the refresh token,
+        and Schwab websockets stay valid across it — bouncing the shared
+        streamer that often would punch holes in every subscriber's
+        stream. A full rotation (new refresh token) does reconnect; the
+        bridge preserves subscriptions via its refcount table.
+        """
+        old = self._client.session
+        rotated = old is None or old.refresh_token != fresh.refresh_token
+        # Atomic attribute rebind so in-flight REST calls use the fresh
+        # token. SchwabClient exposes `session` read-only; reassignment
+        # goes through the private attr by design.
+        self._client._session = fresh  # noqa: SLF001
+        self._logbook.info("rotation.session_reloaded", full_rotation=rotated)
+        if not rotated:
+            return
         try:
             await self._bridge.reconnect_after_rotation()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — keep the daemon alive
             self._logbook.error(
                 "rotation.reconnect_failed",
                 error=f"{type(e).__name__}: {e}",
@@ -1267,30 +1310,3 @@ def _iso_from_epoch(ts: int | None) -> str | None:
         return datetime.utcfromtimestamp(int(ts)).isoformat() + "Z"
     except (ValueError, OSError):
         return None
-
-
-# Outer subprocess kill must be longer than the inner auto-login budget
-# so webauto isn't SIGKILLed mid-flow. The buffer covers the post-webauto
-# OAuth code-for-token exchange + session.json write.
-_AUTH_SUBPROCESS_BUFFER_SECONDS = 30
-
-
-def _resolve_auth_subprocess_timeout(logbook: LogBook) -> int:
-    """Pick the outer ``schwab_cli auth --force`` subprocess timeout.
-
-    Reads ``auto_login_timeout_seconds`` from config and adds a fixed
-    buffer for the post-webauto token exchange. Falls back to the module
-    default if the config can't be loaded — the monitor still runs, just
-    with the old 2-minute envelope.
-    """
-    try:
-        cfg = config_module.load()
-    except config_module.ConfigError as e:
-        logbook.warning(
-            "auth_monitor.config_load_failed", error=str(e),
-            fallback_seconds=DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
-        )
-        return DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
-    if cfg is None:
-        return DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
-    return cfg.auto_login_timeout_seconds + _AUTH_SUBPROCESS_BUFFER_SECONDS
