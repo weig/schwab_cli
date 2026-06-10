@@ -334,9 +334,11 @@ def test_run_volatility_update_partial_results_survive_crash(
 
 
 def test_run_volatility_update_skips_already_sampled_today(conn, monkeypatch):
-    """If a symbol already has an observed row for today's NY day, the
-    daily cron must skip — same-day double-write is a waste of API
-    calls and storage. Regression test for the behaviour."""
+    """If a symbol already has a FULL daily snapshot (atm_iv_30d) for
+    today's NY day — a prior scheduled run already recorded it — a cron
+    RE-RUN must skip it (idempotent; double-write wastes API calls and
+    storage). An ad-hoc `vol` partial snapshot does NOT count (see
+    test_dedup_counts_only_full_daily_snapshot)."""
     from schwab_cli.dataset.store import subscribe_equity
     from schwab_cli.storage.vol_history import record_extended_snapshot
 
@@ -346,13 +348,13 @@ def test_run_volatility_update_skips_already_sampled_today(conn, monkeypatch):
         tier="ACTIVE", tier_since=_ms(2026, 1, 1),
         consecutive_days_below=0, last_evaluated_at=_ms(2026, 1, 1),
     )
-    # Pre-seed today's observed row at NY 9:35am 2026-04-15 — i.e. an
-    # earlier `vol NVDA` invocation already captured today.
+    # Pre-seed today's FULL daily snapshot (atm_iv_30d present) — a prior
+    # scheduled run already captured today.
     record_extended_snapshot(
         conn, symbol="NVDA", spot=200.0, atm_iv=0.34,
         atm_strike=200.0, atm_expiry="2026-05-15", atm_dte=30,
         captured_at_ms=_ms(2026, 4, 15, hour=13),  # 9am NY
-        source="observed",
+        source="observed", atm_iv_30d=0.33,
     )
 
     chain_calls: list[str] = []
