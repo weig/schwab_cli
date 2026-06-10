@@ -942,7 +942,7 @@ class SchwabMcpServer:
     # ---- lifecycle -----------------------------------------------------
 
     async def run_http(
-        self, host: str, port: int, *, extra_routes=None
+        self, host: str, port: int, *, extra_routes=None, asgi_wrap=None
     ) -> None:
         """Drive the server over Streamable HTTP + HTTP admin endpoints
         on ``host:port`` until a shutdown is signalled.
@@ -1058,12 +1058,17 @@ class SchwabMcpServer:
         if extra_routes:
             routes.extend(extra_routes)
         app = Starlette(routes=routes, lifespan=_lifespan)
+        # The webauth gate (peer allowlist + JWT on /api, loopback-only
+        # for everything else) wraps the WHOLE app so a wide bind can
+        # never expose the internal control plane.
+        served_app = asgi_wrap(app) if asgi_wrap is not None else app
 
         self._logbook.info(
             "server.start", transport="http", bind=f"{host}:{port}",
         )
         cfg = uvicorn.Config(
-            app, host=host, port=port, log_level="warning", loop="asyncio",
+            served_app, host=host, port=port, log_level="warning",
+            loop="asyncio",
         )
         uvi = uvicorn.Server(cfg)
 

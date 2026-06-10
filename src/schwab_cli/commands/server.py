@@ -340,17 +340,34 @@ def _run_with_mcp(
             f"+ token manager + job scheduler",
             fg=typer.colors.CYAN, err=True,
         )
-        # --enable-rest mounts the REST PoC routes onto the MCP server's
+        # --enable-rest mounts the REST routes onto the MCP server's
         # Starlette app so both share this single port. The /admin/jobs route
         # is always added so the control plane is reachable in --enable-mcp.
         extra_routes = [_jobs_admin_route(scheduler)]
         if enable_rest:
-            from schwab_cli.server.rest import rest_routes
+            from schwab_cli.server.rest import api_routes, rest_routes
 
-            extra_routes = list(rest_routes()) + extra_routes
+            extra_routes = list(rest_routes()) + list(api_routes()) + extra_routes
+
+        # webauth gate: JWT + peer allowlist on /api/*, loopback-only for
+        # the internal control plane — applied even without --enable-rest
+        # so a wide bind never exposes /admin//auth//mcp.
+        from schwab_cli.webauth.runtime import build_gate
+
+        def _webauth_warn(msg: str) -> None:
+            logbook.warning("webauth.provider_disabled", detail=msg)
+            typer.secho(f"server: {msg}", fg=typer.colors.YELLOW, err=True)
+
+        asgi_wrap, _webauth_loaded = build_gate(
+            allow=cfg.web_allow, warn=_webauth_warn,
+        )
 
         asyncio.run(
-            server.run_http(mcp_host, mcp_port, extra_routes=extra_routes)
+            server.run_http(
+                mcp_host, mcp_port,
+                extra_routes=extra_routes,
+                asgi_wrap=asgi_wrap,
+            )
         )
     except KeyboardInterrupt:
         logbook.info("daemon.stop", reason="SIGINT")
@@ -480,21 +497,30 @@ def _run_with_rest(
         )
 
         typer.secho(
-            f"server: starting REST PoC (unauthenticated) on "
-            f"{rest_host}:{rest_port} + token manager + job scheduler",
+            f"server: starting REST on {rest_host}:{rest_port} "
+            f"+ token manager + job scheduler",
             fg=typer.colors.CYAN, err=True,
         )
 
         async def _serve() -> None:
             import uvicorn
             from starlette.applications import Starlette
-            from schwab_cli.server.rest import rest_routes
+            from schwab_cli.server.rest import api_routes, rest_routes
+            from schwab_cli.webauth.runtime import build_gate
 
+            def _webauth_warn(msg: str) -> None:
+                logbook.warning("webauth.provider_disabled", detail=msg)
+                typer.secho(f"server: {msg}", fg=typer.colors.YELLOW, err=True)
+
+            asgi_wrap, _loaded = build_gate(
+                allow=cfg.web_allow, warn=_webauth_warn,
+            )
             app = Starlette(
-                routes=list(rest_routes()) + [_jobs_admin_route(scheduler)]
+                routes=list(rest_routes()) + list(api_routes())
+                + [_jobs_admin_route(scheduler)]
             )
             config = uvicorn.Config(
-                app,
+                asgi_wrap(app),
                 host=rest_host,
                 port=rest_port,
                 log_level="warning",

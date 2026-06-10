@@ -429,6 +429,36 @@ app.add_typer(jobs_cmd.app, name="jobs")
 app.add_typer(cert_cmd.app, name="cert")
 
 
+webauth_app = typer.Typer(
+    help=(
+        "REST auth providers (OAuth2/OIDC resource server). Configure "
+        "providers under ~/.config/schwab_cli/webauth/*.json."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(webauth_app, name="webauth")
+
+
+@webauth_app.command("list", help="List configured providers and load errors.")
+def webauth_list(doc: bool = doc_option()) -> None:
+    from schwab_cli.commands import webauth as webauth_cmd
+
+    webauth_cmd.run_list()
+
+
+@webauth_app.command(
+    "verify",
+    help="Verify a bearer token through the REST auth path ('-' = stdin).",
+)
+def webauth_verify(
+    token: str = typer.Argument(..., help="JWT, or '-' to read from stdin."),
+    doc: bool = doc_option(),
+) -> None:
+    from schwab_cli.commands import webauth as webauth_cmd
+
+    webauth_cmd.run_verify(token)
+
+
 watch_app = typer.Typer(
     help=(
         "Manual ticker watchlist. Subscribes to OHLCV + volatility "
