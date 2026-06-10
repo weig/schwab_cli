@@ -293,7 +293,10 @@ def test_supervisor_start_spawns_subprocess_with_log_dir_when_debug(
     sup.terminate()
 
 
-def test_supervisor_start_skips_log_dir_without_debug(tmp_path, monkeypatch):
+def test_supervisor_creates_log_dir_even_without_debug(tmp_path, monkeypatch):
+    # The trace is now always-on, so the log dir is created (and a --log
+    # file written) even when the parent has no DEBUG — that's the whole
+    # point: the daemon's unattended runs leave a trace.
     fixture = _write_fixture_script(
         tmp_path, 'import time; time.sleep(0.2)\n',
     )
@@ -308,7 +311,9 @@ def test_supervisor_start_skips_log_dir_without_debug(tmp_path, monkeypatch):
     )
     sup.start()
     assert sup._proc is not None
-    assert not log_dir.exists()
+    # The dir is created and a --log path is passed; the file itself is
+    # written by the real webauto-cli (the fake fixture here ignores --log).
+    assert log_dir.exists()
     sup.terminate()
 
 
@@ -341,6 +346,33 @@ def test_supervisor_argv_includes_no_notify(tmp_path):
     assert "-a" in argv
     a_values = [argv[i + 1] for i, t in enumerate(argv) if t == "-a"]
     assert any(v == "URL=https://schwab/auth?x=1" for v in a_values)
+
+
+def test_supervisor_forces_debug_in_child_env(tmp_path, monkeypatch):
+    # Parent has no DEBUG; the supervisor must still spawn the child with
+    # DEBUG=1 so the always-on --log trace is verbose.
+    monkeypatch.delenv("DEBUG", raising=False)
+    sidecar = tmp_path / "debug.txt"
+    fixture = _write_fixture_script(
+        tmp_path,
+        f'import os, time; '
+        f'open({str(sidecar)!r}, "w").write(os.environ.get("DEBUG", "")); '
+        f'time.sleep(0.2)\n',
+    )
+    sup = AutoLoginSupervisor(
+        [sys.executable, str(fixture)],
+        auth_url="https://schwab/auth",
+        state="S",
+        stderr_log_dir=tmp_path / "logs",
+        timeout_seconds=10.0,
+    )
+    sup.start()
+    for _ in range(30):
+        if sidecar.exists():
+            break
+        time.sleep(0.05)
+    sup.terminate()
+    assert sidecar.read_text() == "1"
 
 
 def test_supervisor_terminate_is_idempotent(tmp_path):
@@ -525,8 +557,14 @@ def test_build_webauto_argv_includes_extra_flags(tmp_path):
     assert argv[argv.index("--state") + 1] == "MY_STATE"
 
 
-def test_build_webauto_argv_adds_log_flag_when_debug(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEBUG", "1")
+@pytest.mark.parametrize("debug", ["1", None])
+def test_build_webauto_argv_always_logs(tmp_path, monkeypatch, debug):
+    # --log is now unconditional (every auto-login leaves a trace), so the
+    # daemon's DEBUG-less runs are diagnosable too.
+    if debug is None:
+        monkeypatch.delenv("DEBUG", raising=False)
+    else:
+        monkeypatch.setenv("DEBUG", debug)
     argv, log_path = _build_webauto_argv(
         base_command=("webauto-cli",),
         auth_url="https://schwab/auth",
@@ -534,20 +572,31 @@ def test_build_webauto_argv_adds_log_flag_when_debug(tmp_path, monkeypatch):
         stderr_log_dir=tmp_path / "logs",
     )
     assert "--log" in argv
-    assert log_path is not None
+    assert argv[argv.index("--log") + 1] == str(log_path)
     assert log_path.parent == tmp_path / "logs"
+    assert log_path.name.startswith("auto_login-")
 
 
-def test_build_webauto_argv_omits_log_flag_without_debug(tmp_path, monkeypatch):
-    monkeypatch.delenv("DEBUG", raising=False)
-    argv, log_path = _build_webauto_argv(
+def test_build_webauto_argv_prunes_old_logs(tmp_path):
+    from schwab_cli.auth_handlers import _AUTH_LOG_KEEP
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    # Seed more than the cap with sortable timestamped names.
+    for i in range(_AUTH_LOG_KEEP + 5):
+        (log_dir / f"auto_login-2026010100{i:04d}.stderr.log").write_text("x")
+    _build_webauto_argv(
         base_command=("webauto-cli",),
         auth_url="https://schwab/auth",
-        extra_flags=["--no-notify"],
-        stderr_log_dir=tmp_path / "logs",
+        extra_flags=[],
+        stderr_log_dir=log_dir,
     )
-    assert "--log" not in argv
-    assert log_path is None
+    remaining = sorted(log_dir.glob("auto_login-*.stderr.log"))
+    # Pruned to the cap (the new run's own file is created after the prune,
+    # so total is cap + 1 — the cap kept plus the fresh one).
+    assert len(remaining) <= _AUTH_LOG_KEEP + 1
+    # The oldest seeds were the ones removed.
+    assert not (log_dir / "auto_login-2026010100000.stderr.log").exists()
 
 
 # ---- _terminate (KEPT) -----------------------------------------------------
