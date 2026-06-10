@@ -119,11 +119,14 @@ def test_get_history_401_then_refresh_succeeds(monkeypatch, tmp_path):
             httpx.Response(200, json=_SAMPLE),
         ],
     )
-    respx.post("https://api.schwabapi.com/v1/oauth/token").mock(
-        return_value=httpx.Response(200, json={
-            "access_token": "new_at", "refresh_token": "new_rt",
-            "expires_in": 1800,
-        }),
+    # 401 recovery now delegates to the daemon (single token writer)
+    # instead of running an OAuth exchange in-process.
+    monkeypatch.setattr(
+        "schwab_cli.auth_delegate.request_refresh",
+        lambda **kw: Session(
+            access_token="new_at", refresh_token="new_rt",
+            expires_at=2_000_000_000, refresh_token_expires_at=2_000_000_000,
+        ),
     )
     result = get_history(
         _client(), "NVDA",

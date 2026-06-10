@@ -479,35 +479,32 @@ def _maybe_retry_auth_failed(
 
 
 def _ensure_token_valid(notifier) -> None:
-    """Refresh the access token if it's within 30 minutes of expiry.
+    """Ask the daemon to refresh the access token if it's near expiry.
 
     Failure here is alerted but not fatal — the child processes will
-    each surface their own auth errors more specifically. We try to
-    rotate proactively so the children share one fresh token across
-    the full run rather than each racing to refresh on first request.
+    each surface their own auth errors more specifically. We freshen
+    proactively so the children share one fresh token across the full
+    run rather than each racing to refresh on first request.
+
+    Delegates to the daemon's TokenManager (the single token writer)
+    via :mod:`schwab_cli.auth_delegate` — this orchestrator never runs
+    an OAuth exchange or writes session.json itself.
     """
     try:
-        from schwab_cli import config as config_module
-        from schwab_cli import oauth
-        from schwab_cli.session import (
-            Session, load as load_session, save as save_session,
-        )
+        from schwab_cli import auth_delegate
+        from schwab_cli.session import load as load_session
     except ImportError as e:
         # Narrowly scoped — only catch actual import problems, not
         # whatever runtime exception happens to occur below.
-        notifier.emit(
-            "scheduler.token_refresh_failed",
-            error=f"ImportError: {e}",
-        )
+        try:
+            notifier.emit(
+                "scheduler.token_refresh_failed",
+                error=f"ImportError: {e}",
+            )
+        except Exception:  # noqa: BLE001 — alerting must stay non-fatal
+            pass
         return
 
-    cfg = config_module.load()
-    if cfg is None:
-        notifier.emit(
-            "scheduler.token_refresh_failed",
-            reason="no config — run `schwab setup`",
-        )
-        return
     try:
         session = load_session()
     except Exception as e:
@@ -528,20 +525,22 @@ def _ensure_token_valid(notifier) -> None:
     if session.expires_at - now > refresh_window_s:
         return  # access token still has > 30 min left
 
-    try:
-        tr = oauth.refresh(cfg, session.refresh_token)
-        new_session = Session.from_token_response(tr, now=now)
-        save_session(new_session)
+    def _unreachable(detail: str) -> None:
+        notifier.emit("daemon.unreachable", detail=detail)
+
+    fresh = auth_delegate.request_refresh(on_unreachable=_unreachable)
+    if fresh is not None:
         notifier.emit(
             "scheduler.token_refreshed",
             expires_at=datetime.fromtimestamp(
-                new_session.expires_at, tz=timezone.utc
+                fresh.expires_at, tz=timezone.utc
             ).isoformat(),
         )
-    except Exception as e:
+    else:
         notifier.emit(
             "scheduler.token_refresh_failed",
-            error=f"{type(e).__name__}: {e}",
+            reason="daemon could not refresh — ensure `schwab server` is "
+                   "running, or run `schwab auth`",
         )
 
 

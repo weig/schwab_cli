@@ -40,6 +40,7 @@ from typing import Any
 import httpx
 import typer
 
+from schwab_cli import auth_delegate
 from schwab_cli import config as config_module
 from schwab_cli.commands._daemon import (
     DEFAULT_LOG_FILE,
@@ -164,6 +165,9 @@ def run(
     # threads; the main thread just parks on stop_event so a SIGTERM/SIGINT
     # (which sets it) drives the whole shutdown.
     token_manager = token_runtime.build_token_manager(cfg, notifier=notifier)
+    # In-process consumers (service layer) resolve refreshes through the
+    # manager directly instead of an HTTP hop to ourselves.
+    auth_delegate.set_local_refresher(token_manager.force_exchange)
     token_threads = token_runtime.start_token_threads(token_manager, stop_event)
 
     # Initialise to None BEFORE the try so the finally's _stop_jobs is safe
@@ -192,6 +196,7 @@ def run(
         token_runtime.stop_token_threads(
             token_manager, stop_event, token_threads,
         )
+        auth_delegate.set_local_refresher(None)
         _stop_jobs(
             scheduler, jobs_thread,
             stop_event=stop_event, wake=wake, current=curr,
@@ -290,6 +295,11 @@ def _run_with_mcp(
         on_session_replaced=server.schedule_session_replaced,
     )
     server.attach_token_manager(token_manager)
+    # 401s on the persistent client and any in-process service-layer
+    # consumer resolve through the manager directly — never an HTTP hop
+    # back to this same daemon (which could starve the event loop).
+    client.refresh_hook = token_manager.force_exchange
+    auth_delegate.set_local_refresher(token_manager.force_exchange)
     token_threads = token_runtime.start_token_threads(token_manager, stop_event)
 
     # Jobs scheduler thread. uvicorn owns SIGINT/SIGTERM (installed inside
@@ -352,6 +362,7 @@ def _run_with_mcp(
         token_runtime.stop_token_threads(
             token_manager, stop_event, token_threads,
         )
+        auth_delegate.set_local_refresher(None)
         if any(t.is_alive() for t in token_threads):
             logbook.warning("daemon.token_threads_stop_timeout")
         elif not crashed:
@@ -439,6 +450,10 @@ def _run_with_rest(
     token_manager = token_runtime.build_token_manager(
         cfg, notifier=base_notifier,
     )
+    # REST handlers go through the service layer per-request; resolve
+    # their refreshes through the in-process manager (the standalone
+    # REST app doesn't even mount the /auth routes).
+    auth_delegate.set_local_refresher(token_manager.force_exchange)
     token_threads = token_runtime.start_token_threads(token_manager, stop_event)
 
     # uvicorn owns SIGINT/SIGTERM; install ONLY SIGHUP on the main thread
@@ -494,6 +509,7 @@ def _run_with_rest(
         token_runtime.stop_token_threads(
             token_manager, stop_event, token_threads,
         )
+        auth_delegate.set_local_refresher(None)
         # Mirror _run_with_mcp's post-join observability check.
         if any(t.is_alive() for t in token_threads):
             logbook.warning("daemon.token_threads_stop_timeout")

@@ -67,7 +67,12 @@ def run(force: bool, manual: bool = False) -> None:
         if session is not None:
             try:
                 tr = oauth.refresh(cfg, session.refresh_token)
-                new_session = Session.from_token_response(tr, now=int(time.time()))
+                # refreshed_from: a refresh grant does NOT extend the
+                # refresh token's life — preserve its true expiry
+                # (from_token_response here would silently inflate it).
+                new_session = Session.refreshed_from(
+                    session, tr, now=int(time.time()),
+                )
                 save_session(new_session)
                 typer.secho(
                     f"Already logged in. Access token valid until {_iso(new_session.expires_at)}.",
