@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import threading
 import json
 import os
 from dataclasses import dataclass, field
@@ -173,6 +174,13 @@ def save(counters: Counters, *, path: Path | None = None) -> None:
         pass
 
 
+# In-process serialization: fcntl.flock is per file-description, so two
+# threads in ONE process (concurrent REST placements in the daemon) can
+# both hold the "exclusive" lock. The thread lock closes that gap; flock
+# keeps cross-process (CLI vs daemon) access serialized.
+_THREAD_LOCK = threading.Lock()
+
+
 @contextlib.contextmanager
 def _locked(path: Path):
     """File-locked context — opens (or creates) ``path`` with an
@@ -181,6 +189,7 @@ def _locked(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = path.with_suffix(path.suffix + ".lock")
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    _THREAD_LOCK.acquire()
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -188,6 +197,7 @@ def _locked(path: Path):
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
+            _THREAD_LOCK.release()
             os.close(fd)
 
 
