@@ -391,12 +391,15 @@ class TestEnableMcpWithRest:
         assert extra[0]  # non-empty list of Route objects
         paths = {r.path for r in extra[0]}
         # /admin/jobs is always mounted; REST adds the loopback PoC routes
-        # AND the authenticated /api/v1 surface.
-        assert paths == {
-            "/health", "/quote/{symbol}",
-            "/api/v1/health", "/api/v1/quote/{symbol}",
-            "/admin/jobs",
-        }
+        # AND the authenticated /api/v1 surface (exact endpoint list is
+        # owned by tests/test_rest_api_v1.py).
+        assert {"/health", "/quote/{symbol}", "/admin/jobs"} <= paths
+        assert "/api/v1/health" in paths
+        assert "/api/v1/quote/{symbol}" in paths
+        assert all(
+            p.startswith(("/health", "/quote", "/api/v1/", "/admin/jobs"))
+            for p in paths
+        )
 
     def test_no_rest_still_mounts_admin_jobs(self, monkeypatch, tmp_path):
         rec = _patch_happy_path(monkeypatch, tmp_path)
