@@ -68,6 +68,11 @@ EVENTS: dict[str, tuple[Level, str]] = {
         "info",
         "schwab_cli MCP daemon started.",
     ),
+    "daemon.unreachable": (
+        "error",
+        "schwab_cli daemon unreachable — token refresh delegated nowhere. "
+        "Ensure `schwab server` is running.",
+    ),
     "daemon.stop": (
         "info",
         "schwab_cli MCP daemon stopped.",

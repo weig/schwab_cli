@@ -101,6 +101,25 @@ def test_auth_refreshes_when_session_present(monkeypatch, tmp_path):
     assert s.expires_at == 1_000_000 + 1800
 
 
+def test_auth_refresh_preserves_refresh_token_expiry(monkeypatch, tmp_path):
+    """A refresh grant does NOT extend the refresh token's life — the
+    non-force `schwab auth` path must carry the OLD expiry forward, not
+    reset it to now+7d (the old from_token_response misuse silently
+    inflated the recorded TTL so renewal checkpoints never fired)."""
+    _setup_env(monkeypatch, tmp_path)
+    _seed_config()
+    _seed_session()  # refresh_token_expires_at=200
+
+    fake_tr = TokenResponse(access_token="new_a", refresh_token="new_r", expires_in=1800)
+    with patch("schwab_cli.commands.auth.oauth.refresh", return_value=fake_tr):
+        with patch("schwab_cli.commands.auth.time.time", return_value=1_000_000):
+            result = runner.invoke(app, ["auth"])
+
+    assert result.exit_code == 0, result.output
+    s = load_session()
+    assert s.refresh_token_expires_at == 200  # preserved, not now+7d
+
+
 def test_auth_falls_back_to_full_auth_on_refresh_failure(monkeypatch, tmp_path):
     _setup_env(monkeypatch, tmp_path)
     _seed_config()

@@ -68,23 +68,28 @@ def test_network_error_raises_api_error():
         client.get("https://api.schwabapi.com/trader/v1/accounts")
 
 
-@respx.mock
-def test_401_triggers_refresh_and_retry(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+def _fresh_session(access="fresh_atok") -> Session:
+    return Session(
+        access_token=access,
+        refresh_token="rtok",
+        expires_at=1_500_000,
+        refresh_token_expires_at=2_000_000,
+    )
 
+
+@respx.mock
+def test_401_triggers_delegated_refresh_and_retry(monkeypatch):
+    """A 401 delegates to the token owner (auth_delegate / refresh hook)
+    — the client NEVER runs an OAuth exchange itself anymore."""
     respx.get("https://api.schwabapi.com/trader/v1/accounts").mock(
         side_effect=[
             httpx.Response(401, json={"error": "invalid_token"}),
             httpx.Response(200, json=[{"accountNumber": "123"}]),
         ]
     )
-    respx.post("https://api.schwabapi.com/v1/oauth/token").mock(
-        return_value=httpx.Response(200, json={
-            "access_token": "fresh_atok",
-            "refresh_token": "fresh_rtok",
-            "expires_in": 1800,
-        }),
+    monkeypatch.setattr(
+        "schwab_cli.auth_delegate.request_refresh",
+        lambda **kw: _fresh_session(),
     )
 
     client = SchwabClient(_cfg(), _session(access="old_atok"))
@@ -95,15 +100,39 @@ def test_401_triggers_refresh_and_retry(tmp_path, monkeypatch):
 
 
 @respx.mock
-def test_401_then_refresh_fails_raises_session_expired(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+def test_401_uses_injected_refresh_hook_over_delegate(monkeypatch):
+    """The daemon wires its TokenManager via refresh_hook — it must win
+    over the default delegate path."""
+    respx.get("https://api.schwabapi.com/trader/v1/accounts").mock(
+        side_effect=[
+            httpx.Response(401),
+            httpx.Response(200, json=[{"accountNumber": "123"}]),
+        ]
+    )
 
+    def _no_delegate(**kw):
+        raise AssertionError("default delegate must not be used")
+
+    monkeypatch.setattr(
+        "schwab_cli.auth_delegate.request_refresh", _no_delegate,
+    )
+    client = SchwabClient(
+        _cfg(), _session(access="old_atok"),
+        refresh_hook=lambda: _fresh_session("hook_atok"),
+    )
+    body = client.get("https://api.schwabapi.com/trader/v1/accounts")
+    assert body == [{"accountNumber": "123"}]
+    last_call = respx.routes[0].calls.last
+    assert last_call.request.headers["Authorization"] == "Bearer hook_atok"
+
+
+@respx.mock
+def test_401_then_refresh_fails_raises_session_expired(monkeypatch):
     respx.get("https://api.schwabapi.com/trader/v1/accounts").mock(
         return_value=httpx.Response(401, json={"error": "invalid_token"}),
     )
-    respx.post("https://api.schwabapi.com/v1/oauth/token").mock(
-        return_value=httpx.Response(401, json={"error": "invalid_grant"}),
+    monkeypatch.setattr(
+        "schwab_cli.auth_delegate.request_refresh", lambda **kw: None,
     )
 
     client = SchwabClient(_cfg(), _session())
@@ -112,22 +141,16 @@ def test_401_then_refresh_fails_raises_session_expired(tmp_path, monkeypatch):
 
 
 @respx.mock
-def test_401_twice_after_refresh_raises_session_expired(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-
+def test_401_twice_after_refresh_raises_session_expired(monkeypatch):
     respx.get("https://api.schwabapi.com/trader/v1/accounts").mock(
         side_effect=[
             httpx.Response(401),
             httpx.Response(401),
         ]
     )
-    respx.post("https://api.schwabapi.com/v1/oauth/token").mock(
-        return_value=httpx.Response(200, json={
-            "access_token": "fresh_atok",
-            "refresh_token": "fresh_rtok",
-            "expires_in": 1800,
-        }),
+    monkeypatch.setattr(
+        "schwab_cli.auth_delegate.request_refresh",
+        lambda **kw: _fresh_session(),
     )
 
     client = SchwabClient(_cfg(), _session())

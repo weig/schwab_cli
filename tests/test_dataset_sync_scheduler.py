@@ -191,17 +191,55 @@ def test_ensure_token_valid_no_session_emits_alert(monkeypatch):
     assert "scheduler.token_refresh_failed" in notifier.events()
 
 
-def test_ensure_token_valid_no_config_emits_alert(monkeypatch):
+def test_ensure_token_valid_daemon_unreachable_emits_alert(monkeypatch):
+    """Daemon gone: the unreachable hook fires daemon.unreachable AND
+    the orchestrator alerts token_refresh_failed (non-fatal)."""
     notifier = _FakeNotifier()
+    import time as _t
+
+    @dataclass
+    class _Session:
+        expires_at: int = int(_t.time()) + 60  # inside the window
+        refresh_token: str = "rt"
+
+    monkeypatch.setattr("schwab_cli.session.load", lambda: _Session())
+
+    def _fake_refresh(*, on_unreachable=None, **kw):
+        if on_unreachable is not None:
+            on_unreachable("ConnectError: refused")
+        return None
+
     monkeypatch.setattr(
-        "schwab_cli.config.load", lambda: None,
+        "schwab_cli.auth_delegate.request_refresh", _fake_refresh,
     )
     ss._ensure_token_valid(notifier)
+    assert "daemon.unreachable" in notifier.events()
     assert "scheduler.token_refresh_failed" in notifier.events()
 
 
+def test_ensure_token_valid_delegate_success_emits_refreshed(monkeypatch):
+    notifier = _FakeNotifier()
+    import time as _t
+
+    @dataclass
+    class _Session:
+        expires_at: int = int(_t.time()) + 60  # inside the window
+        refresh_token: str = "rt"
+
+    @dataclass
+    class _Fresh:
+        expires_at: int = int(_t.time()) + 1800
+
+    monkeypatch.setattr("schwab_cli.session.load", lambda: _Session())
+    monkeypatch.setattr(
+        "schwab_cli.auth_delegate.request_refresh", lambda **kw: _Fresh(),
+    )
+    ss._ensure_token_valid(notifier)
+    assert "scheduler.token_refreshed" in notifier.events()
+
+
 def test_ensure_token_valid_fresh_token_is_noop(monkeypatch):
-    """Access token with > 30 min left should NOT call oauth.refresh."""
+    """Access token with > 30 min left should NOT delegate at all."""
     notifier = _FakeNotifier()
     import time as _t
 
@@ -210,13 +248,12 @@ def test_ensure_token_valid_fresh_token_is_noop(monkeypatch):
         expires_at: int = int(_t.time()) + 7200  # 2 hours
         refresh_token: str = "rt"
 
-    monkeypatch.setattr("schwab_cli.config.load", lambda: object())
     monkeypatch.setattr("schwab_cli.session.load", lambda: _Session())
 
     refresh_called = []
     monkeypatch.setattr(
-        "schwab_cli.oauth.refresh",
-        lambda *a, **k: refresh_called.append(1),
+        "schwab_cli.auth_delegate.request_refresh",
+        lambda **kw: refresh_called.append(1),
     )
 
     ss._ensure_token_valid(notifier)
@@ -224,8 +261,8 @@ def test_ensure_token_valid_fresh_token_is_noop(monkeypatch):
     assert notifier.calls == []
 
 
-def test_ensure_token_valid_refresh_raises_is_non_fatal(monkeypatch):
-    """If oauth.refresh raises, emit an alert but don't propagate —
+def test_ensure_token_valid_delegate_failure_is_non_fatal(monkeypatch):
+    """If the daemon can't refresh, emit an alert but don't propagate —
     the children still get a chance with the old token."""
     notifier = _FakeNotifier()
     import time as _t
@@ -235,11 +272,9 @@ def test_ensure_token_valid_refresh_raises_is_non_fatal(monkeypatch):
         expires_at: int = int(_t.time()) + 60  # inside the window
         refresh_token: str = "rt"
 
-    monkeypatch.setattr("schwab_cli.config.load", lambda: object())
     monkeypatch.setattr("schwab_cli.session.load", lambda: _Session())
     monkeypatch.setattr(
-        "schwab_cli.oauth.refresh",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        "schwab_cli.auth_delegate.request_refresh", lambda **kw: None,
     )
 
     # Must return without raising

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+from typing import Callable
 
 import httpx
 
-from schwab_cli import oauth
+from schwab_cli import auth_delegate
 from schwab_cli.config import Config
-from schwab_cli.session import Session, save as save_session
+from schwab_cli.session import Session
 
 
 class ApiError(Exception):
@@ -39,9 +39,20 @@ class SchwabClient:
     TRADER_BASE = "https://api.schwabapi.com/trader/v1"
     MARKET_BASE = "https://api.schwabapi.com/marketdata/v1"
 
-    def __init__(self, cfg: Config, session: Session) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        session: Session,
+        *,
+        refresh_hook: Callable[[], Session | None] | None = None,
+    ) -> None:
         self._cfg = cfg
         self._session = session
+        # 401 recovery path. ``None`` (the default) delegates to the
+        # daemon via auth_delegate (in-process TokenManager inside the
+        # daemon, HTTP elsewhere). The daemon's persistent client wires
+        # its TokenManager's force_exchange here explicitly.
+        self.refresh_hook = refresh_hook
         self._account_ids_cache: list[AccountIds] | None = None
         # Persistent HTTP/2 client. ``httpx.request`` (the module-level
         # helper) opens a fresh TCP+TLS connection per call, so each
@@ -182,14 +193,27 @@ class SchwabClient:
         )
 
     def _refresh_or_expire(self) -> None:
-        try:
-            tr = oauth.refresh(self._cfg, self._session.refresh_token)
-        except (httpx.HTTPStatusError, httpx.RequestError, oauth.OAuthError) as e:
+        """Recover from a 401 by asking the token owner for a fresh session.
+
+        Never exchanges tokens or writes session.json itself — the
+        daemon's TokenManager is the single writer. ``refresh_hook``
+        (when wired) is the in-process path; the default delegates via
+        :mod:`schwab_cli.auth_delegate`.
+        """
+        if self.refresh_hook is not None:
+            try:
+                fresh = self.refresh_hook()
+            except Exception:  # noqa: BLE001 — any hook failure ≡ no session
+                fresh = None
+        else:
+            fresh = auth_delegate.request_refresh(
+                on_unreachable=auth_delegate.automated_unreachable_notifier(),
+            )
+        if fresh is None:
             raise SessionExpired(
                 "Session expired. Run `schwab_cli auth --force`."
-            ) from e
-        self._session = Session.from_token_response(tr, now=int(time.time()))
-        save_session(self._session)
+            )
+        self._session = fresh
 
     def _load_account_ids(self) -> list[AccountIds]:
         if self._account_ids_cache is None:
