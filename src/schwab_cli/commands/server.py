@@ -346,8 +346,16 @@ def _run_with_mcp(
         extra_routes = [_jobs_admin_route(scheduler)]
         if enable_rest:
             from schwab_cli.server.rest import api_routes, rest_routes
+            from schwab_cli.server.stream_ws import stream_routes
 
-            extra_routes = list(rest_routes()) + list(api_routes()) + extra_routes
+            extra_routes = (
+                list(rest_routes())
+                + list(api_routes())
+                # Streaming shares the daemon's single Schwab websocket;
+                # only this combined mode has a bridge to share.
+                + stream_routes(lambda: server.streamer_bridge)
+                + extra_routes
+            )
 
         # webauth gate: JWT + peer allowlist on /api/*, loopback-only for
         # the internal control plane — applied even without --enable-rest
