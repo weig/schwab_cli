@@ -283,6 +283,11 @@ class AutoLoginSupervisor:
             stderr_log_dir=self._stderr_log_dir,
         )
         stderr = None if _debug_enabled() else subprocess.DEVNULL
+        # DEBUG=1 in the child makes webauto + the login script emit a
+        # verbose per-step trace into the always-on ``--log`` file (the
+        # daemon itself has no DEBUG, so its own logs stay quiet). This is
+        # what lets us see *where* an unattended login stalls.
+        env = {**os.environ, "DEBUG": "1"}
         # start_new_session=True puts the subprocess in its own session and
         # process group, so terminate() can ``killpg`` the whole tree —
         # webauto-cli → seleniumbase → uc_driver → chrome — instead of
@@ -293,6 +298,7 @@ class AutoLoginSupervisor:
             stdout=None,
             stderr=stderr,
             start_new_session=True,
+            env=env,
         )
         # Watchdog kills the subprocess after timeout even if the caller
         # forgets to call terminate().
@@ -329,36 +335,53 @@ def _debug_enabled() -> bool:
     return os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
 
 
+_AUTH_LOG_KEEP = 30
+
+
+def _prune_auth_logs(log_dir: Path) -> None:
+    """Keep only the most recent ``_AUTH_LOG_KEEP`` auto-login logs so the
+    always-on trace doesn't accumulate unbounded. Timestamped names sort
+    chronologically; best-effort (ignores filesystem races)."""
+    try:
+        logs = sorted(log_dir.glob("auto_login-*.stderr.log"))
+    except OSError:
+        return
+    for old in logs[:-_AUTH_LOG_KEEP]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
 def _build_webauto_argv(
     *,
     base_command: tuple[str, ...] | list[str],
     auth_url: str,
     extra_flags: list[str],
     stderr_log_dir: Path,
-) -> tuple[list[str], Path | None]:
+) -> tuple[list[str], Path]:
     """Build the webauto-cli argv with the common-tail flags.
 
-    Returns ``(argv, log_path)``. When ``DEBUG`` is set we append
-    ``--log <log_path>`` so webauto writes a structured log (and tees to
-    its stderr — which we let flow through to the user's terminal since
-    there's no paste prompt to compete with). When DEBUG is off, we omit
-    ``--log`` entirely; webauto runs quiet and ``log_path`` is ``None``.
+    Returns ``(argv, log_path)``. We **always** append ``--log <log_path>``
+    so every auto-login attempt — daemon (unattended) or manual — leaves a
+    persistent, timestamped trace. This is the only window into an
+    unattended failure: e.g. a callback timeout with ``requests=0`` (the
+    browser never delivered the code) shows up in the trace as the login
+    flow stalling before the redirect. Old logs are pruned to the most
+    recent :data:`_AUTH_LOG_KEEP`.
 
     The ``-a URL=...`` passthrough always goes last so it overrides any
     ``URL=`` baked into the user's ``--env`` file.
     """
-    log_path: Path | None = None
-    log_flags: list[str] = []
-    if _debug_enabled():
-        stderr_log_dir.mkdir(parents=True, exist_ok=True)
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        log_path = stderr_log_dir / f"auto_login-{ts}.stderr.log"
-        log_flags = ["--log", str(log_path)]
+    stderr_log_dir.mkdir(parents=True, exist_ok=True)
+    _prune_auth_logs(stderr_log_dir)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    log_path = stderr_log_dir / f"auto_login-{ts}.stderr.log"
 
     argv = [
         *base_command,
         *extra_flags,
-        *log_flags,
+        "--log", str(log_path),
         "-a", f"URL={auth_url}",
     ]
     return argv, log_path
