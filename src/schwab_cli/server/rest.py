@@ -443,9 +443,13 @@ def api_routes():
 
     The webauth middleware fronts these: peer allowlist + JWT; each
     handler then enforces its own required scope. ``/api/v1/health`` is
-    the JWT-exempt proxy liveness probe.
+    the JWT-exempt proxy liveness probe. Order MUTATIONS (POST/DELETE,
+    gated by ``order:<profile>``) come from
+    :mod:`schwab_cli.server.orders_write`.
     """
     from starlette.routing import Route
+
+    from schwab_cli.server.orders_write import order_write_routes
 
     md = "marketdata"
     return [
@@ -489,7 +493,7 @@ def api_routes():
             "/api/v1/dataset/iv-rank/{symbol}",
             _endpoint("dataset", _do_dataset_iv_rank), methods=["GET"],
         ),
-    ]
+    ] + order_write_routes()
 
 
 def build_rest_app():
