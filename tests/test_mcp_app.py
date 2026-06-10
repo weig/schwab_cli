@@ -228,6 +228,8 @@ def test_server_exposes_expected_tool_names():
         "get_quote", "get_chain", "stream_quote", "server_status",
         "get_vol", "get_skew", "get_greeks", "get_history",
         "get_dividends", "get_fundamentals",
+        "get_accounts", "get_account", "get_positions", "get_transactions",
+        "get_order", "list_orders",
         "dataset.history", "dataset.iv_rank", "dataset.status",
     }
 

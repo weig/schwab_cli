@@ -34,6 +34,7 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from schwab_cli import config as config_module
+from schwab_cli.api import orders as api_orders
 from schwab_cli.api.client import SchwabClient
 from schwab_cli.mcp_server.auth_monitor import (
     DEFAULT_SUBPROCESS_TIMEOUT_SECONDS,
@@ -44,6 +45,7 @@ from schwab_cli.mcp_server.streamer_bridge import StreamerBridge
 from schwab_cli.mcp_server.subscription import SubscriptionManager
 from schwab_cli.history_spec import parse_interval, parse_range
 from schwab_cli.notify import Notifier
+from schwab_cli.service.accounts import AccountsService
 from schwab_cli.service.chains import ChainsService
 from schwab_cli.service.dividends import DividendsService
 from schwab_cli.service.fundamentals import FundamentalsService
@@ -51,6 +53,7 @@ from schwab_cli.service.greeks import GreeksService
 from schwab_cli.service.history import HistoryService
 from schwab_cli.service.quotes import QuoteService
 from schwab_cli.service.skew import SkewService
+from schwab_cli.service.transactions import TransactionsService
 from schwab_cli.service.vol import VolService
 from schwab_cli.service.auth import (
     ApiError,
@@ -339,6 +342,92 @@ class SchwabMcpServer:
                     },
                 ),
                 Tool(
+                    name="get_accounts",
+                    description=(
+                        "List all linked Schwab accounts with balances "
+                        "(account numbers, type, equity, cash). Returns "
+                        "JSON. Account-level financial data."
+                    ),
+                    inputSchema={"type": "object", "properties": {}},
+                ),
+                Tool(
+                    name="get_account",
+                    description=(
+                        "Balances + detail for one account. `account` is the "
+                        "account number or a unique suffix. Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["account"],
+                        "properties": {"account": {"type": "string"}},
+                    },
+                ),
+                Tool(
+                    name="get_positions",
+                    description=(
+                        "Open positions (symbol, qty, avg price, market "
+                        "value, P/L). `account` optional — omit for all "
+                        "accounts. Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"account": {"type": "string"}},
+                    },
+                ),
+                Tool(
+                    name="get_transactions",
+                    description=(
+                        "Transaction history (trades, dividends, fees). "
+                        "`account` optional (all accounts if omitted). "
+                        "`range` is ytd/mtd/wtd or '<start>..<end>' "
+                        "(YYYYMMDD / -Nd / now). `type` filters by Schwab "
+                        "transaction type (comma-separated; empty=all). "
+                        "Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "account": {"type": "string"},
+                            "range": {"type": "string", "default": "-30d..now"},
+                            "type": {"type": "string", "default": ""},
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_order",
+                    description=(
+                        "Fetch one order by id for an account. Read-only "
+                        "(does not place/modify). Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "required": ["account", "order_id"],
+                        "properties": {
+                            "account": {"type": "string"},
+                            "order_id": {"type": "string"},
+                        },
+                    },
+                ),
+                Tool(
+                    name="list_orders",
+                    description=(
+                        "List orders. `account` optional (all accounts if "
+                        "omitted). `range` is ytd/mtd/wtd or '<start>..<end>' "
+                        "(≤60-day window). `status` optional Schwab status "
+                        "enum (e.g. FILLED, WORKING, CANCELED). "
+                        "`max_results` optional. Read-only. Returns JSON."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "account": {"type": "string"},
+                            "range": {"type": "string", "default": "-7d..now"},
+                            "status": {"type": "string"},
+                            "max_results": {"type": "integer"},
+                        },
+                    },
+                ),
+                Tool(
                     name="dataset.status",
                     description=(
                         "Get current dataset subscription state (tier, "
@@ -437,6 +526,18 @@ class SchwabMcpServer:
                 return await self._tool_get_dividends(arguments)
             if name == "get_fundamentals":
                 return await self._tool_get_fundamentals(arguments)
+            if name == "get_accounts":
+                return await self._tool_get_accounts(arguments)
+            if name == "get_account":
+                return await self._tool_get_account(arguments)
+            if name == "get_positions":
+                return await self._tool_get_positions(arguments)
+            if name == "get_transactions":
+                return await self._tool_get_transactions(arguments)
+            if name == "get_order":
+                return await self._tool_get_order(arguments)
+            if name == "list_orders":
+                return await self._tool_list_orders(arguments)
             if name == "stream_quote":
                 return await self._tool_stream_quote(arguments)
             if name == "server_status":
@@ -516,7 +617,9 @@ class SchwabMcpServer:
         return [s.upper() for s in symbols]
 
     @staticmethod
-    def _int_arg(args: dict[str, Any], key: str, default: int) -> int:
+    def _int_arg(
+        args: dict[str, Any], key: str, default: int | None
+    ) -> int | None:
         """Parse an int arg. Missing (``None``) → default; ``0`` is kept
         (not treated as missing). Bad type → :class:`_ToolArgError` (clean
         message, not a generic "internal error")."""
@@ -642,6 +745,92 @@ class SchwabMcpServer:
             return self._err_text("symbols list is empty")
         result = FundamentalsService().get_fundamentals(symbols)
         return self._json_text(result.payload)
+
+    # ---- Tier B: account data (read-only, financial PII) ---------------
+
+    async def _tool_get_accounts(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        result = AccountsService().list_accounts()
+        return self._json_text([dict(a) for a in result.accounts])
+
+    async def _tool_get_account(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        account = args.get("account")
+        if not account or not isinstance(account, str):
+            return self._err_text("account is required")
+        result = AccountsService().get_account(account)
+        return self._json_text(dict(result.account))
+
+    async def _tool_get_positions(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        account = args.get("account")  # None → all accounts
+        if account is not None and not isinstance(account, str):
+            return self._err_text("account must be a string")
+        result = AccountsService().get_positions(account)
+        return self._json_text([dict(p) for p in result.positions])
+
+    async def _tool_get_transactions(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        account = args.get("account")  # None → all accounts
+        if account is not None and not isinstance(account, str):
+            return self._err_text("account must be a string")
+        range_str = args.get("range") or "-30d..now"
+        try:
+            start, end = parse_range(range_str)
+        except ValueError as e:
+            return self._err_text(f"invalid range {range_str!r}: {e}")
+        result = TransactionsService().get_transactions(
+            account,
+            start=start,
+            end=end,
+            type_filter=args.get("type") or "",
+        )
+        return self._json_text([dict(r) for r in result.rows])
+
+    # ---- Tier C: order reads (no mutation) -----------------------------
+
+    async def _tool_get_order(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        account = args.get("account")
+        order_id = args.get("order_id")
+        if not account or not order_id:
+            return self._err_text("account and order_id are required")
+        acct = self._client.resolve_account(str(account))
+        order = api_orders.get_order(
+            self._client, acct.hash_value, str(order_id),
+        )
+        return self._json_text(order)
+
+    async def _tool_list_orders(
+        self, args: dict[str, Any]
+    ) -> list[TextContent]:
+        account = args.get("account")  # None → all accounts
+        if account is not None and not isinstance(account, str):
+            return self._err_text("account must be a string")
+        range_str = args.get("range") or "-7d..now"
+        try:
+            start, end = parse_range(range_str)
+        except ValueError as e:
+            return self._err_text(f"invalid range {range_str!r}: {e}")
+        status = args.get("status") or None
+        max_results = self._int_arg(args, "max_results", None)
+        if account:
+            acct = self._client.resolve_account(account)
+            orders = api_orders.list_orders_for_account(
+                self._client, acct.hash_value,
+                start=start, end=end, status=status, max_results=max_results,
+            )
+        else:
+            orders = api_orders.list_orders_all_accounts(
+                self._client,
+                start=start, end=end, status=status, max_results=max_results,
+            )
+        return self._json_text(orders)
 
     async def _tool_stream_quote(
         self, args: dict[str, Any]
