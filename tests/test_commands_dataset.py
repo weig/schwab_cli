@@ -230,3 +230,40 @@ def test_cron_uninstall_sweeps_all(runner, monkeypatch, tmp_path):
     result = runner.invoke(app, ["dataset", "cron", "uninstall"])
     assert result.exit_code == 0
     assert captured == ["swept"]
+
+
+# ---- dedup must count only the FULL daily snapshot, not ad-hoc partials ----
+
+
+def test_dedup_counts_only_full_daily_snapshot(tmp_path, monkeypatch):
+    """An ad-hoc `schwab vol` run records a partial snapshot (atm_iv_30d
+    is None). That must NOT make the scheduled volatility job skip the
+    symbol — otherwise the proper daily point (atm_iv_30d) is lost for
+    the day. Only a FULL daily snapshot counts as 'already recorded'."""
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path))
+    from schwab_cli.storage import vol_history
+    from schwab_cli.dataset.update import (
+        _symbols_with_daily_snapshot_on_ny_day,
+    )
+
+    ts = int(datetime(2026, 6, 9, 18, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    ny_day = "2026-06-09"
+    with vol_history.connect() as conn:
+        # AMZN: ad-hoc partial — observed, but no atm_iv_30d.
+        vol_history.record_snapshot(
+            conn, symbol="AMZN", spot=244.0, atm_iv=0.33,
+            atm_strike=245.0, atm_expiry="2026-06-10", atm_dte=1,
+            captured_at_ms=ts,
+        )
+        # NVDA: full daily snapshot — observed with atm_iv_30d.
+        vol_history.record_extended_snapshot(
+            conn, symbol="NVDA", spot=120.0, atm_iv=0.45,
+            atm_strike=120.0, atm_expiry="2026-07-17", atm_dte=37,
+            captured_at_ms=ts, atm_iv_30d=0.44,
+        )
+        got = _symbols_with_daily_snapshot_on_ny_day(conn, ny_day)
+
+    assert "NVDA" in got            # full daily → counts (skip on re-run)
+    assert "AMZN" not in got        # ad-hoc partial → does NOT suppress

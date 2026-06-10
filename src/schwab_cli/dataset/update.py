@@ -360,10 +360,14 @@ def run_volatility_update(
     archive_date = now_dt.astimezone(_NY).date().isoformat()
 
     # Pre-pass: which symbols already have a live ('observed') row for
-    # today's NY day. Lets us skip the chain pull for them entirely so a
-    # manual run + the cron + the `vol` command can't double-write the
-    # same trading day.
-    observed_today = _symbols_observed_on_ny_day(conn, archive_date)
+    # today's NY day with a FULL daily snapshot already recorded. Lets us
+    # skip the chain pull for them so a re-run of the cron doesn't
+    # double-write the same trading day. Crucially this counts only full
+    # snapshots (atm_iv_30d) — an ad-hoc `vol` run's partial snapshot must
+    # NOT suppress the scheduled daily point.
+    daily_recorded_today = _symbols_with_daily_snapshot_on_ny_day(
+        conn, archive_date,
+    )
 
     # How many sampled rows we've written since the last commit. Reset
     # to 0 each time we flush; flush every _COMMIT_BATCH symbols so a
@@ -432,10 +436,10 @@ def run_volatility_update(
             _emit(event="skipped", index=i, total=total, symbol=sym,
                   reason="WATCH (non-Monday)", archive_date=archive_date)
             continue
-        if sym in observed_today:
+        if sym in daily_recorded_today:
             skipped.append(sym)
             _emit(event="skipped", index=i, total=total, symbol=sym,
-                  reason="already sampled today",
+                  reason="daily snapshot already recorded today",
                   archive_date=archive_date)
             continue
 
@@ -583,11 +587,21 @@ def run_volatility_update(
     }
 
 
-def _symbols_observed_on_ny_day(
+def _symbols_with_daily_snapshot_on_ny_day(
     conn: sqlite3.Connection, ny_day: str,
 ) -> set[str]:
-    """Return the set of symbols with an ``observed`` row whose
-    NY trading day matches ``ny_day`` (YYYY-MM-DD).
+    """Return the set of symbols that already have a **full daily**
+    volatility snapshot (``atm_iv_30d`` present) whose NY trading day
+    matches ``ny_day`` (YYYY-MM-DD).
+
+    The ``atm_iv_30d IS NOT NULL`` filter is the key: an ad-hoc
+    ``schwab vol <sym>`` run records a *partial* observed snapshot
+    (nearest-expiry ``atm_iv`` only, no term structure). That partial
+    row must NOT count as "already recorded today" — otherwise the
+    scheduled job would skip the symbol and the proper daily point
+    (the ``atm_iv_30d`` constant-maturity series that feeds IVR/IVP)
+    would be lost for that day. Only the scheduled job writes
+    ``atm_iv_30d``, so this filter == "the daily snapshot is done".
 
     The query pre-filters by ``archive_date`` (UTC-bucketed) within
     a one-day window of ``ny_day`` so we don't scan the whole table —
@@ -599,6 +613,7 @@ def _symbols_observed_on_ny_day(
         """
         SELECT symbol, captured_at_ms FROM vol_snapshots
         WHERE source = 'observed'
+          AND atm_iv_30d IS NOT NULL
           AND archive_date BETWEEN date(?, '-1 day') AND date(?, '+1 day')
         """,
         (ny_day, ny_day),
