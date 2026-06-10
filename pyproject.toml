@@ -17,6 +17,7 @@ dependencies = [
     "openpyxl>=3.1",
     "croniter>=2.0,<3.0",
     "cryptography>=43",
+    "pyjwt[crypto]>=2.8",
 ]
 
 [project.scripts]
