@@ -249,6 +249,21 @@ def _check_mcp() -> None:
 # ---- 3. Schwab auth ---------------------------------------------------
 
 
+def _access_token_state(expires_at: int, *, now: int) -> str:
+    """Access-token line: remaining minutes + absolute local expiry.
+
+    The wall-clock time lets the operator eyeball it against the
+    daemon's half-life exchange schedule (`/auth/status`).
+    """
+    from datetime import datetime
+
+    wallclock = datetime.fromtimestamp(expires_at).strftime("%H:%M:%S")
+    remaining = expires_at - now
+    if remaining > 0:
+        return f"valid for {remaining // 60}m (until {wallclock})"
+    return f"expired at {wallclock} (daemon refreshes on demand)"
+
+
 def _check_auth() -> None:
     _section("Schwab auth")
     from schwab_cli import config as config_module
@@ -283,12 +298,8 @@ def _check_auth() -> None:
         return
 
     now = int(time.time())
-    access_in = sess.expires_at - now
     refresh_in = sess.refresh_token_expires_at - now
-    access_state = (
-        f"valid for {access_in // 60}m" if access_in > 0
-        else "expired (auto-refreshes on next call)"
-    )
+    access_state = _access_token_state(sess.expires_at, now=now)
     refresh_state = (
         f"valid for {refresh_in // 86400}d {(refresh_in % 86400) // 3600}h"
         if refresh_in > 0 else "EXPIRED"

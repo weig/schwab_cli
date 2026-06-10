@@ -201,3 +201,29 @@ def test_health_ok_false_on_connection_error(monkeypatch):
 
     monkeypatch.setattr(doc.httpx, "get", _boom)
     assert _health_ok() is False
+
+
+# ---- _access_token_state ----------------------------------------------
+
+
+def test_access_token_state_valid_shows_remaining_and_wallclock():
+    from schwab_cli.commands.doctor import _access_token_state
+
+    now = 1_781_070_000
+    expires = now + 12 * 60 + 30  # 12.5 minutes left
+    out = _access_token_state(expires, now=now)
+    assert out.startswith("valid for 12m (until ")
+    assert out.endswith(")")
+    # wall-clock formatted as HH:MM:SS local time
+    import re
+    assert re.search(r"until \d{2}:\d{2}:\d{2}\)", out)
+
+
+def test_access_token_state_expired_points_at_daemon():
+    from schwab_cli.commands.doctor import _access_token_state
+
+    now = 1_781_070_000
+    out = _access_token_state(now - 60, now=now)
+    assert out.startswith("expired at ")
+    # Phase 3: the CLI no longer self-refreshes — the daemon does.
+    assert "daemon" in out
