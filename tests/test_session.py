@@ -168,3 +168,80 @@ def test_from_token_response_computes_expiries():
     assert s.refresh_token == "r"
     assert s.expires_at == 1_000_000 + 1800
     assert s.refresh_token_expires_at == 1_000_000 + 7 * 24 * 3600
+
+
+# ---------------------------------------------------------------------------
+# Schema v2: persisted access-token lifetime
+# ---------------------------------------------------------------------------
+
+
+def test_save_writes_version_2_with_lifetime(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path / "iso"))
+    save(Session(
+        access_token="a", refresh_token="r",
+        expires_at=100, refresh_token_expires_at=200,
+        access_token_lifetime_s=1800,
+    ))
+    raw = json.loads((tmp_path / "iso" / "session.json").read_text())
+    assert raw["version"] == 2
+    assert raw["access_token_lifetime_s"] == 1800
+
+
+def test_load_v1_file_fills_default_lifetime(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write(tmp_path, {
+        "version": 1,
+        "access_token": "a",
+        "refresh_token": "r",
+        "expires_at": 100,
+        "refresh_token_expires_at": 200,
+    })
+    s = load()
+    assert s is not None
+    assert s.access_token_lifetime_s == 1800
+
+
+def test_load_v2_file_reads_lifetime(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _write(tmp_path, {
+        "version": 2,
+        "access_token": "a",
+        "refresh_token": "r",
+        "expires_at": 100,
+        "refresh_token_expires_at": 200,
+        "access_token_lifetime_s": 900,
+    })
+    s = load()
+    assert s is not None
+    assert s.access_token_lifetime_s == 900
+
+
+def test_from_token_response_records_lifetime():
+    from schwab_cli.oauth import TokenResponse
+    tr = TokenResponse(access_token="a", refresh_token="r", expires_in=900)
+    s = Session.from_token_response(tr, now=1_000_000)
+    assert s.access_token_lifetime_s == 900
+
+
+def test_refreshed_from_preserves_refresh_token_expiry():
+    """A refresh-grant exchange does NOT extend the refresh token's life —
+    the new session must carry the OLD refresh_token_expires_at, unlike
+    from_token_response (full auth) which resets it to now + 7d."""
+    from schwab_cli.oauth import TokenResponse
+    old = Session(
+        access_token="old", refresh_token="r",
+        expires_at=1_000_000, refresh_token_expires_at=1_400_000,
+    )
+    # A deliberately different refresh token in the response proves the
+    # token comes from the RESPONSE while the expiry comes from the OLD
+    # session (Schwab returns the same token in practice, but the field
+    # provenance must be right either way).
+    tr = TokenResponse(access_token="new", refresh_token="r2", expires_in=1800)
+    s = Session.refreshed_from(old, tr, now=1_000_500)
+    assert s.access_token == "new"
+    assert s.refresh_token == "r2"
+    assert s.expires_at == 1_000_500 + 1800
+    assert s.refresh_token_expires_at == 1_400_000  # preserved, not reset
+    assert s.access_token_lifetime_s == 1800

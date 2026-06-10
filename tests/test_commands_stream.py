@@ -93,8 +93,13 @@ def test_stream_no_session_fails_fast(monkeypatch, tmp_path):
         client_id="cid", client_secret="csec",
         redirect_uri="https://127.0.0.1:8443",
     ))
-    # No session saved.
-    result = runner.invoke(app, ["stream", "NVDA"])
+    # No session saved. Pin the auto-probe to "no daemon": without the
+    # patch it can find a REAL daemon on this machine and stream live
+    # quotes forever — test outcomes must never depend on host state.
+    with patch(
+        "schwab_cli.commands.stream._probe_mcp_daemon", return_value=False
+    ):
+        result = runner.invoke(app, ["stream", "NVDA"])
     assert result.exit_code == 1
 
 
@@ -108,7 +113,11 @@ def test_stream_expired_refresh_token_fails(monkeypatch, tmp_path):
         access_token="atok", refresh_token="rtok",
         expires_at=100, refresh_token_expires_at=100,
     ))
-    result = runner.invoke(app, ["stream", "NVDA"])
+    # Same isolation pin as above: exercise the DIRECT path's fail-fast.
+    with patch(
+        "schwab_cli.commands.stream._probe_mcp_daemon", return_value=False
+    ):
+        result = runner.invoke(app, ["stream", "NVDA"])
     assert result.exit_code == 1
 
 

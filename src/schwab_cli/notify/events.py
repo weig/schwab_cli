@@ -31,6 +31,35 @@ EVENTS: dict[str, tuple[Level, str]] = {
         "warning",
         "Schwab refresh token expiring soon; auto-login hasn't rotated yet.",
     ),
+    "auth.access_token_lapsed": (
+        "error",
+        "Schwab access token expired and the exchange keeps failing; "
+        "retrying every minute.",
+    ),
+    "auth.renewal_attempt_failed": (
+        "warning",
+        "Schwab refresh-token renewal checkpoint failed; "
+        "waiting for the next checkpoint.",
+    ),
+    "auth.refresh_token_critical": (
+        "error",
+        "Schwab refresh token expires in <8h; proactive renewal stopped. "
+        "Run `schwab auth --force`.",
+    ),
+    "auth.recovery_failing": (
+        "error",
+        "Schwab refresh token dead (invalid_grant); full re-auth keeps "
+        "failing, retrying on backoff.",
+    ),
+    "auth.recovery_succeeded": (
+        "info",
+        "Schwab full re-auth recovered after invalid_grant.",
+    ),
+    "auth.manual_auth_required": (
+        "error",
+        "Schwab refresh token dead and auto-login is not configured. "
+        "Run `schwab auth --force`.",
+    ),
     "streamer.crash": (
         "error",
         "Schwab streamer WebSocket crashed and could not reconnect.",
