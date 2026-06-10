@@ -241,7 +241,9 @@ class SchwabClient:
                 f"Account {user_input!r} not found. Available: {available}."
             )
         if len(matches) > 1:
-            listing = ", ".join(m.account_number for m in matches)
+            # Last-4 only: this message reaches REST error bodies (and CLI
+            # output) — full account numbers must never leave the process.
+            listing = ", ".join(f"...{m.account_number[-4:]}" for m in matches)
             raise ApiError(
                 f"Multiple accounts match {user_input!r}: {listing}. Specify more digits."
             )
