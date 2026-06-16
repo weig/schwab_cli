@@ -317,6 +317,68 @@ def test_supervisor_creates_log_dir_even_without_debug(tmp_path, monkeypatch):
     sup.terminate()
 
 
+def test_supervisor_spawns_in_writable_cwd(tmp_path, monkeypatch):
+    """webauto (SeleniumBase UC driver) creates a ``downloaded_files``
+    dir relative to its CWD. Under launchd the daemon's CWD is ``/``
+    (read-only), so the subprocess MUST be given a writable working dir
+    or the UC driver fails to launch and every headless re-auth dies
+    with ``OSError: Read-only file system: b'downloaded_files'``.
+
+    The child here records its CWD and proves it can create a dir there.
+    """
+    cwd_sidecar = tmp_path / "child_cwd.txt"
+    fixture = _write_fixture_script(
+        tmp_path,
+        f'import os; '
+        f'open({str(cwd_sidecar)!r}, "w").write(os.getcwd()); '
+        f'os.makedirs(os.path.join(os.getcwd(), "downloaded_files"), '
+        f'exist_ok=True); '
+        f'import time; time.sleep(0.2)\n',
+    )
+    work_dir = tmp_path / "wd"  # supervisor must spawn HERE, not inherit CWD
+    sup = AutoLoginSupervisor(
+        [sys.executable, str(fixture)],
+        auth_url="https://schwab/auth",
+        state="S",
+        stderr_log_dir=tmp_path / "logs",
+        timeout_seconds=10.0,
+        work_dir=work_dir,
+    )
+    sup.start()
+    sup._proc.wait(timeout=10)
+    sup.terminate()
+    child_cwd = Path(cwd_sidecar.read_text()).resolve()
+    # The subprocess ran in the supervisor's chosen writable dir — NOT the
+    # daemon's inherited (read-only) CWD — and could create downloaded_files.
+    assert child_cwd == work_dir.resolve()
+    assert (work_dir / "downloaded_files").is_dir()
+
+
+def test_supervisor_default_work_dir_is_under_config(tmp_path, monkeypatch):
+    """With no explicit work_dir, the subprocess runs under
+    ``<config_dir>/webauto`` — never the inherited launchd CWD."""
+    monkeypatch.setenv("SCHWAB_CLI_CONFIG_DIR", str(tmp_path / "cfg"))
+    cwd_sidecar = tmp_path / "cwd2.txt"
+    fixture = _write_fixture_script(
+        tmp_path,
+        f'import os; '
+        f'open({str(cwd_sidecar)!r}, "w").write(os.getcwd()); '
+        f'import time; time.sleep(0.2)\n',
+    )
+    sup = AutoLoginSupervisor(
+        [sys.executable, str(fixture)],
+        auth_url="https://schwab/auth",
+        state="S",
+        stderr_log_dir=tmp_path / "logs",
+        timeout_seconds=10.0,
+    )
+    sup.start()
+    sup._proc.wait(timeout=10)
+    sup.terminate()
+    child_cwd = Path(cwd_sidecar.read_text()).resolve()
+    assert child_cwd == (tmp_path / "cfg" / "webauto").resolve()
+
+
 def test_supervisor_argv_includes_no_notify(tmp_path):
     sidecar = tmp_path / "sargv.json"
     fixture = _write_fixture_script(
