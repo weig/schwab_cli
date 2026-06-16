@@ -260,12 +260,20 @@ class AutoLoginSupervisor:
         state: str,
         stderr_log_dir: Path,
         timeout_seconds: float = 300.0,
+        work_dir: Path | None = None,
     ):
         self._base_command = tuple(base_command)
         self._auth_url = auth_url
         self._state = state
         self._stderr_log_dir = Path(stderr_log_dir)
         self._timeout_seconds = timeout_seconds
+        # webauto's UC driver does ``os.makedirs("downloaded_files")``
+        # relative to its CWD. Under launchd the daemon inherits CWD ``/``
+        # (read-only on macOS), so the subprocess MUST run somewhere
+        # writable or every headless re-auth dies with
+        # ``OSError: Read-only file system: b'downloaded_files'``. Default
+        # to a stable, contained dir under the config tree.
+        self._work_dir = Path(work_dir) if work_dir is not None else None
         self._proc: subprocess.Popen | None = None
         self._watchdog: threading.Timer | None = None
         # Guards terminate()'s read-clear of _watchdog/_proc: the watchdog
@@ -288,23 +296,52 @@ class AutoLoginSupervisor:
         # daemon itself has no DEBUG, so its own logs stay quiet). This is
         # what lets us see *where* an unattended login stalls.
         env = {**os.environ, "DEBUG": "1"}
-        # start_new_session=True puts the subprocess in its own session and
-        # process group, so terminate() can ``killpg`` the whole tree —
-        # webauto-cli → seleniumbase → uc_driver → chrome — instead of
-        # orphaning the browser-driver grandchildren (which otherwise leak).
+        # Give webauto a writable CWD — it (SeleniumBase UC driver) creates
+        # ``downloaded_files`` relative to the working directory, which the
+        # daemon's inherited launchd CWD ``/`` cannot satisfy.
+        work_dir = self._resolve_work_dir()
         self._proc = subprocess.Popen(  # noqa: S603 — argv from cfg, not shell
             argv,
             stdin=subprocess.DEVNULL,
             stdout=None,
             stderr=stderr,
+            # start_new_session=True puts the subprocess in its own session
+            # and process group, so terminate() can ``killpg`` the whole
+            # tree — webauto-cli → seleniumbase → uc_driver → chrome —
+            # instead of orphaning the browser-driver grandchildren.
             start_new_session=True,
             env=env,
+            cwd=str(work_dir),
         )
         # Watchdog kills the subprocess after timeout even if the caller
         # forgets to call terminate().
         self._watchdog = threading.Timer(self._timeout_seconds, self.terminate)
         self._watchdog.daemon = True
         self._watchdog.start()
+
+    def _resolve_work_dir(self) -> Path:
+        """Writable working directory for the webauto subprocess.
+
+        Defaults to ``<config_dir>/webauto`` (created if absent) — a
+        stable, contained location for the ``downloaded_files`` scratch
+        dir the UC driver makes. Never inherits the daemon's launchd CWD
+        (``/``, read-only). Falls back to a temp dir if the config dir
+        can't be created for any reason, so a full re-auth never fails
+        purely on the working directory.
+        """
+        if self._work_dir is not None:
+            target = self._work_dir
+        else:
+            from schwab_cli.paths import config_dir
+
+            target = config_dir() / "webauto"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            return target
+        except OSError:
+            import tempfile
+
+            return Path(tempfile.mkdtemp(prefix="schwab-webauto-"))
 
     def terminate(self) -> None:
         """SIGTERM → 5s → SIGKILL. Idempotent and thread-safe.
