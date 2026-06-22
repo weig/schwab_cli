@@ -349,7 +349,8 @@ class _NormalizedOrder:
     """
 
     side: str                              # BUY/SELL (single-symbol view)
-    quantity: int
+    quantity: int | float                  # int shares/contracts; float for
+                                           # fractional (resolved notional)
     underlying: str
     order_type: str                        # LIMIT/MARKET/NET_DEBIT/NET_CREDIT
     duration: str                          # DAY/GOOD_TILL_CANCEL/...
@@ -362,6 +363,10 @@ class _NormalizedOrder:
     # For analytics:
     option_type: str | None                # CALL/PUT/None
     strikes: tuple[float, ...]
+    # Dollar-denominated equity order: spend this many dollars. When set,
+    # ``quantity`` starts at 0 and ResolveNotionalQuantityRule fills it in
+    # from notional / price. None for ordinary share-count orders.
+    notional: float | None = None
     # Phase 4: stop / trailing-stop fields. None for non-stop orders.
     stop_price: float | None = None        # STOP, STOP_LIMIT trigger
     trailing_offset: float | None = None   # TRAILING_STOP* offset value
@@ -431,6 +436,11 @@ def _option_leg(
 
 def _spec_from_ticket(t: ParsedTicket) -> _NormalizedOrder:
     if t.is_equity:
+        label = (
+            f"{t.side} ${t.notional:.2f} of {t.underlying} (EQUITY)"
+            if t.notional is not None
+            else f"{t.side} {t.quantity} {t.underlying} (EQUITY)"
+        )
         return _NormalizedOrder(
             side=t.side,
             quantity=t.quantity,
@@ -441,10 +451,11 @@ def _spec_from_ticket(t: ParsedTicket) -> _NormalizedOrder:
             price=t.price,
             complex_strategy="NONE",
             legs=(_equity_leg(t.side, t.quantity, t.underlying),),
-            strategy_label=f"{t.side} {t.quantity} {t.underlying} (EQUITY)",
+            strategy_label=label,
             is_naked_short=False,
             option_type=None,
             strikes=(),
+            notional=t.notional,
         )
 
     schwab_legs: list[dict] = []
@@ -577,6 +588,7 @@ def _spec_from_flags(
     trailing_offset: float | None = None,
     trailing_basis: str | None = None,
     trailing_type: str | None = None,
+    dollar: float | None = None,
 ) -> _NormalizedOrder:
     if leg_specs:
         # Multi-leg option order via --leg.
@@ -649,15 +661,24 @@ def _spec_from_flags(
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=EXIT_USAGE)
+    # Notional (--dollar): quantity stays 0 until ResolveNotionalQuantityRule
+    # converts dollars→shares from the price.
+    qty: int | float = 0 if dollar is not None else quantity
+    label = (
+        f"{side} ${dollar:.2f} of {symbol.upper()} (EQUITY)"
+        if dollar is not None
+        else f"{side} {quantity} {symbol.upper()} (EQUITY)"
+    )
     return _NormalizedOrder(
-        side=side, quantity=quantity, underlying=symbol.upper(),
+        side=side, quantity=qty, underlying=symbol.upper(),
         order_type=order_type, duration=duration, session=session,
         price=price, complex_strategy="NONE",
-        legs=(_equity_leg(side, quantity, symbol),),
-        strategy_label=f"{side} {quantity} {symbol.upper()} (EQUITY)",
+        legs=(_equity_leg(side, qty, symbol),),
+        strategy_label=label,
         is_naked_short=False,
         option_type=None,
         strikes=(),
+        notional=dollar,
         stop_price=stop_price,
         trailing_offset=trailing_offset,
         trailing_basis=trailing_basis,
@@ -785,6 +806,7 @@ def run_place(
     special: str | None,
     parse_string: str | None,
     dry_run: bool,
+    dollar: float | None = None,
     yes: bool,
     as_json: bool,
     profile: str | None = None,
@@ -830,6 +852,34 @@ def run_place(
         leg_specs=leg_specs, complex_strategy=complex_strategy,
     )
 
+    # --dollar (notional) flag: equity-only, mutually exclusive with the
+    # share-count / multi-leg / ticket input modes.
+    if dollar is not None:
+        if parse_string:
+            typer.secho(
+                "--dollar cannot be combined with --parse (the ticket "
+                "carries its own amount).", fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=EXIT_USAGE)
+        if quantity is not None:
+            typer.secho(
+                "--dollar and --quantity are mutually exclusive.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=EXIT_USAGE)
+        if leg_specs:
+            typer.secho(
+                "--dollar is equity-only; it can't be combined with --leg.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=EXIT_USAGE)
+        if dollar <= 0:
+            typer.secho(
+                "--dollar must be a positive amount.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=EXIT_USAGE)
+
     # Build the normalized spec from whichever input mode was used.
     if parse_string:
         try:
@@ -853,6 +903,7 @@ def run_place(
             trailing_offset=trailing_offset,
             trailing_basis=trailing_basis,
             trailing_type=trailing_type,
+            dollar=dollar,
         )
 
     _validate_session_combo(

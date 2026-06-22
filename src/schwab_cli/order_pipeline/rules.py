@@ -199,6 +199,109 @@ class FetchAccountBalancesRule:
         return RuleResult()
 
 
+class ResolveNotionalQuantityRule:
+    """Turn a dollar-denominated equity order into a share quantity.
+
+    For a notional order (``BUY $500 of QQQ``) the user named dollars,
+    not shares. We resolve ``quantity = dollars / price`` and rewrite
+    both the top-level ``quantity`` and the single equity leg's quantity
+    BEFORE preview / analytics / policy run — so every downstream rule
+    sees the real (possibly fractional) size. Schwab's placeOrder spec
+    types ``quantity`` as a double, so fractional shares are passed
+    through as-is; whether the brokerage actually fills a fractional or
+    fractional-LIMIT order is left to Schwab's own preview (the
+    PreviewRejectGate surfaces any rejection cleanly).
+
+    Price source:
+      * LIMIT  — the order's limit price (``body["price"]``)
+      * MARKET — the live underlying quote (fetched here if the
+                 ``--yes`` path skipped FetchUnderlyingQuoteRule)
+
+    A missing/zero price halts the order with a clear usage error rather
+    than guessing.
+    """
+
+    name = "resolve_notional_quantity"
+
+    # Round fractional shares to this many decimals (Schwab Stock Slices
+    # precision); whole-share results stay integer-valued.
+    _PRECISION = 4
+
+    def applies(self, ctx: OrderContext) -> bool:
+        return getattr(ctx.spec, "notional", None) is not None
+
+    def execute(self, ctx: OrderContext) -> RuleResult:
+        from dataclasses import replace
+
+        from schwab_cli.commands.order import EXIT_USAGE, _audit
+
+        notional = float(ctx.spec.notional)
+        price = self._resolve_price(ctx)
+        if price is None or price <= 0:
+            typer.secho(
+                "Could not resolve a price to convert the dollar amount "
+                f"to shares for {ctx.spec.underlying} — try a limit order "
+                "with @price, or retry when a quote is available.",
+                fg=typer.colors.RED, err=True,
+            )
+            _audit(
+                ctx.sub, "notional_unresolved",
+                account=ctx.account.account_number,
+                underlying=ctx.spec.underlying, notional=notional,
+            )
+            return RuleResult(halt=True, exit_code=EXIT_USAGE)
+
+        qty = round(notional / price, self._PRECISION)
+        if qty <= 0:
+            typer.secho(
+                f"${notional:.2f} is too small to buy any shares of "
+                f"{ctx.spec.underlying} at ${price:.2f}.",
+                fg=typer.colors.RED, err=True,
+            )
+            return RuleResult(halt=True, exit_code=EXIT_USAGE)
+        # Whole-number results stay int so the body reads cleanly.
+        if qty == int(qty):
+            qty = int(qty)
+
+        ctx.body["quantity"] = qty
+        legs = ctx.body.get("orderLegCollection") or []
+        if legs:
+            legs[0]["quantity"] = qty
+        ctx.spec = replace(ctx.spec, quantity=qty)
+        _audit(
+            ctx.sub, "notional_resolved",
+            account=ctx.account.account_number,
+            underlying=ctx.spec.underlying,
+            notional=notional, price=price, quantity=qty,
+        )
+        return RuleResult()
+
+    def _resolve_price(self, ctx: OrderContext) -> float | None:
+        # LIMIT: the order's own limit price (stored as a string in body).
+        raw_price = ctx.body.get("price")
+        if raw_price is not None:
+            try:
+                return float(raw_price)
+            except (TypeError, ValueError):
+                return None
+        # MARKET: live quote. Fetch on demand if the --yes path skipped it.
+        from schwab_cli.commands.order import _fetch_underlying_quote_safe
+        quote = ctx.underlying_quote
+        if quote is None:
+            quote = _fetch_underlying_quote_safe(ctx.client, ctx.body)
+            ctx.underlying_quote = quote
+        if not isinstance(quote, dict):
+            return None
+        # Prefer last; for a one-sided book fall back to the side the
+        # order would cross (ask for BUY, bid for SELL).
+        last = quote.get("last")
+        if isinstance(last, (int, float)) and last > 0:
+            return float(last)
+        side = ctx.body.get("orderLegCollection", [{}])[0].get("instruction", "")
+        alt = quote.get("ask") if side.startswith("BUY") else quote.get("bid")
+        return float(alt) if isinstance(alt, (int, float)) and alt > 0 else None
+
+
 class DetectOpenCloseRule:
     """Rewrite option legs to ``*_TO_CLOSE`` when a matching position
     already exists.
@@ -882,8 +985,24 @@ class PlaceOrderRule:
         from schwab_cli.api.client import ApiError, SessionExpired
         from schwab_cli.commands.order import (
             _audit, _handle_api_error, _safe_place, _underlying_from_body,
-            EXIT_NETWORK, EXIT_REJECTED,
+            EXIT_NETWORK, EXIT_REJECTED, EXIT_USAGE,
         )
+        # Defense in depth (real-money path): NEVER submit a non-positive
+        # quantity. A notional order whose dollars→shares resolution was
+        # somehow skipped would still carry the 0 placeholder; refuse it
+        # here rather than send a malformed order to Schwab.
+        qty = ctx.body.get("quantity")
+        if not isinstance(qty, (int, float)) or qty <= 0:
+            typer.secho(
+                f"refusing to place order with non-positive quantity {qty!r} "
+                "— internal resolution error (no order sent).",
+                fg=typer.colors.RED, err=True,
+            )
+            _audit(
+                ctx.sub, "zero_quantity_blocked",
+                account=ctx.account.account_number, quantity=qty,
+            )
+            return RuleResult(halt=True, exit_code=EXIT_USAGE)
         try:
             order_id, _resp = _safe_place(
                 ctx.client, ctx.account, ctx.body, audit_subcommand=ctx.sub,
@@ -953,6 +1072,9 @@ DEFAULT_RULES: tuple = (
         FetchUnderlyingQuoteRule(),
         FetchChainRule(),
     ),
+    # Dollar→shares BEFORE preview/analytics/policy so they all see the
+    # real (possibly fractional) quantity. No-op for share-count orders.
+    ResolveNotionalQuantityRule(),
     DetectOpenCloseRule(),       # must run BEFORE SchwabPreviewRule
     SchwabPreviewRule(),
     ComputeAnalyticsRule(),

@@ -977,6 +977,12 @@ def order_place(
         None, "--quantity", "-q",
         help="Equity share count (default 1). Multi-leg uses qty in --leg.",
     ),
+    dollar: float = typer.Option(
+        None, "--dollar",
+        help="Dollar-denominated equity order: spend this many dollars; "
+             "shares = dollars / price (LIMIT @price, or live quote for "
+             "MARKET). Mutually exclusive with --quantity / --leg.",
+    ),
     side: str = typer.Option(
         None, "--side",
         help="Equity instruction: BUY, SELL, SELL_SHORT, BUY_TO_COVER (default BUY).",
@@ -1060,6 +1066,7 @@ def order_place(
     order_cmd.run_place(
         symbol=symbol, account=account,
         order_type=order_type, price=price, quantity=quantity, side=side,
+        dollar=dollar,
         duration=duration, session=session,
         leg_specs=tuple(legs), complex_strategy=complex_strategy,
         special=special, parse_string=parse_string,
@@ -1083,6 +1090,10 @@ def order_preview(
     order_type: str = typer.Option(None, "--type"),
     price: float = typer.Option(None, "--price"),
     quantity: int = typer.Option(None, "--quantity", "-q"),
+    dollar: float = typer.Option(
+        None, "--dollar",
+        help="Dollar-denominated equity order (shares = dollars / price).",
+    ),
     side: str = typer.Option(None, "--side"),
     duration: str = typer.Option(None, "--duration"),
     session: str = typer.Option("NORMAL", "--session"),
@@ -1104,6 +1115,7 @@ def order_preview(
     order_cmd.run_place(
         symbol=symbol, account=account,
         order_type=order_type, price=price, quantity=quantity, side=side,
+        dollar=dollar,
         duration=duration, session=session,
         leg_specs=tuple(legs), complex_strategy=complex_strategy,
         special=special, parse_string=parse_string,

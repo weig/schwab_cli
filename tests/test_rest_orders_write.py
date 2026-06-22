@@ -392,3 +392,45 @@ def test_cancel_bad_order_id_is_400():
         "/api/v1/accounts/1234/orders/not-an-id", headers=_AUTH,
     )
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Dollar-denominated (notional) orders
+# ---------------------------------------------------------------------------
+
+
+def test_place_dollar_order_accepted(profile_ok, monkeypatch):
+    _gateway_returns(monkeypatch, _Ctx())
+    body = {
+        "account": "1234", "profile": "default",
+        "order": {"symbol": "QQQ", "side": "BUY", "dollar": 500.00,
+                  "order_type": "MARKET"},
+    }
+    resp = _client("order:default").post(
+        "/api/v1/orders", json=body, headers=_AUTH,
+    )
+    assert resp.status_code == 201
+
+
+def test_place_dollar_and_quantity_mutually_exclusive(profile_ok):
+    body = {
+        "account": "1234", "profile": "default",
+        "order": {"symbol": "QQQ", "dollar": 500.0, "quantity": 1},
+    }
+    resp = _client("order:default").post(
+        "/api/v1/orders", json=body, headers=_AUTH,
+    )
+    assert resp.status_code == 400
+    assert "mutually exclusive" in resp.json()["error"]
+
+
+def test_place_dollar_negative_rejected(profile_ok):
+    body = {
+        "account": "1234", "profile": "default",
+        "order": {"symbol": "QQQ", "dollar": -5},
+    }
+    resp = _client("order:default").post(
+        "/api/v1/orders", json=body, headers=_AUTH,
+    )
+    assert resp.status_code == 400
+    assert "positive" in resp.json()["error"]

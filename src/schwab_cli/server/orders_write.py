@@ -346,6 +346,21 @@ def _build_spec_and_body(
             isinstance(s, str) for s in legs
         ):
             raise _BadRequest("order.legs must be a list of leg strings")
+        # Dollar-denominated equity order: spend order.dollar; shares are
+        # resolved downstream from the price. Mutually exclusive with
+        # order.quantity / legs (the spec builder enforces equity-only).
+        dollar = order.get("dollar")
+        if dollar is not None:
+            if not isinstance(dollar, (int, float)) or isinstance(dollar, bool):
+                raise _BadRequest("order.dollar must be a number")
+            if dollar <= 0:
+                raise _BadRequest("order.dollar must be positive")
+            if order.get("quantity") is not None:
+                raise _BadRequest(
+                    "order.dollar and order.quantity are mutually exclusive"
+                )
+            if legs:
+                raise _BadRequest("order.dollar is equity-only (no legs)")
         validate_combo(
             parse_string=None,
             symbol=order.get("symbol"),
@@ -371,6 +386,7 @@ def _build_spec_and_body(
             trailing_offset=order.get("trailing_offset"),
             trailing_basis=order.get("trailing_basis"),
             trailing_type=order.get("trailing_type"),
+            dollar=float(dollar) if dollar is not None else None,
         )
     validate_session_combo(
         session=spec.session,
@@ -457,6 +473,7 @@ def _headless_rules() -> tuple:
         PolicyDenyGateRule,
         PolicyEvaluateRule,
         PreviewRejectGateRule,
+        ResolveNotionalQuantityRule,
         SchwabPreviewRule,
         PlaceOrderRule,
     )
@@ -468,6 +485,8 @@ def _headless_rules() -> tuple:
             _Force(FetchUnderlyingQuoteRule()),
             _Force(FetchChainRule()),
         ),
+        # Dollar→shares before preview/policy (no-op for share orders).
+        ResolveNotionalQuantityRule(),
         DetectOpenCloseRule(),
         _Force(SchwabPreviewRule()),
         ComputeAnalyticsRule(),

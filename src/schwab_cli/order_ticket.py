@@ -94,6 +94,11 @@ class ParsedTicket:
     strategy: str | None                   # "VERTICAL" or None
     expiry: date | None                    # None for equity
     option_type: OptionType | None         # None for equity
+    # Dollar-denominated (notional) equity order: spend this many dollars;
+    # the share quantity is resolved downstream from the price (limit @px,
+    # or a live quote for MARKET). None for ordinary share-count tickets;
+    # when set, ``quantity`` is 0 until resolved. Equity-only.
+    notional: float | None = None
     strikes: tuple[float, ...] = field(default_factory=tuple)
     legs: tuple[ParsedLeg, ...] = field(default_factory=tuple)
     # Stock legs accompanying multi-asset strategies (COLLAR today;
@@ -230,6 +235,12 @@ def parse_ticket(s: str, *, today: date | None = None) -> ParsedTicket:
         )
     side: Side = side_tok  # type: ignore[assignment]
     cursor += 1
+
+    # ---- notional branch: "$<amount> of <UNDERLYING> [@px] TYPE [DUR]" ----
+    # Dollar-denominated equity order; the share quantity is resolved
+    # downstream from the price. Equity-only (no strategy/option legs).
+    if tokens[cursor].startswith("$"):
+        return _finish_notional(s, side, tokens, cursor)
 
     # ---- QTY (signed) ----
     qty_tok = tokens[cursor]
@@ -518,6 +529,76 @@ def _finish_equity(
         strategy=None,
         expiry=None,
         option_type=None,
+        strikes=(),
+        legs=(),
+    )
+
+
+def _finish_notional(
+    raw: str,
+    side: Side,
+    tokens: list[str],
+    cursor: int,
+) -> ParsedTicket:
+    """Parse ``$<amount> of <UNDERLYING> [@px] TYPE [DUR]``.
+
+    Dollar-denominated equity orders only — fractional option contracts
+    don't exist, so an option shape here is rejected. The share quantity
+    stays 0 on the returned ticket; a downstream pipeline rule resolves
+    it from ``notional / price`` (limit @px, or a live quote for MARKET).
+    """
+    amount_tok = tokens[cursor]
+    try:
+        notional = float(amount_tok[1:])  # strip the leading "$"
+    except ValueError:
+        raise TicketParseError(f"invalid dollar amount {amount_tok!r}")
+    if notional <= 0:
+        raise TicketParseError(
+            f"dollar amount must be positive, got {amount_tok!r}"
+        )
+    cursor += 1
+
+    # Require the literal "of" so "$10 QQQ" (ambiguous) is rejected.
+    if cursor >= len(tokens) or tokens[cursor].lower() != "of":
+        raise TicketParseError(
+            f"expected 'of' after dollar amount: {raw!r}"
+        )
+    cursor += 1
+
+    if cursor >= len(tokens):
+        raise TicketParseError(f"missing underlying symbol: {raw!r}")
+    underlying = tokens[cursor].upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9./]*", underlying):
+        raise TicketParseError(
+            f"underlying must look like a ticker, got {tokens[cursor]!r}"
+        )
+    cursor += 1
+
+    # Equity-only: an option continuation (D MON YY ...) is invalid here.
+    if (
+        cursor + 1 < len(tokens)
+        and re.fullmatch(r"\d{1,2}", tokens[cursor])
+        and tokens[cursor + 1].upper() in _MONTHS
+    ):
+        raise TicketParseError(
+            "dollar amounts are equity-only; option legs need a contract "
+            f"quantity, not a dollar amount: {raw!r}"
+        )
+
+    price, order_type, duration = _parse_price_type_duration(
+        tokens, cursor, raw, default_when_combo="LIMIT",
+    )
+    return ParsedTicket(
+        side=side,
+        quantity=0,                 # resolved downstream from notional/price
+        underlying=underlying,
+        order_type=order_type,
+        duration=duration,
+        price=price,
+        strategy=None,
+        expiry=None,
+        option_type=None,
+        notional=notional,
         strikes=(),
         legs=(),
     )

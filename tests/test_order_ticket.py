@@ -424,3 +424,64 @@ def test_marker_on_equity_is_ignored():
     assert t.order_type == "LIMIT"
     assert t.quantity == 100
     assert t.legs == ()  # equity tickets carry no option legs
+
+
+# ---- notional (dollar-denominated) equity tickets -------------------------
+
+
+def test_notional_limit_buy():
+    t = parse_ticket("BUY $10.00 of QQQ @735.83 LMT")
+    assert t.is_equity
+    assert t.side == "BUY"
+    assert t.notional == 10.00
+    assert t.quantity == 0           # resolved later from notional / price
+    assert t.underlying == "QQQ"
+    assert t.order_type == "LIMIT"
+    assert t.price == 735.83
+    assert t.duration == "DAY"
+    assert t.legs == ()
+
+
+def test_notional_market_buy():
+    t = parse_ticket("BUY $500.00 of QQQ MKT")
+    assert t.is_equity
+    assert t.notional == 500.00
+    assert t.quantity == 0
+    assert t.order_type == "MARKET"
+    assert t.price is None
+    assert t.underlying == "QQQ"
+
+
+def test_notional_sell_and_gtc():
+    t = parse_ticket("SELL $250 of AAPL @190.50 LMT GTC")
+    assert t.side == "SELL"
+    assert t.notional == 250.0
+    assert t.order_type == "LIMIT"
+    assert t.duration == "GOOD_TILL_CANCEL"
+
+
+def test_notional_without_of_keyword_rejected():
+    with pytest.raises(TicketParseError, match="of"):
+        parse_ticket("BUY $10.00 QQQ @735.83 LMT")
+
+
+def test_notional_zero_rejected():
+    with pytest.raises(TicketParseError, match="positive|zero"):
+        parse_ticket("BUY $0 of QQQ @735.83 LMT")
+
+
+def test_notional_bad_amount_rejected():
+    with pytest.raises(TicketParseError, match="dollar|amount"):
+        parse_ticket("BUY $abc of QQQ @735.83 LMT")
+
+
+def test_notional_on_option_rejected():
+    # Dollar amounts are equity-only; fractional contracts don't exist.
+    with pytest.raises(TicketParseError, match="option|equity|dollar"):
+        parse_ticket("BUY $10.00 of QQQ 1 MAY 26 250 CALL @1.20 LMT")
+
+
+def test_share_quantity_still_has_no_notional():
+    t = parse_ticket("BUY +100 NVDA @150.00 LMT")
+    assert t.notional is None
+    assert t.quantity == 100
