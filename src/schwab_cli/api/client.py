@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -8,6 +9,19 @@ import httpx
 from schwab_cli import auth_delegate
 from schwab_cli.config import Config
 from schwab_cli.session import Session
+
+# Backoff (seconds) between transient-network retry attempts. Length =
+# number of RETRIES after the first try, so a request is attempted up to
+# len(_RETRY_BACKOFF_S)+1 times.
+_RETRY_BACKOFF_S = (0.5, 1.0, 2.0)
+
+# Connect-phase failures: the request never reached Schwab, so retrying
+# is safe for ANY method — including a non-idempotent order POST.
+_PRESEND_ERRORS = (
+    httpx.ConnectTimeout,
+    httpx.ConnectError,
+    httpx.PoolTimeout,
+)
 
 
 class ApiError(Exception):
@@ -116,14 +130,16 @@ class SchwabClient:
         for unrecoverable auth failures).
         """
         try:
-            resp = self._request(method, url, params=params, json=json)
+            resp = self._request_with_retry(method, url, params=params, json=json)
         except httpx.RequestError as e:
             raise ApiError(f"network: {type(e).__name__}") from e
 
         if resp.status_code == 401:
             self._refresh_or_expire()
             try:
-                resp = self._request(method, url, params=params, json=json)
+                resp = self._request_with_retry(
+                    method, url, params=params, json=json,
+                )
             except httpx.RequestError as e:
                 raise ApiError(f"network: {type(e).__name__}") from e
             if resp.status_code == 401:
@@ -174,6 +190,49 @@ class SchwabClient:
         # manager. Service-layer callers use `with SchwabClient(...)`
         # so a short-lived call never leaks the pool.
         self.close()
+
+    def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+    ) -> httpx.Response:
+        """``_request`` with idempotency-aware retry on transient network
+        errors.
+
+        A momentary connect blip used to surface as a hard failure (one
+        scheduled job lost a whole day's snapshot). We now retry, but
+        only where it's SAFE:
+
+        * **Connect-phase errors** (ConnectTimeout / ConnectError /
+          PoolTimeout) — the request never reached Schwab, so retrying is
+          safe for any method, including an order ``POST``.
+        * **Other transient errors** (read/write timeouts, etc.) — the
+          request may already have been delivered and executed, so they
+          are retried ONLY for idempotent ``GET``. A read timeout on a
+          ``POST`` is NEVER retried (it could double-place an order); it
+          propagates so the caller surfaces a clean network error.
+
+        Raises the last :class:`httpx.RequestError` when retries are
+        exhausted; the caller maps it to :class:`ApiError`.
+        """
+        idempotent = method.upper() == "GET"
+        last_exc: httpx.RequestError | None = None
+        for attempt in range(len(_RETRY_BACKOFF_S) + 1):
+            try:
+                return self._request(method, url, params=params, json=json)
+            except httpx.RequestError as e:
+                retriable = isinstance(e, _PRESEND_ERRORS) or idempotent
+                if not retriable or attempt == len(_RETRY_BACKOFF_S):
+                    raise
+                last_exc = e
+                time.sleep(_RETRY_BACKOFF_S[attempt])
+        # Unreachable: the loop either returns or raises. Kept for the
+        # type checker.
+        assert last_exc is not None
+        raise last_exc
 
     def _request(
         self,
