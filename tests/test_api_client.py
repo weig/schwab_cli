@@ -221,3 +221,95 @@ def test_resolve_account_caches_result():
     client.resolve_account("12345678")
     client.resolve_account("5678")
     assert route.call_count == 1  # second call used the cache
+
+
+# ---------------------------------------------------------------------------
+# Transient-network retry (idempotency-aware)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch):
+    """Zero the backoff so retry tests run instantly."""
+    import schwab_cli.api.client as _c
+    monkeypatch.setattr(_c.time, "sleep", lambda *_a, **_k: None)
+
+
+@respx.mock
+def test_get_retries_connect_timeout_then_succeeds():
+    route = respx.get("https://api.schwabapi.com/trader/v1/accounts").mock(
+        side_effect=[
+            httpx.ConnectTimeout("blip"),
+            httpx.ConnectTimeout("blip"),
+            httpx.Response(200, json=[{"accountNumber": "1"}]),
+        ]
+    )
+    client = SchwabClient(_cfg(), _session())
+    body = client.get("https://api.schwabapi.com/trader/v1/accounts")
+    assert body == [{"accountNumber": "1"}]
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_get_retries_read_timeout():
+    """GET is idempotent — a read timeout (response maybe sent) is still
+    safe to retry."""
+    respx.get("https://api.schwabapi.com/trader/v1/accounts").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(200, json=[]),
+        ]
+    )
+    client = SchwabClient(_cfg(), _session())
+    assert client.get("https://api.schwabapi.com/trader/v1/accounts") == []
+
+
+@respx.mock
+def test_get_exhausts_retries_then_raises():
+    route = respx.get("https://api.schwabapi.com/trader/v1/accounts").mock(
+        side_effect=httpx.ConnectTimeout("down"),
+    )
+    client = SchwabClient(_cfg(), _session())
+    with pytest.raises(ApiError, match="network"):
+        client.get("https://api.schwabapi.com/trader/v1/accounts")
+    assert route.call_count >= 3  # initial + retries
+
+
+@respx.mock
+def test_post_retries_connect_error_request_never_sent():
+    """A connect-phase failure means the order never reached Schwab —
+    safe to retry even for a non-idempotent POST."""
+    route = respx.post("https://api.schwabapi.com/trader/v1/x/orders").mock(
+        side_effect=[
+            httpx.ConnectError("refused"),
+            httpx.Response(201, headers={"Location": "/orders/9"}),
+        ]
+    )
+    client = SchwabClient(_cfg(), _session())
+    resp = client.post("https://api.schwabapi.com/trader/v1/x/orders", json={})
+    assert resp.status_code == 201
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_post_does_not_retry_read_timeout():
+    """A read timeout on a POST is ambiguous — Schwab may have received
+    and executed the order. NEVER retry (would risk a double order)."""
+    route = respx.post("https://api.schwabapi.com/trader/v1/x/orders").mock(
+        side_effect=httpx.ReadTimeout("ambiguous"),
+    )
+    client = SchwabClient(_cfg(), _session())
+    with pytest.raises(ApiError, match="network"):
+        client.post("https://api.schwabapi.com/trader/v1/x/orders", json={})
+    assert route.call_count == 1  # exactly one attempt, no retry
+
+
+@respx.mock
+def test_delete_does_not_retry_read_timeout():
+    route = respx.delete("https://api.schwabapi.com/trader/v1/x/orders/9").mock(
+        side_effect=httpx.ReadTimeout("ambiguous"),
+    )
+    client = SchwabClient(_cfg(), _session())
+    with pytest.raises(ApiError, match="network"):
+        client.delete("https://api.schwabapi.com/trader/v1/x/orders/9")
+    assert route.call_count == 1
