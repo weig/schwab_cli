@@ -245,6 +245,10 @@ def run_daily(cfg: ScreenerConfig | None = None) -> dict:
     snapshot_date = ny_snapshot_date(now_ms)
     svc = BaseService()
     with svc._authed_client() as client, connect() as conn:
+        # Capture point-in-time membership before ranking (survivorship guard).
+        from schwab_cli.screener.membership import record_membership_snapshot
+
+        record_membership_snapshot(conn, as_of_date=snapshot_date, now_ms=now_ms)
         deps = build_live_deps(conn, client, cfg, snapshot_date=snapshot_date)
         return run_screener_update(
             conn, deps, cfg, snapshot_date=snapshot_date, now_ms=now_ms

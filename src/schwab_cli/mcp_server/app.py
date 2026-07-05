@@ -487,6 +487,30 @@ class SchwabMcpServer:
                         },
                     },
                 ),
+                Tool(
+                    name="screener_ranking",
+                    description=(
+                        "Options VRP screener candidate pool — the latest "
+                        "(or a given date's) ranking by executable bid-side "
+                        "put-selling premium. Read-only; a candidate pool, "
+                        "not a trade recommendation."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "date":  {"type": "string"},
+                            "limit": {"type": "integer", "minimum": 1},
+                        },
+                    },
+                ),
+                Tool(
+                    name="screener_status",
+                    description=(
+                        "Options VRP screener status — latest ranking date, "
+                        "top candidates, and paper-ledger counts. Read-only."
+                    ),
+                    inputSchema={"type": "object", "properties": {}},
+                ),
             ]
 
         @server.call_tool()
@@ -542,6 +566,9 @@ class SchwabMcpServer:
                 return await self._tool_server_status()
             if name.startswith("dataset_"):
                 text = dispatch_dataset_tool(name, arguments=arguments)
+                return [TextContent(type="text", text=text)]
+            if name.startswith("screener_"):
+                text = dispatch_screener_tool(name, arguments=arguments)
                 return [TextContent(type="text", text=text)]
             return [TextContent(type="text", text=f"unknown tool: {name}")]
         except _ToolArgError as e:
@@ -1227,6 +1254,40 @@ class SchwabMcpServer:
 
 
 # ---- helpers ----------------------------------------------------------
+
+
+def dispatch_screener_tool(name: str, *, arguments: dict) -> str:
+    """Read-only dispatcher for screener_* MCP tools.
+
+    Returns a JSON string. No writes — the screener cron is the only writer.
+    Surfaces a candidate pool, never a trade instruction.
+    """
+    import json as _json
+
+    from schwab_cli.storage import screener as sc_store
+    from schwab_cli.storage import vol_history
+
+    if name == "screener_ranking":
+        with vol_history.connect() as conn:
+            ranking_date = arguments.get("date") or sc_store.latest_ranking_date(conn)
+            rows = (
+                sc_store.read_ranking(
+                    conn, ranking_date=ranking_date,
+                    limit=int(arguments.get("limit", 10)),
+                )
+                if ranking_date else []
+            )
+        return _json.dumps(
+            {"ranking_date": ranking_date, "rows": [dict(r) for r in rows]},
+            indent=2, default=str,
+        )
+
+    if name == "screener_status":
+        from schwab_cli.commands.screener import _status_payload
+
+        return _json.dumps(_status_payload(), indent=2, default=str)
+
+    return _json.dumps({"error": f"unknown screener tool: {name}"})
 
 
 def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:

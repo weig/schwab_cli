@@ -47,12 +47,22 @@ except (ImportError, AttributeError):
 # Helpers
 # ---------------------------------------------------------------------------
 
-_EXPECTED_STEMS = {"market-data", "accounts", "indices"}
+_EXPECTED_STEMS = {
+    "market-data", "accounts", "indices", "screener", "screener-earnings",
+}
+
+# The original dataset jobs carry invariants (--skip-wait, enabled) the
+# screener jobs deliberately don't share.
+_DATASET_STEMS = {"market-data", "accounts", "indices"}
+# Every default is enabled except the earnings sweep (opt-in until validated).
+_DISABLED_STEMS = {"screener-earnings"}
 
 _EXPECTED_CRONS = {
-    "market-data": "0 17 * * 1-5",
-    "accounts":    "0 17 * * 1-5",
-    "indices":     "0 18 * * *",
+    "market-data":       "0 17 * * 1-5",
+    "accounts":          "0 17 * * 1-5",
+    "indices":           "0 18 * * *",
+    "screener":          "10 17 * * 1-5",
+    "screener-earnings": "30 15 * * 1-5",
 }
 
 
@@ -112,11 +122,12 @@ class TestDefaultJobConfigs:
                 f"DEFAULT_JOB_CONFIGS[{stem!r}] must have a string 'name'"
             )
 
-    def test_each_enabled_true(self):
+    def test_each_enabled_flag(self):
         assert _HAS_DEFAULT_JOB_CONFIGS
         for stem, val in DEFAULT_JOB_CONFIGS.items():
-            assert val.get("enabled") is True, (
-                f"DEFAULT_JOB_CONFIGS[{stem!r}] must have enabled=True"
+            expected = stem not in _DISABLED_STEMS
+            assert val.get("enabled") is expected, (
+                f"DEFAULT_JOB_CONFIGS[{stem!r}] enabled must be {expected}"
             )
 
     def test_each_type_is_command(self):
@@ -142,10 +153,14 @@ class TestDefaultJobConfigs:
             )
 
     def test_each_command_has_skip_wait(self):
-        """All default commands must include --skip-wait so cron controls timing."""
+        """Dataset commands must include --skip-wait so cron controls timing.
+
+        The screener subcommands don't take --skip-wait (they compute their
+        own NY snapshot day), so the invariant applies to dataset stems only.
+        """
         assert _HAS_DEFAULT_JOB_CONFIGS
-        for stem, val in DEFAULT_JOB_CONFIGS.items():
-            cmd = val.get("command", [])
+        for stem in _DATASET_STEMS:
+            cmd = DEFAULT_JOB_CONFIGS[stem].get("command", [])
             assert "--skip-wait" in cmd, (
                 f"DEFAULT_JOB_CONFIGS[{stem!r}] command must include --skip-wait; "
                 f"got {cmd}"
@@ -279,7 +294,7 @@ class TestDefaultJobConfigsParseJobRoundTrip:
         p = tmp_path / f"{stem}.json"
         p.write_text(json.dumps(cfg_dict), encoding="utf-8")
         job_cfg = parse_job(p)
-        assert job_cfg.enabled is True
+        assert job_cfg.enabled is (stem not in _DISABLED_STEMS)
 
 
 # ---------------------------------------------------------------------------

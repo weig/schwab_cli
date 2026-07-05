@@ -20,6 +20,7 @@ from schwab_cli.commands import option as option_cmd
 from schwab_cli.commands import order as order_cmd
 from schwab_cli.commands import profile as profile_cmd
 from schwab_cli.commands import quote as quote_cmd
+from schwab_cli.commands import screener as screener_cmd
 from schwab_cli.commands import server as server_cmd
 from schwab_cli.commands import setup as setup_cmd
 from schwab_cli.commands import skew as skew_cmd
@@ -447,6 +448,7 @@ def skew(
 
 
 app.add_typer(dataset_cmd.app, name="dataset")
+app.add_typer(screener_cmd.app, name="screener")
 app.add_typer(jobs_cmd.app, name="jobs")
 app.add_typer(cert_cmd.app, name="cert")
 
