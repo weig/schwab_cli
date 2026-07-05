@@ -10,6 +10,7 @@ CI over the daily spreads, not a naive t-test.
 """
 from __future__ import annotations
 
+import math
 import random
 from statistics import fmean
 
@@ -67,8 +68,10 @@ def bootstrap_ci(
         sample = [spreads[rng.randrange(n)] for _ in range(n)]
         means.append(fmean(sample))
     means.sort()
+    # Percentile bootstrap bounds (0-indexed): lower at floor, upper at
+    # ceil(B*(1-a/2)) - 1 so B=2000, a=0.05 → index 1949, not 1950.
     lo = means[int((alpha / 2) * iters)]
-    hi = means[min(iters - 1, int((1 - alpha / 2) * iters))]
+    hi = means[min(iters - 1, math.ceil((1 - alpha / 2) * iters) - 1)]
     return fmean(spreads), lo, hi
 
 

@@ -1268,13 +1268,14 @@ def dispatch_screener_tool(name: str, *, arguments: dict) -> str:
     from schwab_cli.storage import vol_history
 
     if name == "screener_ranking":
+        try:
+            limit = int(arguments.get("limit") or 10)
+        except (TypeError, ValueError):
+            return _json.dumps({"error": "limit must be an integer"})
         with vol_history.connect() as conn:
             ranking_date = arguments.get("date") or sc_store.latest_ranking_date(conn)
             rows = (
-                sc_store.read_ranking(
-                    conn, ranking_date=ranking_date,
-                    limit=int(arguments.get("limit", 10)),
-                )
+                sc_store.read_ranking(conn, ranking_date=ranking_date, limit=limit)
                 if ranking_date else []
             )
         return _json.dumps(

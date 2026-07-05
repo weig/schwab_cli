@@ -54,8 +54,9 @@ _EXPECTED_STEMS = {
 # The original dataset jobs carry invariants (--skip-wait, enabled) the
 # screener jobs deliberately don't share.
 _DATASET_STEMS = {"market-data", "accounts", "indices"}
-# Every default is enabled except the earnings sweep (opt-in until validated).
-_DISABLED_STEMS = {"screener-earnings"}
+# The screener jobs ship disabled — opt-in once the earnings feed is
+# validated (a heavy ~600-symbol daily fetch; empty output until then).
+_DISABLED_STEMS = {"screener", "screener-earnings"}
 
 _EXPECTED_CRONS = {
     "market-data":       "0 17 * * 1-5",

@@ -310,9 +310,11 @@ def settle_position(
     settled_at: int,
 ) -> None:
     """Write settlement price + PnL for a matured position (idempotent)."""
+    # settled_at IS NULL guard: never re-settle a position (would silently
+    # rewrite historical paper-ledger PnL, corrupting the validation harness).
     conn.execute(
         "UPDATE paper_ledger SET settle_price = ?, pnl = ?, settled_at = ? "
-        "WHERE open_date = ? AND symbol = ?",
+        "WHERE open_date = ? AND symbol = ? AND settled_at IS NULL",
         (settle_price, pnl, settled_at, open_date, symbol),
     )
 

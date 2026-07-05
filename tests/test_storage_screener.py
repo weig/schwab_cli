@@ -121,3 +121,8 @@ def test_paper_ledger_open_settle(conn):
     assert sc.read_unsettled_due(conn, on_or_after_expiry="2026-09-01") == []
     settled = sc.read_ledger(conn, settled_only=True)
     assert len(settled) == 1 and settled[0]["pnl"] == -0.50
+    # Double-settle guard: a second settle must NOT overwrite the recorded PnL.
+    sc.settle_position(conn, open_date="2026-07-06", symbol="A",
+                       settle_price=200.0, pnl=999.0, settled_at=456)
+    row = sc.read_ledger(conn, settled_only=True)[0]
+    assert row["pnl"] == -0.50 and row["settled_at"] == 123

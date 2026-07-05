@@ -48,10 +48,13 @@ DEFAULT_JOB_CONFIGS: dict[str, dict] = {
     ),
     # Runs after market-data so vol_snapshots / OHLCV are fresh. Also records
     # point-in-time index membership and settles/backfills the paper ledger.
+    # Off by default: a brand-new ~600-symbol daily chain fetch. Enable once
+    # the earnings feed is populated (else every name fail-closes to empty).
     "screener": _command_config(
         "Options VRP Screener",
         "10 17 * * 1-5",
         ["screener", "update"],
+        enabled=False,
     ),
     # Off by default: a ~600-symbol free-source sweep. Enable once the
     # earnings feed is validated; until then the screener fail-closes names
