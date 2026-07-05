@@ -64,7 +64,7 @@ def test_v4_migration_idempotent(
             "SELECT version FROM schema_version"
         ).fetchone()[0]
     assert n == 2
-    assert version == 4
+    assert version == vol_history._SCHEMA_VERSION  # migrated up to current
 
 
 def test_v4_preserves_volatility_rows(
