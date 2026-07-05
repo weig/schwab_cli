@@ -178,7 +178,7 @@ def test_dataset_history_happy(monkeypatch):
         headers=_AUTH,
     )
     assert resp.status_code == 200
-    assert seen["name"] == "dataset.history"
+    assert seen["name"] == "dataset_history"
     assert seen["arguments"]["symbol"] == "SPY"
     assert seen["arguments"]["lookback_days"] == 30
     assert seen["arguments"]["fields"] == ["atm_iv_30d"]
@@ -343,10 +343,10 @@ def test_dataset_status_and_iv_rank_happy(monkeypatch):
     )
     c = _client("dataset")
     assert c.get("/api/v1/dataset/status", headers=_AUTH).json() == {
-        "name": "dataset.status",
+        "name": "dataset_status",
     }
     assert c.get("/api/v1/dataset/iv-rank/SPY", headers=_AUTH).json() == {
-        "name": "dataset.iv_rank",
+        "name": "dataset_iv_rank",
     }
 
 

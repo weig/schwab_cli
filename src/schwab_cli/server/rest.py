@@ -366,7 +366,7 @@ def _dataset_dispatch(name: str, arguments: dict) -> Any:
     """Reuse the MCP dataset dispatcher (read-only, local SQLite).
 
     The dispatcher's SQL-injection guard (PRAGMA-based field allowlist
-    for dataset.history) applies to this path too. Dispatcher failures
+    for dataset_history) applies to this path too. Dispatcher failures
     (unknown tool, non-JSON output) surface as ServiceError → 502, never
     an unhandled 500.
     """
@@ -379,7 +379,7 @@ def _dataset_dispatch(name: str, arguments: dict) -> Any:
 
 
 def _do_dataset_status(request):
-    return _dataset_dispatch("dataset.status", {
+    return _dataset_dispatch("dataset_status", {
         "group": request.query_params.get("group", "volatility"),
         "tier": request.query_params.get("tier"),
         "source": request.query_params.get("source"),
@@ -394,11 +394,11 @@ def _do_dataset_history(request):
     fields = request.query_params.get("fields")
     if fields:
         args["fields"] = [f.strip() for f in fields.split(",") if f.strip()]
-    return _dataset_dispatch("dataset.history", args)
+    return _dataset_dispatch("dataset_history", args)
 
 
 def _do_dataset_iv_rank(request):
-    return _dataset_dispatch("dataset.iv_rank", {
+    return _dataset_dispatch("dataset_iv_rank", {
         "symbol": request.path_params["symbol"].upper(),
         "lookback_days": _int_param(request, "lookback_days", 252, max_value=730),
     })

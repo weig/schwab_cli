@@ -230,7 +230,7 @@ def test_server_exposes_expected_tool_names():
         "get_dividends", "get_fundamentals",
         "get_accounts", "get_account", "get_positions", "get_transactions",
         "get_order", "list_orders",
-        "dataset.history", "dataset.iv_rank", "dataset.status",
+        "dataset_history", "dataset_iv_rank", "dataset_status",
     }
 
 
