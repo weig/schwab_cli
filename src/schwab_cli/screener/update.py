@@ -18,6 +18,7 @@ import dataclasses
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from schwab_cli.screener.config import ScreenerConfig
 from schwab_cli.screener.forward_rv import forward_rv
@@ -28,7 +29,7 @@ from schwab_cli.screener.snapshot import VolContext, build_snapshot, is_survivor
 from schwab_cli.storage import screener as store
 from schwab_cli.storage.screener import ContractSnapshot
 
-_NY = timezone(timedelta(hours=-4))  # snapshot-day derivation only; see build_live_deps
+_NY = ZoneInfo("America/New_York")  # NY trading-day derivation
 _RV_CUTOFF_DAYS = 30  # only attempt forward-RV once the ~21-trading-day window elapsed
 
 

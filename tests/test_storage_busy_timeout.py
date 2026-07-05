@@ -48,6 +48,14 @@ def test_concurrent_writers_dont_raise_locked(isolated_storage):
     barrier = threading.Barrier(2)
     errors: list[Exception] = []
 
+    # Create the schema ONCE up front. This test is about writer-vs-writer
+    # contention (its docstring); without pre-init, both threads would also
+    # race the migration DDL on a fresh file — a schema-creation collision,
+    # not the write contention under test. In production the DB is created
+    # once at daemon startup before any concurrent job writes.
+    with vol_history.connect():
+        pass
+
     def writer(payload_id: int) -> None:
         try:
             barrier.wait(timeout=5)
