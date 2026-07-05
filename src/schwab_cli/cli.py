@@ -13,6 +13,7 @@ from schwab_cli.commands import fundamentals as fundamentals_cmd
 from schwab_cli.commands import greeks as greeks_cmd
 from schwab_cli.commands import history as history_cmd
 from schwab_cli.commands import jobs as jobs_cmd
+from schwab_cli.commands import mcp as mcp_cmd
 from schwab_cli.commands import notify as notify_cmd
 from schwab_cli.commands import performance as performance_cmd
 from schwab_cli.commands import option as option_cmd
@@ -57,6 +58,27 @@ def setup(
 @app.command("doctor", help="Health check: install, MCP, auth, dataset.")
 def doctor(doc: bool = doc_option()) -> None:
     doctor_cmd.run()
+
+
+@app.command(
+    "mcp",
+    help="Bridge a stdio MCP client (e.g. Claude Desktop) to the running daemon.",
+)
+def mcp(
+    stdio: bool = typer.Option(
+        False,
+        "--stdio",
+        help=(
+            "Run a transparent stdio↔HTTP bridge to the daemon's MCP "
+            "endpoint. Forwards frames only — starts no server, owns no "
+            "token, opens no Schwab connection."
+        ),
+    ),
+    doc: bool = doc_option(),
+) -> None:
+    if not stdio:
+        raise typer.BadParameter("pass --stdio to run the bridge")
+    mcp_cmd.run_stdio_bridge()
 
 
 @app.command("auth", help="Authenticate with Schwab (refresh or full OAuth).")
