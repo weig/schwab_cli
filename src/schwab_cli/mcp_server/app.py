@@ -426,7 +426,7 @@ class SchwabMcpServer:
                     },
                 ),
                 Tool(
-                    name="dataset.status",
+                    name="dataset_status",
                     description=(
                         "Get current dataset subscription state (tier, "
                         "sources, first/last data date, days). Read-only."
@@ -445,7 +445,7 @@ class SchwabMcpServer:
                     },
                 ),
                 Tool(
-                    name="dataset.history",
+                    name="dataset_history",
                     description=(
                         "Get historical volatility snapshots for one "
                         "symbol. Returns up to lookback_days rows "
@@ -469,7 +469,7 @@ class SchwabMcpServer:
                     },
                 ),
                 Tool(
-                    name="dataset.iv_rank",
+                    name="dataset_iv_rank",
                     description=(
                         "Get IV rank/percentile for one symbol. "
                         "Read-only — uses the most recently stored "
@@ -540,7 +540,7 @@ class SchwabMcpServer:
                 return await self._tool_stream_quote(arguments)
             if name == "server_status":
                 return await self._tool_server_status()
-            if name.startswith("dataset."):
+            if name.startswith("dataset_"):
                 text = dispatch_dataset_tool(name, arguments=arguments)
                 return [TextContent(type="text", text=text)]
             return [TextContent(type="text", text=f"unknown tool: {name}")]
@@ -1239,7 +1239,7 @@ def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
     from schwab_cli.storage import vol_history
     from schwab_cli.dataset.store import read_status_rows
 
-    if name == "dataset.status":
+    if name == "dataset_status":
         with vol_history.connect() as conn:
             rows = read_status_rows(
                 conn,
@@ -1250,7 +1250,7 @@ def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
             )
         return _json.dumps(rows, indent=2, default=str)
 
-    if name == "dataset.history":
+    if name == "dataset_history":
         symbol = arguments["symbol"]
         lookback = min(int(arguments.get("lookback_days", 252)), 730)
         fields = arguments.get("fields") or ["atm_iv_30d", "hv_30d"]
@@ -1281,7 +1281,7 @@ def dispatch_dataset_tool(name: str, *, arguments: dict) -> str:
             ).fetchall()
         return _json.dumps([dict(r) for r in rows], indent=2, default=str)
 
-    if name == "dataset.iv_rank":
+    if name == "dataset_iv_rank":
         from schwab_cli.service.vol import compute_iv_rank_and_percentile
         with vol_history.connect() as conn:
             recent = conn.execute(

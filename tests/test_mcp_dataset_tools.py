@@ -34,7 +34,7 @@ def seeded(monkeypatch, tmp_path):
 
 def test_dataset_status_tool_returns_rows(seeded):
     from schwab_cli.mcp_server.app import dispatch_dataset_tool
-    out = dispatch_dataset_tool("dataset.status",
+    out = dispatch_dataset_tool("dataset_status",
                                 arguments={"group": "volatility"})
     parsed = json.loads(out)
     assert parsed[0]["symbol"] == "NVDA"
@@ -43,7 +43,7 @@ def test_dataset_status_tool_returns_rows(seeded):
 
 def test_dataset_status_tool_filters_by_tier(seeded):
     from schwab_cli.mcp_server.app import dispatch_dataset_tool
-    out = dispatch_dataset_tool("dataset.status",
+    out = dispatch_dataset_tool("dataset_status",
                                 arguments={"tier": "WATCH"})
     assert json.loads(out) == []
 
@@ -59,7 +59,7 @@ def test_dataset_history_tool_returns_rows(seeded):
             atm_iv_30d=0.32, hv_30d=0.27,
         )
     out = dispatch_dataset_tool(
-        "dataset.history",
+        "dataset_history",
         arguments={"symbol": "NVDA", "lookback_days": 5},
     )
     rows = json.loads(out)
@@ -71,7 +71,7 @@ def test_dataset_history_tool_returns_rows(seeded):
 def test_dataset_history_clamps_lookback(seeded):
     from schwab_cli.mcp_server.app import dispatch_dataset_tool
     out = dispatch_dataset_tool(
-        "dataset.history",
+        "dataset_history",
         arguments={"symbol": "NVDA", "lookback_days": 99999},
     )
     # Should not error; clamped silently to 730.
@@ -81,7 +81,7 @@ def test_dataset_history_clamps_lookback(seeded):
 def test_dataset_iv_rank_tool_handles_no_data(seeded):
     from schwab_cli.mcp_server.app import dispatch_dataset_tool
     out = dispatch_dataset_tool(
-        "dataset.iv_rank",
+        "dataset_iv_rank",
         arguments={"symbol": "NVDA"},
     )
     parsed = json.loads(out)
@@ -126,14 +126,14 @@ def test_concurrent_write_and_read_safe(monkeypatch, tmp_path):
         )
         # writer hasn't committed yet — reader must NOT see new row.
         out = dispatch_dataset_tool(
-            "dataset.history",
+            "dataset_history",
             arguments={"symbol": "NVDA", "lookback_days": 5},
         )
         rows = _json.loads(out)
         assert len(rows) == 0
     # After commit (when 'with' exits), a new reader sees the row.
     out2 = dispatch_dataset_tool(
-        "dataset.history",
+        "dataset_history",
         arguments={"symbol": "NVDA", "lookback_days": 5},
     )
     rows2 = _json.loads(out2)
@@ -166,10 +166,10 @@ def test_mcp_lists_dataset_tools(monkeypatch, tmp_path):
         # This is the expected code path: tools are wired inside an async
         # list_tools() closure, not stored in a module-level constant.
         src = open(app_mod.__file__).read()
-        assert "dataset.status" in src
-        assert "dataset.history" in src
-        assert "dataset.iv_rank" in src
+        assert "dataset_status" in src
+        assert "dataset_history" in src
+        assert "dataset_iv_rank" in src
         return
-    assert "dataset.status"  in names
-    assert "dataset.history" in names
-    assert "dataset.iv_rank" in names
+    assert "dataset_status"  in names
+    assert "dataset_history" in names
+    assert "dataset_iv_rank" in names
