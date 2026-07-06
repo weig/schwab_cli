@@ -107,6 +107,7 @@ class SchwabMcpServer:
         admin_token: str | None = None,
         notifier: Notifier | None = None,
         idle_linger_s: float | None = None,
+        bridge: object | None = None,
     ) -> None:
         self._client = client
         self._logbook = logbook
@@ -114,7 +115,11 @@ class SchwabMcpServer:
         # Notifier wired into bridge so a streamer crash fires an
         # alert even if no other code paths are listening for it.
         self._notifier = notifier or Notifier.from_file(logbook=logbook)
-        self._bridge = StreamerBridge(
+        # ``bridge`` is injectable. The daemon uses the default local
+        # StreamerBridge (owner of the single Schwab stream); the stdio MCP
+        # server injects a RemoteStreamerBridge that forwards to the daemon's
+        # shared stream, so it never opens a second Schwab connection.
+        self._bridge = bridge if bridge is not None else StreamerBridge(
             client, logbook, self._manager, notifier=self._notifier,
             idle_linger_s=(
                 _idle_linger_default() if idle_linger_s is None
@@ -967,6 +972,32 @@ class SchwabMcpServer:
         return [TextContent(type="text", text=json.dumps(payload, default=str))]
 
     # ---- lifecycle -----------------------------------------------------
+
+    async def run_stdio(self) -> None:
+        """Drive the same tool server over the stdio transport.
+
+        Used by ``schwab mcp --stdio`` so the stdio MCP server is a sibling
+        of the daemon's HTTP server over the shared tool implementations —
+        not a proxy to it. REST tools call the service layer directly (the
+        injected client delegates refresh to the daemon on 401); local-DB
+        tools need nothing; ``stream_quote`` rides the injected bridge (which
+        forwards to the daemon's shared stream). Runs until stdin closes.
+        """
+        from mcp.server.stdio import stdio_server
+
+        self._loop = asyncio.get_running_loop()
+        self._transport = "stdio"
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await self._server.run(
+                    read_stream,
+                    write_stream,
+                    self._server.create_initialization_options(),
+                )
+        finally:
+            close = getattr(self._bridge, "close", None)
+            if close is not None:
+                await close()
 
     async def run_http(
         self, host: str, port: int, *, extra_routes=None, asgi_wrap=None
