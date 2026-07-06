@@ -44,8 +44,14 @@ def underlying_last(raw: dict) -> float | None:
     return float(last) if isinstance(last, (int, float)) else None
 
 
-def _iter_puts(raw: dict) -> list[dict]:
-    """Flatten ``putExpDateMap`` keeping the quote fields we need."""
+def iter_puts(raw: dict) -> list[dict]:
+    """Flatten ``putExpDateMap`` keeping the quote fields we need.
+
+    Output rows share the shape of stored ``put_chain_snapshots`` rows
+    (expiry, dte, strike, delta, bid, ask, open_interest, volume), so
+    :func:`locate_from_puts` works over either a live chain or the band
+    captured to storage.
+    """
     out: list[dict] = []
     for expiry_key, strike_map in (raw.get("putExpDateMap") or {}).items():
         expiry, _, dte_part = expiry_key.partition(":")
@@ -98,14 +104,19 @@ def pick_target_expiry(puts: list[dict]) -> tuple[str, int] | None:
 
 
 def locate_target_put(raw: dict) -> tuple[TargetPut | None, str | None]:
+    """Locate the target put on a live raw chain (thin wrapper)."""
+    return locate_from_puts(iter_puts(raw))
+
+
+def locate_from_puts(puts: list[dict]) -> tuple[TargetPut | None, str | None]:
     """Return the target put and ``None``, or ``(None, reason)`` on failure.
 
-    Reasons: ``no_puts``, ``no_expiry_in_window``, ``no_delta``. Bid/ask
-    validity and the delta plausibility band are assessed by the caller
-    (data-quality guards) so the located row is still recorded for
-    diagnosis rather than silently dropped here.
+    Operates on a list of put dicts (from a live chain via :func:`iter_puts`
+    or from stored ``put_chain_snapshots`` rows). Reasons: ``no_puts``,
+    ``no_expiry_in_window``, ``no_delta``. Bid/ask validity and the delta
+    plausibility band are assessed by the caller (data-quality guards) so the
+    located row is still recorded for diagnosis rather than dropped here.
     """
-    puts = _iter_puts(raw)
     if not puts:
         return None, "no_puts"
     picked = pick_target_expiry(puts)

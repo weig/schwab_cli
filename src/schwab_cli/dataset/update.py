@@ -524,6 +524,20 @@ def run_volatility_update(
         )
         sampled.append(sym)
 
+        # Step 4b — capture the OTM put band for the screener (permanent raw
+        # layer). Reuses the chain just fetched — zero extra API calls. Best
+        # effort: a capture failure must never fail the vol sample.
+        if "putExpDateMap" in raw:
+            try:
+                from schwab_cli.screener.capture import capture_put_band
+
+                capture_put_band(
+                    conn, snapshot_date=archive_date, symbol=sym,
+                    raw=raw, now_ms=now_ms,
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append({"symbol": sym, "error": f"put-band capture: {e}"})
+
         # Step 5 — tier re-evaluation (volatility group only).
         sources = sources_for_symbol(
             conn, symbol=sym, group_name=GROUP_VOLATILITY, now_ms=now_ms,

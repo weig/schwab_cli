@@ -27,6 +27,13 @@ class ScreenerConfig:
     ivr_low_conf_days: int = 120        # IVR flagged low-confidence under this
     # Validation (§7)
     cohort_size: int = 10               # top-N / bottom-N virtual positions/day
+    # Capture band (persisted by the dataset job — the permanent raw layer).
+    # Wide enough that future target variants (other delta/DTE) can be
+    # re-derived from history without re-fetching. |delta| bounds inclusive.
+    band_dte_lo: int = 20
+    band_dte_hi: int = 45
+    band_abs_delta_lo: float = 0.10
+    band_abs_delta_hi: float = 0.40
 
 
 def load_screener_config() -> ScreenerConfig:

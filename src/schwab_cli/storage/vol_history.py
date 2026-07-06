@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -223,6 +223,32 @@ CREATE TABLE IF NOT EXISTS paper_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_paper_ledger_unsettled
     ON paper_ledger (expiry) WHERE settled_at IS NULL;
+
+-- ===================== Options VRP Screener (v8) =====================
+-- Permanent per-trading-day capture of a BAND of OTM puts, written by the
+-- dataset vol job from the chain it already fetches (sole writer). This is
+-- the raw preservation layer: the screener and any future variant read and
+-- re-derive target contracts from here, so historical option quotes are
+-- never lost. PK (snapshot_date, symbol, expiry, strike) → idempotent daily
+-- re-capture.
+CREATE TABLE IF NOT EXISTS put_chain_snapshots (
+    snapshot_date   TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    expiry          TEXT    NOT NULL,
+    dte             INTEGER NOT NULL,
+    strike          REAL    NOT NULL,
+    delta           REAL,
+    bid             REAL,
+    ask             REAL,
+    open_interest   INTEGER,
+    volume          INTEGER,
+    underlying_last REAL,
+    captured_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (snapshot_date, symbol, expiry, strike)
+);
+
+CREATE INDEX IF NOT EXISTS idx_put_band_lookup
+    ON put_chain_snapshots (snapshot_date, symbol);
 """
 
 # Allowed values for the `source` column.

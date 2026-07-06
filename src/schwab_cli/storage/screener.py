@@ -121,6 +121,69 @@ def read_snapshots_needing_rv(
 
 
 # --------------------------------------------------------------------------
+# put_chain_snapshots (permanent raw band; sole writer = dataset job)
+# --------------------------------------------------------------------------
+
+def record_put_band(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_date: str,
+    symbol: str,
+    puts: list[dict],
+    underlying_last: float | None,
+    now_ms: int,
+) -> None:
+    """Persist a day's put band. INSERT OR REPLACE per (date, symbol, expiry,
+    strike) so an intraday re-capture refreshes quotes idempotently."""
+    rows = [
+        (
+            snapshot_date, symbol, p.get("expiry"), p.get("dte"),
+            p.get("strike"), p.get("delta"), p.get("bid"), p.get("ask"),
+            p.get("open_interest"), p.get("volume"), underlying_last, now_ms,
+        )
+        for p in puts
+        if p.get("expiry") is not None and p.get("strike") is not None
+    ]
+    conn.executemany(
+        "INSERT OR REPLACE INTO put_chain_snapshots "
+        "(snapshot_date, symbol, expiry, dte, strike, delta, bid, ask, "
+        " open_interest, volume, underlying_last, captured_at_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+
+
+def read_put_band(
+    conn: sqlite3.Connection, *, snapshot_date: str, symbol: str
+) -> list[sqlite3.Row]:
+    """The stored put band for one symbol/day (locator input)."""
+    return conn.execute(
+        "SELECT * FROM put_chain_snapshots "
+        "WHERE snapshot_date = ? AND symbol = ? ORDER BY expiry, strike",
+        (snapshot_date, symbol),
+    ).fetchall()
+
+
+def symbols_with_put_band(
+    conn: sqlite3.Connection, *, snapshot_date: str
+) -> list[str]:
+    """Distinct symbols with a captured band on a date (the read universe)."""
+    rows = conn.execute(
+        "SELECT DISTINCT symbol FROM put_chain_snapshots "
+        "WHERE snapshot_date = ? ORDER BY symbol",
+        (snapshot_date,),
+    ).fetchall()
+    return [r["symbol"] for r in rows]
+
+
+def latest_put_band_date(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        "SELECT MAX(snapshot_date) AS d FROM put_chain_snapshots"
+    ).fetchone()
+    return row["d"] if row and row["d"] else None
+
+
+# --------------------------------------------------------------------------
 # events (earnings calendar)
 # --------------------------------------------------------------------------
 

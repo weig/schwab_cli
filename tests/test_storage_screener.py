@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from schwab_cli.storage import screener as sc
-from schwab_cli.storage.vol_history import connect
+from schwab_cli.storage.vol_history import _SCHEMA_VERSION, connect
 
 
 @pytest.fixture
@@ -23,10 +23,10 @@ def test_v7_tables_created(conn):
     }
     assert {
         "contract_snapshots", "events", "index_membership",
-        "daily_ranking", "paper_ledger",
+        "daily_ranking", "paper_ledger", "put_chain_snapshots",
     } <= tables
     ver = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert ver == 7
+    assert ver == _SCHEMA_VERSION
 
 
 def _snap(**kw) -> sc.ContractSnapshot:
