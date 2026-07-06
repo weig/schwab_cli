@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -118,6 +118,111 @@ CREATE TABLE IF NOT EXISTS account_nav_daily (
 
 CREATE INDEX IF NOT EXISTS idx_account_nav_account_day
     ON account_nav_daily (account_hash, day);
+
+-- ===================== Options VRP Screener (v7) =====================
+-- Per-symbol per-trading-day snapshot of the target ~30 DTE / ~-0.25Δ
+-- put located on the live chain. PK (snapshot_date, symbol) makes daily
+-- re-runs idempotent. captured_at_ms retained for audit. rv_fwd_21d is
+-- NULL at capture and backfilled T+21. snapshot_quality/filter_reason
+-- annotate why a row is excluded from ranking (kept for diagnosis).
+CREATE TABLE IF NOT EXISTS contract_snapshots (
+    snapshot_date       TEXT    NOT NULL,
+    symbol              TEXT    NOT NULL,
+    captured_at_ms      INTEGER NOT NULL,
+    target_expiry       TEXT,
+    dte                 INTEGER,
+    put_strike          REAL,
+    put_delta_actual    REAL,
+    put_bid             REAL,
+    put_ask             REAL,
+    put_mid             REAL,
+    put_oi              INTEGER,
+    put_volume          INTEGER,
+    spread_pct          REAL,
+    underlying_last     REAL,
+    atm_iv_30d          REAL,
+    hv_30d              REAL,
+    ivr                 REAL,
+    ivr_low_conf        INTEGER NOT NULL DEFAULT 0,
+    next_earnings_date  TEXT,
+    days_to_earnings    INTEGER,
+    rv_fwd_21d          REAL,
+    snapshot_quality    TEXT    NOT NULL DEFAULT 'ok',
+    filter_reason       TEXT,
+    PRIMARY KEY (snapshot_date, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contract_snap_symbol
+    ON contract_snapshots (symbol, snapshot_date);
+
+-- Generic event calendar. v1 populates only event_type='earnings';
+-- confirmed=0 means an estimated date (still treated as valid — we
+-- would rather over-exclude than sell into an event).
+CREATE TABLE IF NOT EXISTS events (
+    symbol        TEXT    NOT NULL,
+    event_type    TEXT    NOT NULL,
+    event_date    TEXT    NOT NULL,
+    confirmed     INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (symbol, event_type, event_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_symbol_type
+    ON events (symbol, event_type, event_date);
+
+-- Point-in-time index membership. Dated so any historical candidate
+-- universe is reconstructable (survivorship guard). Never overwritten.
+CREATE TABLE IF NOT EXISTS index_membership (
+    as_of_date     TEXT    NOT NULL,
+    index_name     TEXT    NOT NULL,
+    symbol         TEXT    NOT NULL,
+    captured_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (as_of_date, index_name, symbol)
+);
+
+-- Daily screener output. Candidate pool = ranks 1..10. Consumed by the
+-- portfolio layer only; the screener never places an order.
+CREATE TABLE IF NOT EXISTS daily_ranking (
+    ranking_date      TEXT    NOT NULL,
+    rank              INTEGER NOT NULL,
+    symbol            TEXT    NOT NULL,
+    executable_vrp    REAL    NOT NULL,
+    premium_yield_bid REAL,
+    fair_yield        REAL,
+    ivr               REAL,
+    ivr_low_conf      INTEGER NOT NULL DEFAULT 0,
+    put_strike        REAL,
+    put_delta_actual  REAL,
+    put_bid           REAL,
+    dte               INTEGER,
+    target_expiry     TEXT,
+    spread_pct        REAL,
+    underlying_last   REAL,
+    PRIMARY KEY (ranking_date, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_ranking_date_rank
+    ON daily_ranking (ranking_date, rank);
+
+-- Paper (virtual) ledger — validation harness. Records top-10 and
+-- bottom-10 virtual 1-contract put sales daily; settled at expiry. No
+-- roll / no early close: tests raw ranking discrimination only.
+CREATE TABLE IF NOT EXISTS paper_ledger (
+    open_date     TEXT    NOT NULL,
+    symbol        TEXT    NOT NULL,
+    cohort        TEXT    NOT NULL,
+    strike        REAL    NOT NULL,
+    dte           INTEGER NOT NULL,
+    premium_bid   REAL    NOT NULL,
+    expiry        TEXT    NOT NULL,
+    settle_price  REAL,
+    pnl           REAL,
+    settled_at    INTEGER,
+    PRIMARY KEY (open_date, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_ledger_unsettled
+    ON paper_ledger (expiry) WHERE settled_at IS NULL;
 """
 
 # Allowed values for the `source` column.

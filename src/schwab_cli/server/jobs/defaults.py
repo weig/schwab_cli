@@ -15,12 +15,14 @@ from pathlib import Path
 _TIMEZONE = "America/New_York"
 
 
-def _command_config(name: str, cron: str, command: list[str]) -> dict:
+def _command_config(
+    name: str, cron: str, command: list[str], *, enabled: bool = True
+) -> dict:
     """Build a full schema_version=1 command-job config dict."""
     return {
         "schema_version": 1,
         "name": name,
-        "enabled": True,
+        "enabled": enabled,
         "cron": cron,
         "timezone": _TIMEZONE,
         "type": "command",
@@ -43,6 +45,26 @@ DEFAULT_JOB_CONFIGS: dict[str, dict] = {
         "Market Data (Indices)",
         "0 18 * * *",
         ["dataset", "update", "--indices", "--max-age-days", "6", "--skip-wait"],
+    ),
+    # Runs after market-data so vol_snapshots / OHLCV are fresh. Also records
+    # point-in-time index membership and settles/backfills the paper ledger.
+    # Off by default: a brand-new ~600-symbol daily chain fetch. Enable once
+    # the earnings feed is populated (else every name fail-closes to empty).
+    "screener": _command_config(
+        "Options VRP Screener",
+        "10 17 * * 1-5",
+        ["screener", "update"],
+        enabled=False,
+    ),
+    # Off by default: a ~600-symbol free-source sweep. Enable once the
+    # earnings feed is validated; until then the screener fail-closes names
+    # with an unknown earnings date (set thresholds.screener.require_earnings_date
+    # = false in dataset.json to see candidates before the feed is trusted).
+    "screener-earnings": _command_config(
+        "Options VRP Screener — Earnings Calendar",
+        "30 15 * * 1-5",
+        ["screener", "earnings"],
+        enabled=False,
     ),
 }
 

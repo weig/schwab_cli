@@ -509,6 +509,6 @@ def test_migration_v5_to_v6_purges_non_positive_iv(monkeypatch, tmp_path):
             "SELECT atm_iv FROM vol_snapshots WHERE symbol = 'NVDA'"
         ).fetchall()
 
-    assert version == 6
+    assert version == _SCHEMA_VERSION  # migrated up to current, past v6 purge
     assert len(rows) == 1
     assert rows[0]["atm_iv"] > 0
