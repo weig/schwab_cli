@@ -1,16 +1,16 @@
-"""Daily screener orchestration (Stages A–F in one idempotent pass).
+"""Daily screener computation — a pure READER over captured data.
+
+The dataset vol job is the sole fetcher/writer of option quotes (it persists
+the put band to ``put_chain_snapshots``). This module never touches the
+network or auth: it reads the captured band + stored vol context + earnings,
+locates each symbol's target put, applies filters, ranks by executable VRP,
+and maintains the paper ledger. Because it reads from storage, historical
+rankings are fully reproducible and nothing the screener needs is ever lost.
 
 ``run_screener_update`` is written against an injected :class:`ScreenerDeps`
-so the whole daily flow is unit-testable with fakes (no network, no clock).
-``build_live_deps`` wires the real services/storage. One pass does, in order:
-
-1. settle matured paper-ledger positions,
-2. backfill forward realized vol for snapshots whose window has elapsed,
-3. snapshot + quality-check + hard-filter every active symbol,
-4. rank survivors by executable VRP,
-5. open top/bottom virtual positions for the day.
-
-Every write is idempotent on a date-scoped key, so a same-day re-run is safe.
+so the flow is unit-testable with fakes; ``build_read_deps`` wires the real
+storage reads. One idempotent daily pass: settle → forward-RV backfill →
+snapshot+filter → rank → open top/bottom.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from schwab_cli.screener.config import ScreenerConfig
 from schwab_cli.screener.forward_rv import forward_rv
 from schwab_cli.screener.ledger import select_cohorts, settle_pnl
-from schwab_cli.screener.locate import locate_target_put, underlying_last
+from schwab_cli.screener.locate import locate_from_puts
 from schwab_cli.screener.ranking import rank_survivors
 from schwab_cli.screener.snapshot import VolContext, build_snapshot, is_survivor
 from schwab_cli.storage import screener as store
@@ -36,7 +36,7 @@ _RV_CUTOFF_DAYS = 30  # only attempt forward-RV once the ~21-trading-day window 
 @dataclass
 class ScreenerDeps:
     universe: Callable[[], list[str]]
-    fetch_chain: Callable[[str], dict]
+    put_band: Callable[[str], list[dict]]           # stored band rows for a symbol
     vol_context: Callable[[str], VolContext]
     earnings_date: Callable[[str], str | None]
     forward_closes: Callable[[str, str], list[float]]
@@ -73,17 +73,25 @@ def _backfill_rv(conn, deps: ScreenerDeps, *, snapshot_date: str) -> int:
     return n
 
 
+def _underlying_from_band(band: list[dict]) -> float | None:
+    for row in band:
+        u = row.get("underlying_last")
+        if isinstance(u, (int, float)):
+            return float(u)
+    return None
+
+
 def _snapshot_symbol(
     deps: ScreenerDeps, symbol: str, *, snapshot_date: str, now_ms: int,
     cfg: ScreenerConfig,
 ) -> ContractSnapshot:
     try:
-        raw = deps.fetch_chain(symbol)
-        tp, reason = locate_target_put(raw)
+        band = deps.put_band(symbol)
+        tp, reason = locate_from_puts(band)
         return build_snapshot(
             snapshot_date=snapshot_date, symbol=symbol, captured_at_ms=now_ms,
             tp=tp, locate_reason=reason, vol_ctx=deps.vol_context(symbol),
-            underlying_last=underlying_last(raw),
+            underlying_last=_underlying_from_band(band),
             next_earnings_date=deps.earnings_date(symbol),
             market_open=deps.market_open, cfg=cfg,
         )
@@ -146,14 +154,12 @@ def _filter_counts(snaps: list[ContractSnapshot]) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Live wiring
+# Read wiring (storage only — no network, no auth)
 # --------------------------------------------------------------------------
 
-def build_live_deps(conn, client, cfg: ScreenerConfig, *, snapshot_date: str) -> ScreenerDeps:
-    """Construct real deps from an authed client + the market_data.db conn."""
+def build_read_deps(conn, cfg: ScreenerConfig, *, snapshot_date: str) -> ScreenerDeps:
+    """Construct storage-only deps for the daily screener computation."""
     from schwab_cli.analytics.vol import realized_vol
-    from schwab_cli.api.chains import get_chain
-    from schwab_cli.dataset.store import list_active_subscriptions
     from schwab_cli.service.vol import compute_iv_rank_and_percentile
     from schwab_cli.storage import ohlcv_history
     from schwab_cli.storage.vol_history import (
@@ -164,15 +170,15 @@ def build_live_deps(conn, client, cfg: ScreenerConfig, *, snapshot_date: str) ->
     anchor = date.fromisoformat(snapshot_date)
 
     def universe() -> list[str]:
-        rows = list_active_subscriptions(conn, group_name="volatility")
-        return sorted({r["symbol"] for r in rows})
+        return store.symbols_with_put_band(conn, snapshot_date=snapshot_date)
 
-    def fetch_chain(symbol: str) -> dict:
-        return get_chain(
-            client, symbol, contract_type="PUT", strike_count=40,
-            from_date=anchor + timedelta(days=20),
-            to_date=anchor + timedelta(days=45),
-        )
+    def put_band(symbol: str) -> list[dict]:
+        return [
+            dict(r)
+            for r in store.read_put_band(
+                conn, snapshot_date=snapshot_date, symbol=symbol
+            )
+        ]
 
     def vol_context(symbol: str) -> VolContext:
         closes = [
@@ -221,7 +227,7 @@ def build_live_deps(conn, client, cfg: ScreenerConfig, *, snapshot_date: str) ->
         return rows[0]["close"] if rows else None
 
     return ScreenerDeps(
-        universe=universe, fetch_chain=fetch_chain, vol_context=vol_context,
+        universe=universe, put_band=put_band, vol_context=vol_context,
         earnings_date=earnings_date, forward_closes=forward_closes,
         settle_price=settle_price, market_open=_is_ny_weekday(snapshot_date),
     )
@@ -237,25 +243,21 @@ def ny_snapshot_date(now_ms: int) -> str:
 
 
 def run_daily(cfg: ScreenerConfig | None = None) -> dict:
-    """Entry point wired to real services (called by the CLI/job)."""
-    from schwab_cli.service.base import BaseService
+    """Entry point for the screener CLI/job — storage-only, no auth/network."""
+    from schwab_cli.screener.config import load_screener_config
+    from schwab_cli.screener.membership import record_membership_snapshot
     from schwab_cli.storage.vol_history import connect
 
-    cfg = cfg or ScreenerConfig()
+    cfg = cfg or load_screener_config()
     now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
     snapshot_date = ny_snapshot_date(now_ms)
-    svc = BaseService()
-    with svc._authed_client() as client, connect() as conn:
-        # Capture point-in-time membership before ranking (survivorship guard).
-        from schwab_cli.screener.membership import record_membership_snapshot
-
+    with connect() as conn:
         record_membership_snapshot(conn, as_of_date=snapshot_date, now_ms=now_ms)
-        deps = build_live_deps(conn, client, cfg, snapshot_date=snapshot_date)
+        deps = build_read_deps(conn, cfg, snapshot_date=snapshot_date)
         return run_screener_update(
             conn, deps, cfg, snapshot_date=snapshot_date, now_ms=now_ms
         )
 
 
-# re-exported for callers/tests that build partial snapshots
-__all__ = ["ScreenerDeps", "run_screener_update", "build_live_deps", "run_daily",
+__all__ = ["ScreenerDeps", "run_screener_update", "build_read_deps", "run_daily",
            "ny_snapshot_date", "dataclasses"]
