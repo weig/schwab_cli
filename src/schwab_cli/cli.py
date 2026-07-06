@@ -63,23 +63,25 @@ def doctor(doc: bool = doc_option()) -> None:
 
 @app.command(
     "mcp",
-    help="Bridge a stdio MCP client (e.g. Claude Desktop) to the running daemon.",
+    help="Serve MCP over stdio for a stdio-only client (e.g. Claude Desktop).",
 )
 def mcp(
     stdio: bool = typer.Option(
         False,
         "--stdio",
         help=(
-            "Run a transparent stdio↔HTTP bridge to the daemon's MCP "
-            "endpoint. Forwards frames only — starts no server, owns no "
-            "token, opens no Schwab connection."
+            "Run a full MCP server over stdio — a sibling of the daemon's "
+            "HTTP server over the shared service layer. REST tools delegate "
+            "token refresh to the daemon; local-DB tools need nothing; "
+            "stream_quote rides the daemon's shared stream. Survives daemon "
+            "restarts."
         ),
     ),
     doc: bool = doc_option(),
 ) -> None:
     if not stdio:
-        raise typer.BadParameter("pass --stdio to run the bridge")
-    mcp_cmd.run_stdio_bridge()
+        raise typer.BadParameter("pass --stdio to run the MCP server")
+    mcp_cmd.run_stdio_server()
 
 
 @app.command("auth", help="Authenticate with Schwab (refresh or full OAuth).")
