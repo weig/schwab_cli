@@ -122,6 +122,13 @@ _OPTION_RE = re.compile(
 # canonicalize to the slash form Schwab's quote/history APIs expect.
 _STOCK_RE = re.compile(r"^[A-Z]+(?:[./\-][A-Z]+)?$")
 
+# Cash-settled index underlyings — Schwab requires the ``$`` prefix on the
+# quote / chain / history endpoints (``$SPX``, ``$XSP``, ``$NDX``, ``$RUT``,
+# ``$VIX``). Empirically ``SPX`` without the ``$`` 400s. We accept and
+# PRESERVE the ``$`` (treated as a stock-type underlying so every
+# underlying-handling code path works unchanged).
+_INDEX_RE = re.compile(r"^\$[A-Z]+$")
+
 
 def resolve(raw: str) -> Ticker:
     """Parse a raw ticker string into a :class:`Ticker`."""
@@ -146,6 +153,12 @@ def resolve(raw: str) -> Ticker:
                 strike=_parse_strike(m.group("strike")),
             ),
         )
+
+    # Cash-settled index underlying (``$SPX`` / ``$XSP`` / ``$NDX`` / ``$RUT``
+    # / ``$VIX``). Pass through with the ``$`` preserved — that is exactly
+    # what Schwab's endpoints want.
+    if _INDEX_RE.match(compact):
+        return Ticker(type="stock", underlying=compact, option=None)
 
     # Not an option — must be a pure-alpha stock ticker.
     if _STOCK_RE.match(compact):
