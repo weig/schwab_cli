@@ -42,6 +42,26 @@ def test_stock_ticker_to_schwab_symbol_is_identity():
     assert resolve("NVDA").to_schwab_symbol() == "NVDA"
 
 
+@pytest.mark.parametrize("sym", ["$SPX", "$XSP", "$NDX", "$RUT", "$VIX"])
+def test_resolve_index_preserves_dollar_prefix(sym):
+    """Cash-settled index underlyings must pass through with the ``$``
+    intact — Schwab's chain/quote/history endpoints require it (``SPX``
+    without the ``$`` 400s)."""
+    t = resolve(sym)
+    assert t == Ticker(type="stock", underlying=sym, option=None)
+    assert t.to_schwab_symbol() == sym  # identity, $ preserved
+
+
+def test_resolve_index_case_insensitive():
+    assert resolve("$xsp").underlying == "$XSP"
+
+
+def test_to_schwab_form_preserves_index_dollar():
+    from schwab_cli.ticker import to_schwab_form
+    assert to_schwab_form("$SPX") == "$SPX"
+    assert to_schwab_form("$xsp") == "$XSP"
+
+
 def test_to_schwab_form_normalizes_class_shares():
     """Module-level helper used at API boundaries when the caller
     has a raw symbol string and didn't go through the Ticker
