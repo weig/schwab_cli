@@ -143,10 +143,19 @@ def pick_atm_contract(
     spot: float,
     *,
     min_liquidity: int = 100,
+    min_dte: int = 7,
 ) -> dict[str, Any] | None:
     """Pick the ATM contract for the current IV snapshot.
 
-    Walks expiries in DTE order and returns the first one where:
+    Expiries at/beyond ``min_dte`` are preferred (nearest first) so the
+    headline ATM IV isn't read off a 0-DTE contract, whose IV is dominated by
+    expiration-day gamma/pin/theta noise and swings wildly day-to-day. Only if
+    no in-window expiry qualifies do we fall back to nearer ones (closest to
+    ``min_dte`` first). The 30-day constant-maturity ``atm_iv_30d`` remains the
+    stable series for IVR; this just keeps the *displayed / stored* near-term
+    IV off the expiring contract.
+
+    Walks expiries in preference order and returns the first one where:
 
       * Total call + put volume *plus* open interest on the expiry is
         at least ``min_liquidity``. We sum volume and OI so weekend /
@@ -161,7 +170,13 @@ def pick_atm_contract(
     single-leg IV (if only one is present). Returns ``None`` if no
     expiry qualifies.
     """
-    for exp in sorted(expiries, key=lambda e: e.get("dte", 10_000)):
+    def _pref(e: dict[str, Any]) -> tuple[int, int]:
+        # (0, dte) for dte >= min_dte (nearest first); (1, -dte) below the
+        # window so 6-DTE beats 0-DTE when nothing in-window qualifies.
+        dte = int(e.get("dte") or 0)
+        return (0, dte) if dte >= min_dte else (1, -dte)
+
+    for exp in sorted(expiries, key=_pref):
         contracts = exp.get("contracts", [])
         if _expiry_liquidity(contracts) < min_liquidity:
             continue

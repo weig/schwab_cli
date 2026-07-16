@@ -39,13 +39,28 @@ Envelope shape produced by ``commands/vol.py``::
 from __future__ import annotations
 
 import json as _json
+from datetime import datetime, timezone
 from io import StringIO
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from rich.console import Console
 from rich.table import Table
 
 from schwab_cli.output.format import Format
+
+_NY = ZoneInfo("America/New_York")
+
+
+def _fmt_quote_time(quote_time_ms: Any) -> str | None:
+    """Format the quote's as-of epoch-ms as NY time, flagging off-hours so a
+    stale pre/after-hours quote is obvious. Returns None when unavailable."""
+    if not isinstance(quote_time_ms, (int, float)) or quote_time_ms <= 0:
+        return None
+    dt = datetime.fromtimestamp(quote_time_ms / 1000, tz=timezone.utc).astimezone(_NY)
+    minutes = dt.hour * 60 + dt.minute
+    off = dt.weekday() >= 5 or not (9 * 60 + 30 <= minutes <= 16 * 60)
+    return dt.strftime("%Y-%m-%d %H:%M ET") + (" · off-hours" if off else "")
 
 
 def render_vol(env: dict[str, Any], *, fmt: Format) -> str:
@@ -142,8 +157,12 @@ def _human(env: dict[str, Any]) -> str:
     buf = StringIO()
     console = Console(file=buf, force_terminal=False, width=80)
 
-    # Header
-    console.print(f"[bold]{env['symbol']}[/]  [cyan]{_money(env['spot'])}[/]")
+    # Header — symbol, spot, and the quote's as-of time (off-hours flagged).
+    header = f"[bold]{env['symbol']}[/]  [cyan]{_money(env['spot'])}[/]"
+    qt = _fmt_quote_time(env.get("quote_time"))
+    if qt:
+        header += f"  [dim]@ {qt}[/]"
+    console.print(header)
     console.print("[dim]" + "─" * 60 + "[/]")
 
     t = Table(show_header=False, box=None, padding=(0, 1), expand=False)
@@ -178,9 +197,21 @@ def _human(env: dict[str, Any]) -> str:
     t.add_row("P/C vol", _ratio(pc.get("volume_ratio")), "[dim]puts/calls, volume, all expiries[/]")
     t.add_row("P/C OI", _ratio(pc.get("oi_ratio")), "[dim]puts/calls, open interest, all expiries[/]")
 
-    ivp = env.get("ivp") or {}
-    ivp_val, ivp_note = _ivp_value_and_note(ivp)
-    t.add_row("IVP", ivp_val, f"[dim]{ivp_note}[/]")
+    # Prefer the tiered IVR/IVP off the clean constant-maturity atm_iv_30d
+    # series (with a confidence tag) over the legacy near-expiry IVP, which
+    # for 0-DTE names is expiration noise. Fall back to the legacy display
+    # only while atm_iv_30d is still too short.
+    ir = env.get("ivr_ivp") or {}
+    if ir.get("ivr") is not None:
+        conf = " · low-conf" if ir.get("low_confidence") else ""
+        note = f"{ir.get('source', '')}, {ir.get('n_days', 0)}d{conf}"
+        t.add_row("IVR", f"{ir['ivr']:.0f}%", f"[dim]{note}[/]")
+        if ir.get("ivp") is not None:
+            t.add_row("IVP", f"{ir['ivp']:.0f}%", f"[dim]{note}[/]")
+    else:
+        ivp = env.get("ivp") or {}
+        ivp_val, ivp_note = _ivp_value_and_note(ivp)
+        t.add_row("IVP", ivp_val, f"[dim]{ivp_note}[/]")
 
     console.print(t)
     return buf.getvalue().rstrip("\n") + "\n"

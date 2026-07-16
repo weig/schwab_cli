@@ -63,12 +63,39 @@ __all__ = [
 # data point, without pretending it's a real 52-week IVP.
 _IVP_MIN_SAMPLE = 90
 
+# IVR/IVP prefers the constant-maturity ``atm_iv_30d`` series (tier 1) — a
+# stable 30-day tenor — as soon as it has this many days, rather than falling
+# back to the legacy near-expiry ``atm_iv`` series (which for names with
+# daily/0-DTE expiries is dominated by expiration noise, e.g. AMZN 0.25↔0.41
+# day-to-day while the true 30d sits at ~0.43). Below the full-confidence bar
+# the result is flagged ``low_confidence`` rather than silently trusted.
+_IVR_MIN_DAYS = 40
+_IVR_FULL_CONF_DAYS = 120
+
 # Fallback risk-free rate used by the BS backfill (3-month T-bill
 # approximation). Error contribution vs the "true" daily rate is small;
 # sensitivity of short-dated IV to r is on the order of 0.1%/pct.
 _BACKFILL_RISK_FREE_RATE = 0.045
 
 _NY = ZoneInfo("America/New_York")
+
+
+def _market_open_now() -> bool:
+    """True during regular NY market hours (9:30–16:00 ET) on a weekday.
+
+    Gates ad-hoc ``get_vol`` snapshot writes: off-hours quotes are stale and
+    would pollute the shared IV series (the per-day read takes the latest row,
+    so a late ad-hoc call overrides the real value). The canonical daily
+    snapshot is the 17:00 ET market-data job — a separate writer via
+    ``record_extended_snapshot``, unaffected by this gate. Holiday-agnostic
+    (a weekday holiday still reads as "open"), which is acceptable: the goal
+    is to stop routine pre/after-hours pollution, not perfect calendar logic.
+    """
+    now = datetime.now(tz=_NY)
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 + 30 <= minutes <= 16 * 60
 
 
 class NoVolData(ServiceError):
@@ -213,6 +240,11 @@ class VolService(BaseService):
                         not no_record
                         and snapshot_contract
                         and snapshot_contract.get("iv") is not None
+                        # Incidental display calls (interactive / MCP get_vol /
+                        # analysis agents) only persist during market hours, so
+                        # off-hours stale quotes don't pollute the shared IV
+                        # series. An explicit --snapshot-only capture bypasses.
+                        and (snapshot_only or _market_open_now())
                     ):
                         vol_history.record_snapshot(
                             conn,
@@ -293,6 +325,9 @@ class VolService(BaseService):
         envelope = {
             "symbol": under,
             "spot": spot,
+            # As-of time of the live quote (epoch ms), so the reader can tell
+            # a fresh in-hours quote from a stale off-hours one at a glance.
+            "quote_time": underlying.get("quoteTime") or underlying.get("tradeTime"),
             "iv": {
                 "value": atm["iv"] if atm else None,
                 "expiry": atm["expiry"] if atm else None,
@@ -808,18 +843,20 @@ def compute_iv_rank_and_percentile(
         read_atm_iv_30d_per_day, read_recent_per_day_with_source,
     )
 
-    # TIER 1.
+    # TIER 1 — the clean constant-maturity 30d series. Preferred as soon as
+    # it has _IVR_MIN_DAYS; flagged low_confidence until _IVR_FULL_CONF_DAYS.
     if today_iv_30d is not None:
         series = read_atm_iv_30d_per_day(
             conn, symbol=symbol, lookback_days=lookback
         )
-        if len(series) >= 120:
+        if len(series) >= _IVR_MIN_DAYS:
             return {
                 "ivr":        _ivr_from(series, today_iv_30d),
                 "ivp":        _ivp_from(series, today_iv_30d),
                 "n_days":     len(series),
                 "source":     "atm_iv_30d",
                 "backfilled": False,
+                "low_confidence": len(series) < _IVR_FULL_CONF_DAYS,
             }
 
     # TIER 2 / 3.

@@ -183,7 +183,7 @@ _GOLDEN_PC_CALL_OI = 950
 _GOLDEN_PC_PUT_OI = 820
 
 # --- JSON top-level key set ---
-_GOLDEN_JSON_TOP_KEYS = {"symbol", "spot", "iv", "iv_ref", "hv", "hvp", "pc", "ivp", "ivr_ivp"}
+_GOLDEN_JSON_TOP_KEYS = {"symbol", "spot", "quote_time", "iv", "iv_ref", "hv", "hvp", "pc", "ivp", "ivr_ivp"}
 _GOLDEN_JSON_IV_KEYS = {"value", "expiry", "dte", "strike"}
 _GOLDEN_JSON_HV_KEYS = {"window", "value"}
 _GOLDEN_JSON_HVP_KEYS = {"lookback", "value", "sample_size"}
