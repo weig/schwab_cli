@@ -55,13 +55,29 @@ def test_tier1_used_when_120_days_present(conn):
 
 
 def test_tier2_used_when_atm_iv_30d_short(conn):
-    _seed_atm_iv_30d(conn, n_days=50)
+    # Below _IVR_MIN_DAYS (40) the clean 30d series is too short → fall back
+    # to the legacy series.
+    _seed_atm_iv_30d(conn, n_days=30)
     _seed_atm_iv_legacy(conn, n_days=130)
     out = compute_iv_rank_and_percentile(
         conn, symbol="NVDA", today_iv_30d=0.40,
         today_atm_iv=0.40,
     )
     assert out["source"].startswith("atm_iv (legacy")
+
+
+def test_tier1_used_at_min_days_with_low_confidence(conn):
+    # At/above _IVR_MIN_DAYS (40) but below full-confidence (120), prefer the
+    # clean atm_iv_30d series and flag it low_confidence — never the noisy
+    # near-expiry legacy series.
+    _seed_atm_iv_30d(conn, n_days=45)
+    _seed_atm_iv_legacy(conn, n_days=130)
+    out = compute_iv_rank_and_percentile(
+        conn, symbol="NVDA", today_iv_30d=0.40, today_atm_iv=0.40,
+    )
+    assert out["source"] == "atm_iv_30d"
+    assert out["low_confidence"] is True
+    assert out["ivr"] is not None
 
 
 def test_tier3_returns_low_history_when_both_short(conn):

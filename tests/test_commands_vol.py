@@ -23,6 +23,10 @@ runner = CliRunner()
 def _prep(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    # Display-call recording is gated on market hours; these tests exercise
+    # the record/backfill machinery, so assume the market is open (deterministic
+    # regardless of when the suite runs).
+    monkeypatch.setattr("schwab_cli.service.vol._market_open_now", lambda: True)
     # Keep the vol-history DB inside the test's tmp_path so tests can't
     # pollute the user's real `~/.config/schwab_cli/storage/vol_history.db`.
     monkeypatch.setenv("SCHWAB_CLI_STORAGE", str(tmp_path / "storage"))
@@ -300,6 +304,40 @@ def test_vol_snapshot_only_writes_and_is_silent(monkeypatch, tmp_path):
     assert "HV" not in result.output
     assert "─" not in result.output  # no rendered header
     # At minimum, today's observed row was written.
+    with connect() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM vol_snapshots WHERE source = 'observed'"
+        ).fetchone()[0]
+    assert n == 1
+
+
+def test_offhours_display_call_does_not_record(monkeypatch, tmp_path):
+    """A plain `vol SYMBOL` (display) off-hours must NOT persist an observed
+    snapshot — off-hours quotes are stale and would pollute the IV series."""
+    from schwab_cli.storage.vol_history import connect
+
+    _prep(monkeypatch, tmp_path)
+    monkeypatch.setattr("schwab_cli.service.vol._market_open_now", lambda: False)
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
+        result = runner.invoke(app, ["vol", "NVDA"])
+    assert result.exit_code == 0, result.output
+    with connect() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM vol_snapshots WHERE source = 'observed'"
+        ).fetchone()[0]
+    assert n == 0
+
+
+def test_offhours_snapshot_only_still_records(monkeypatch, tmp_path):
+    """--snapshot-only is a deliberate capture: it records even off-hours."""
+    from schwab_cli.storage.vol_history import connect
+
+    _prep(monkeypatch, tmp_path)
+    monkeypatch.setattr("schwab_cli.service.vol._market_open_now", lambda: False)
+    with patch("schwab_cli.api.chains.get_chain", return_value=_CHAIN_RESP), \
+         patch("schwab_cli.api.history.get_history", return_value=_history_resp(300)):
+        runner.invoke(app, ["vol", "NVDA", "--snapshot-only"])
     with connect() as conn:
         n = conn.execute(
             "SELECT COUNT(*) FROM vol_snapshots WHERE source = 'observed'"
