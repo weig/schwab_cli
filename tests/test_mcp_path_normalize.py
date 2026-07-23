@@ -78,3 +78,22 @@ def test_normalizer_does_not_mutate_caller_scope():
     TestClient(outer).post("/mcp")
     assert seen["path"] == "/mcp/"                       # inner app sees the fix
     assert scope_holder["original"]["path"] == "/mcp"    # caller's scope intact
+
+
+def test_proxy_headers_stay_disabled():
+    """Regression guard for the deploy that broke the tunnel.
+
+    Honouring X-Forwarded-For rewrites scope["client"] to the ORIGINAL caller,
+    which silently redefines `web.allow`: the allowlist names the reverse proxy
+    permitted to front us and includes loopback, so keying it on a forwarded
+    value both rejects the tunnel peer and would make the loopback entries
+    reachable from off-box. Nothing builds request-derived absolute URLs, so
+    there is no upside to trade against that.
+    """
+    import inspect
+
+    from schwab_cli.mcp_server import app as app_mod
+
+    src = inspect.getsource(app_mod.SchwabMcpServer.run_http)
+    assert "proxy_headers=True" not in src
+    assert "forwarded_allow_ips" not in src

@@ -374,7 +374,6 @@ def _run_with_mcp(
         asyncio.run(
             server.run_http(
                 mcp_host, mcp_port,
-                trusted_proxies=cfg.web_allow,
                 extra_routes=extra_routes,
                 asgi_wrap=asgi_wrap,
             )
