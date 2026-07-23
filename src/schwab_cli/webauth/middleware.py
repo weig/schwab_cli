@@ -45,6 +45,8 @@ from schwab_cli.webauth.verify import (
 
 _API_PREFIX = "/api/"
 _HEALTH_PATH = "/api/v1/health"
+_MCP_PREFIX = "/mcp"
+_PRM_PATH = "/.well-known/oauth-protected-resource"
 
 
 def _is_loopback(peer: str | None) -> bool:
@@ -77,12 +79,19 @@ class WebAuthMiddleware:
         has_providers: bool,
         allow: Iterable[str] = ("127.0.0.1", "::1"),
         peer_of: Callable[[dict], str | None] | None = None,
+        mcp_resource_url: str | None = None,
+        issuers: Iterable[str] = (),
     ) -> None:
         self._app = app
         self._verifier = verifier
         self._has_providers = has_providers
         self._allow_nets = _parse_allow(allow)
         self._peer_of = peer_of or _default_peer_of
+        # Master switch for the public /mcp surface (remote Claude
+        # connector). Unset -> /mcp stays tier-2 loopback-only and the
+        # PRM path 404s: behavior identical to pre-connector builds.
+        self._mcp_resource_url = (mcp_resource_url or "").rstrip("/") or None
+        self._issuers = tuple(issuers)
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
@@ -91,6 +100,29 @@ class WebAuthMiddleware:
 
         path = _normalized_path(scope)
         peer = self._peer_of(scope)
+
+        if self._mcp_resource_url is not None and path == _PRM_PATH:
+            # RFC 9728 Protected Resource Metadata — the connector's
+            # discovery document. Public by design (no token) but only to
+            # allowlisted peers; carries no secrets (issuer + resource).
+            if self._peer_allowed(peer):
+                await self._serve_prm(scope, receive, send)
+            else:
+                await self._deny(scope, receive, send, 404, {
+                    "error": "not found",
+                })
+            return
+
+        if (
+            self._mcp_resource_url is not None
+            and not _is_loopback(peer)
+            and (path == _MCP_PREFIX or path.startswith(_MCP_PREFIX + "/"))
+        ):
+            # Public /mcp surface: peer allowlist, then the SAME verifier
+            # the /api tier uses. Loopback callers never reach this branch
+            # and keep their unauthenticated access.
+            await self._gate_remote_mcp(scope, receive, send)
+            return
 
         if not path.startswith(_API_PREFIX):
             # Tier 2: internal control plane — loopback only. 404 (not
@@ -149,6 +181,60 @@ class WebAuthMiddleware:
             )
             return
 
+        scope.setdefault("state", {})["principal"] = principal
+        await self._app(scope, receive, send)
+
+    async def _serve_prm(self, scope, receive, send) -> None:
+        from starlette.responses import JSONResponse
+
+        response = JSONResponse({
+            "resource": self._mcp_resource_url,
+            "authorization_servers": list(self._issuers),
+            "bearer_methods_supported": ["header"],
+        })
+        await response(scope, receive, send)
+
+    def _www_authenticate(self, error: str | None = None) -> str:
+        parts = ['Bearer realm="schwab-mcp"']
+        if error:
+            parts.append(f'error="{error}"')
+        parts.append(
+            f'resource_metadata="{self._mcp_resource_url}{_PRM_PATH}"'
+        )
+        return ", ".join(parts)
+
+    async def _gate_remote_mcp(self, scope, receive, send) -> None:
+        peer = self._peer_of(scope)
+        if not self._peer_allowed(peer):
+            await self._deny(scope, receive, send, 404, {
+                "error": "not found",
+            })
+            return
+        if not self._has_providers:
+            await self._deny(scope, receive, send, 503, {
+                "error": "webauth providers not configured",
+            })
+            return
+        token = _bearer_token(scope)
+        if token is None:
+            await self._deny(
+                scope, receive, send, 401,
+                {"error": "missing bearer token"},
+                www_authenticate=self._www_authenticate(),
+            )
+            return
+        try:
+            principal = await asyncio.to_thread(self._verifier.verify, token)
+        except SubjectNotAllowed as e:
+            await self._deny(scope, receive, send, 403, {"error": str(e)})
+            return
+        except WebAuthError as e:
+            await self._deny(
+                scope, receive, send, 401,
+                {"error": str(e)},
+                www_authenticate=self._www_authenticate("invalid_token"),
+            )
+            return
         scope.setdefault("state", {})["principal"] = principal
         await self._app(scope, receive, send)
 

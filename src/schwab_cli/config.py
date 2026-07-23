@@ -55,6 +55,11 @@ class Config:
     # DIRECT peer addresses may reach /api/* — i.e. which reverse proxy
     # may front the resource server. Loopback is always implied.
     web_allow: tuple[str, ...] = ("127.0.0.1", "::1")
+    # Public resource URL of the daemon when fronted by a tunnel (e.g.
+    # "https://schwab.example.com"). Master switch for the remote /mcp
+    # surface + OAuth Protected Resource Metadata; None (default) keeps
+    # /mcp loopback-only exactly as before.
+    web_resource_url: str | None = None
     version: int = 1
 
     def to_payload(self) -> dict:
@@ -74,8 +79,11 @@ class Config:
         if self.auto_login_command is not None:
             payload["auto_login_command"] = list(self.auto_login_command)
             payload["auto_login_timeout_seconds"] = self.auto_login_timeout_seconds
-        if self.web_allow != ("127.0.0.1", "::1"):
-            payload["web"] = {"allow": list(self.web_allow)}
+        if self.web_allow != ("127.0.0.1", "::1") or self.web_resource_url:
+            web: dict = {"allow": list(self.web_allow)}
+            if self.web_resource_url:
+                web["resource_url"] = self.web_resource_url
+            payload["web"] = web
         return payload
 
 
@@ -139,8 +147,23 @@ def load() -> Config | None:
         auto_login_command=auto_login_command,
         auto_login_timeout_seconds=auto_login_timeout_seconds,
         web_allow=_parse_web_allow(raw.get("web"), path),
+        web_resource_url=_parse_web_resource_url(raw.get("web"), path),
         version=version,
     )
+
+
+def _parse_web_resource_url(raw: object, path: Path) -> str | None:
+    """Optional ``web.resource_url`` — must be an https:// URL when set."""
+    if raw is None or not isinstance(raw, dict):
+        return None
+    url = raw.get("resource_url")
+    if url is None:
+        return None
+    if not isinstance(url, str) or not url.startswith("https://"):
+        raise ConfigError(
+            f"web.resource_url in {path} must be an https:// URL"
+        )
+    return url.rstrip("/")
 
 
 def _parse_web_allow(raw: object, path: Path) -> tuple[str, ...]:

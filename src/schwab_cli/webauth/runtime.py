@@ -19,6 +19,7 @@ from schwab_cli.webauth.verify import TokenVerifier
 def build_gate(
     *,
     allow: Iterable[str],
+    resource_url: str | None = None,
     warn: Callable[[str], None] | None = None,
 ) -> tuple[Callable[[object], object], LoadedProviders]:
     """Load providers and return ``(wrap_asgi, loaded)``.
@@ -34,12 +35,16 @@ def build_gate(
     verifier = TokenVerifier(loaded.providers) if loaded.providers else None
     allow_tuple = tuple(allow)
 
+    issuers = tuple(p.issuer for p in loaded.providers)
+
     def wrap(app):
         return WebAuthMiddleware(
             app,
             verifier=verifier,
             has_providers=bool(loaded.providers),
             allow=allow_tuple,
+            mcp_resource_url=resource_url,
+            issuers=issuers,
         )
 
     return wrap, loaded
