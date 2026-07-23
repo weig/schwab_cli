@@ -49,6 +49,7 @@ except (ImportError, AttributeError):
 
 _EXPECTED_STEMS = {
     "market-data", "accounts", "indices", "screener", "screener-earnings",
+    "backup", "backup-weekly",
 }
 
 # The original dataset jobs carry invariants (--skip-wait, enabled) the
@@ -64,6 +65,8 @@ _EXPECTED_CRONS = {
     "indices":           "0 18 * * *",
     "screener":          "10 17 * * 1-5",
     "screener-earnings": "30 15 * * 1-5",
+    "backup":            "30 18 * * 1-5",
+    "backup-weekly":     "0 20 * * 6",
 }
 
 

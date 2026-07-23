@@ -56,6 +56,18 @@ DEFAULT_JOB_CONFIGS: dict[str, dict] = {
         ["screener", "update"],
         enabled=False,
     ),
+    # Encrypted incremental backup to R2 after the market-data job settles;
+    # Saturday evening runs the weekly full (migration days auto-promote).
+    "backup": _command_config(
+        "Backup (R2, differential)",
+        "30 18 * * 1-5",
+        ["backup", "run"],
+    ),
+    "backup-weekly": _command_config(
+        "Backup (R2, weekly full)",
+        "0 20 * * 6",
+        ["backup", "run", "--full"],
+    ),
     # Off by default: a ~600-symbol free-source sweep. Enable once the
     # earnings feed is validated; until then the screener fail-closes names
     # with an unknown earnings date (set thresholds.screener.require_earnings_date
