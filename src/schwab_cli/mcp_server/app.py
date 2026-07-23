@@ -95,6 +95,30 @@ def _as_jsonable(obj: Any) -> Any:
     return obj
 
 
+def _normalize_mcp_path(app):
+    """Serve ``/mcp`` without an HTTP redirect.
+
+    Starlette redirects ``/mcp`` to the mount root ``/mcp/`` with a 307
+    carrying an ABSOLUTE Location built from the origin's own scheme/host.
+    Behind a tunnel that becomes ``http://<internal>/mcp/`` — cross-scheme,
+    unreachable, and clients routinely drop the Authorization header when
+    following it, so a remote MCP client fails right after authenticating.
+    Rewriting the path in the ASGI scope keeps the mount happy with no
+    redirect at all, for every client regardless of trailing slash.
+    """
+
+    async def wrapper(scope, receive, send):
+        if scope.get("type") in ("http", "websocket") and \
+                scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            if scope.get("raw_path"):
+                scope["raw_path"] = scope["raw_path"] + b"/"
+        await app(scope, receive, send)
+
+    return wrapper
+
+
 class SchwabMcpServer:
     """MCP server object. One instance per daemon process."""
 
@@ -1000,7 +1024,8 @@ class SchwabMcpServer:
                 await close()
 
     async def run_http(
-        self, host: str, port: int, *, extra_routes=None, asgi_wrap=None
+        self, host: str, port: int, *, extra_routes=None, asgi_wrap=None,
+        trusted_proxies=None,
     ) -> None:
         """Drive the server over Streamable HTTP + HTTP admin endpoints
         on ``host:port`` until a shutdown is signalled.
@@ -1115,18 +1140,25 @@ class SchwabMcpServer:
         ]
         if extra_routes:
             routes.extend(extra_routes)
-        app = Starlette(routes=routes, lifespan=_lifespan)
+        app = _normalize_mcp_path(Starlette(routes=routes, lifespan=_lifespan))
         # The webauth gate (peer allowlist + JWT on /api, loopback-only
         # for everything else) wraps the WHOLE app so a wide bind can
         # never expose the internal control plane.
         served_app = asgi_wrap(app) if asgi_wrap is not None else app
 
+        forwarded_from = tuple(trusted_proxies or ("127.0.0.1",))
         self._logbook.info(
             "server.start", transport="http", bind=f"{host}:{port}",
         )
         cfg = uvicorn.Config(
             served_app, host=host, port=port, log_level="warning",
             loop="asyncio",
+            # Behind a tunnel the origin speaks plain HTTP; without this any
+            # absolute URL the app builds (redirects, metadata) would come out
+            # as http://<internal-ip>. Only peers we already trust for the
+            # public surface may set the forwarded headers.
+            proxy_headers=True,
+            forwarded_allow_ips=",".join(forwarded_from),
         )
         uvi = uvicorn.Server(cfg)
 

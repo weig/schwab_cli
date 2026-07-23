@@ -114,7 +114,10 @@ def _patch_happy_path(monkeypatch, tmp_path):
         def schedule_session_replaced(self, fresh):
             rec["handoffs"].append(fresh)
 
-        async def run_http(self, host, port, *, extra_routes=None, asgi_wrap=None):
+        async def run_http(self, host, port, *, extra_routes=None,
+                           asgi_wrap=None, trusted_proxies=None):
+            rec.setdefault("run_http_trusted_proxies", []).append(
+                trusted_proxies)
             rec["run_http_args"].append((host, port))
             rec.setdefault("run_http_extra_routes", []).append(extra_routes)
             rec.setdefault("run_http_asgi_wrap", []).append(asgi_wrap)
@@ -262,7 +265,7 @@ class TestEnableMcpFalse:
             def __init__(self, *a, **k):
                 pass
 
-            async def run_http(self, host, port):
+            async def run_http(self, host, port, **kw):
                 run_http_calls.append((host, port))
 
         monkeypatch.setattr(
@@ -418,6 +421,16 @@ class TestEnableMcpWithRest:
         server_cmd.run(enable_mcp=True, enable_rest=False, interval_s=60)
         (wrap,) = rec["run_http_asgi_wrap"]
         assert callable(wrap)
+
+    def test_trusted_proxies_come_from_web_allow(self, monkeypatch, tmp_path):
+        """uvicorn may only honour X-Forwarded-* from peers already trusted
+        for the public surface — never from an arbitrary origin."""
+        rec = _patch_happy_path(monkeypatch, tmp_path)
+        server_cmd.run(enable_mcp=True, enable_rest=False, interval_s=60)
+        (proxies,) = rec["run_http_trusted_proxies"]
+        from schwab_cli.config import load as load_cfg
+
+        assert tuple(proxies) == tuple(load_cfg().web_allow)
 
 
 # ---------------------------------------------------------------------------
