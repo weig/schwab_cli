@@ -81,6 +81,7 @@ class WebAuthMiddleware:
         peer_of: Callable[[dict], str | None] | None = None,
         mcp_resource_url: str | None = None,
         issuers: Iterable[str] = (),
+        log: Callable[..., None] | None = None,
     ) -> None:
         self._app = app
         self._verifier = verifier
@@ -92,6 +93,11 @@ class WebAuthMiddleware:
         # PRM path 404s: behavior identical to pre-connector builds.
         self._mcp_resource_url = (mcp_resource_url or "").rstrip("/") or None
         self._issuers = tuple(issuers)
+        # Remote traffic is invisible otherwise: uvicorn runs at warning level
+        # and every gate decision below is a silent 401/403/404. Without this
+        # there is no way to tell "the client never reached us" apart from
+        # "we rejected it" when debugging a connector handshake.
+        self._log = log
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
@@ -101,13 +107,18 @@ class WebAuthMiddleware:
         path = _normalized_path(scope)
         peer = self._peer_of(scope)
 
-        if self._mcp_resource_url is not None and path == _PRM_PATH:
+        if self._mcp_resource_url is not None and (
+            path == _PRM_PATH or path.startswith(_PRM_PATH + "/")
+        ):
             # RFC 9728 Protected Resource Metadata — the connector's
             # discovery document. Public by design (no token) but only to
             # allowlisted peers; carries no secrets (issuer + resource).
             if self._peer_allowed(peer):
+                self._audit("webauth.prm_served", peer=peer, path=path)
                 await self._serve_prm(scope, receive, send)
             else:
+                self._audit("webauth.deny", peer=peer, path=path, status=404,
+                            reason="peer not allowed (prm)")
                 await self._deny(scope, receive, send, 404, {
                     "error": "not found",
                 })
@@ -130,6 +141,8 @@ class WebAuthMiddleware:
             if _is_loopback(peer):
                 await self._app(scope, receive, send)
             else:
+                self._audit("webauth.deny", peer=peer, path=path, status=404,
+                            reason="internal path, non-loopback peer")
                 await self._deny(scope, receive, send, 404, {
                     "error": "not found",
                 })
@@ -184,6 +197,13 @@ class WebAuthMiddleware:
         scope.setdefault("state", {})["principal"] = principal
         await self._app(scope, receive, send)
 
+    def _audit(self, event: str, **fields) -> None:
+        if self._log is not None:
+            try:
+                self._log(event, **fields)
+            except Exception:  # noqa: BLE001 — logging must never break a request
+                pass
+
     async def _serve_prm(self, scope, receive, send) -> None:
         from starlette.responses import JSONResponse
 
@@ -205,18 +225,25 @@ class WebAuthMiddleware:
 
     async def _gate_remote_mcp(self, scope, receive, send) -> None:
         peer = self._peer_of(scope)
+        path = _normalized_path(scope)
         if not self._peer_allowed(peer):
+            self._audit("webauth.deny", peer=peer, path=path, status=404,
+                        reason="peer not allowed (mcp)")
             await self._deny(scope, receive, send, 404, {
                 "error": "not found",
             })
             return
         if not self._has_providers:
+            self._audit("webauth.deny", peer=peer, path=path, status=503,
+                        reason="no providers configured")
             await self._deny(scope, receive, send, 503, {
                 "error": "webauth providers not configured",
             })
             return
         token = _bearer_token(scope)
         if token is None:
+            self._audit("webauth.deny", peer=peer, path=path, status=401,
+                        reason="missing bearer token")
             await self._deny(
                 scope, receive, send, 401,
                 {"error": "missing bearer token"},
@@ -226,15 +253,23 @@ class WebAuthMiddleware:
         try:
             principal = await asyncio.to_thread(self._verifier.verify, token)
         except SubjectNotAllowed as e:
+            # The single most useful debugging line: the token was valid but
+            # its subject is not on the allowlist — shows the exact sub to add.
+            self._audit("webauth.deny", peer=peer, path=path, status=403,
+                        reason=f"subject not allowed: {e}")
             await self._deny(scope, receive, send, 403, {"error": str(e)})
             return
         except WebAuthError as e:
+            self._audit("webauth.deny", peer=peer, path=path, status=401,
+                        reason=f"invalid token: {e}")
             await self._deny(
                 scope, receive, send, 401,
                 {"error": str(e)},
                 www_authenticate=self._www_authenticate("invalid_token"),
             )
             return
+        self._audit("webauth.allow", peer=peer, path=path,
+                    subject=principal.subject, provider=principal.provider)
         scope.setdefault("state", {})["principal"] = principal
         await self._app(scope, receive, send)
 

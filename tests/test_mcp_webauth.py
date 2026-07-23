@@ -183,3 +183,83 @@ def test_config_resource_url_must_be_https(tmp_path, monkeypatch):
     }))
     with _pytest.raises(ConfigError):
         load()
+
+
+# ---- observability: every remote gate decision is logged ------------------
+
+class _Sink:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def __call__(self, event: str, **fields) -> None:
+        self.events.append((event, fields))
+
+
+def _app_logged(sink, **kw) -> TestClient:
+    inner = Starlette(routes=[Route("/mcp", _mcp, methods=["GET", "POST"]),
+                             Route("/admin/status", _mcp)])
+    wrapped = WebAuthMiddleware(
+        inner,
+        verifier=kw.pop("verifier", None) or _FakeVerifier(_principal()),
+        has_providers=kw.pop("has_providers", True),
+        allow=("127.0.0.1", "::1", "192.168.2.1"),
+        peer_of=lambda scope: kw.pop("peer", "192.168.2.1"),
+        mcp_resource_url=RESOURCE,
+        issuers=("https://weig-home.us.auth0.com/",),
+        log=sink,
+    )
+    return TestClient(wrapped, raise_server_exceptions=True)
+
+
+def test_logs_missing_token_denial():
+    sink = _Sink()
+    _app_logged(sink).post("/mcp")
+    assert sink.events[-1][0] == "webauth.deny"
+    assert sink.events[-1][1]["status"] == 401
+    assert "missing bearer" in sink.events[-1][1]["reason"]
+
+
+def test_logs_subject_not_allowed_with_reason():
+    sink = _Sink()
+    _app_logged(sink, verifier=_FakeVerifier(SubjectNotAllowed("auth0|other"))
+                ).post("/mcp", headers=_AUTH)
+    ev, fields = sink.events[-1]
+    assert ev == "webauth.deny" and fields["status"] == 403
+    assert "auth0|other" in fields["reason"]   # names the sub to allowlist
+
+
+def test_logs_success_with_subject_and_never_the_token():
+    sink = _Sink()
+    _app_logged(sink).post("/mcp", headers=_AUTH)
+    ev, fields = sink.events[-1]
+    assert ev == "webauth.allow" and fields["subject"] == "auth0|me"
+    assert not any("x.y.z" in str(v) for _, f in sink.events for v in f.values())
+
+
+def test_logs_prm_fetch():
+    sink = _Sink()
+    _app_logged(sink).get(PRM_PATH)
+    assert sink.events[-1][0] == "webauth.prm_served"
+
+
+def test_logging_failure_never_breaks_a_request():
+    def boom(*a, **k):
+        raise RuntimeError("sink down")
+
+    inner = Starlette(routes=[Route("/mcp", _mcp, methods=["POST"])])
+    wrapped = WebAuthMiddleware(
+        inner, verifier=_FakeVerifier(_principal()), has_providers=True,
+        allow=("192.168.2.1",), peer_of=lambda s: "192.168.2.1",
+        mcp_resource_url=RESOURCE, issuers=("https://x/",), log=boom)
+    assert TestClient(wrapped).post("/mcp", headers=_AUTH).status_code == 200
+
+
+# ---- RFC 9728 path-inserted PRM location ---------------------------------
+
+def test_prm_served_at_path_inserted_location():
+    """Resource identifiers with a path (…/mcp) put the metadata at
+    /.well-known/oauth-protected-resource/mcp (RFC 9728 §3.1)."""
+    c = _app(peer="192.168.2.1")
+    r = c.get(PRM_PATH + "/mcp")
+    assert r.status_code == 200
+    assert r.json()["resource"] == RESOURCE

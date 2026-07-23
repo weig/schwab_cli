@@ -21,6 +21,7 @@ def build_gate(
     allow: Iterable[str],
     resource_url: str | None = None,
     warn: Callable[[str], None] | None = None,
+    log: Callable[..., None] | None = None,
 ) -> tuple[Callable[[object], object], LoadedProviders]:
     """Load providers and return ``(wrap_asgi, loaded)``.
 
@@ -45,6 +46,7 @@ def build_gate(
             allow=allow_tuple,
             mcp_resource_url=resource_url,
             issuers=issuers,
+            log=log,
         )
 
     return wrap, loaded
