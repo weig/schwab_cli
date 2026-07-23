@@ -183,6 +183,51 @@ def latest_put_band_date(conn: sqlite3.Connection) -> str | None:
     return row["d"] if row and row["d"] else None
 
 
+def record_chain_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_date: str,
+    symbol: str,
+    contracts: list[dict],
+    underlying_last: float | None,
+    now_ms: int,
+) -> None:
+    """Persist a day's FULL chain for a focus symbol (both sides, all fetched
+    expiries). INSERT OR REPLACE per (date, symbol, expiry, strike, side) so
+    an intraday re-capture refreshes quotes idempotently."""
+    rows = [
+        (
+            snapshot_date, symbol, c.get("expiry"), c.get("dte"),
+            c.get("strike"), c.get("side"), c.get("bid"), c.get("ask"),
+            c.get("last"), c.get("iv"), c.get("delta"), c.get("gamma"),
+            c.get("theta"), c.get("vega"), c.get("open_interest"),
+            c.get("volume"), underlying_last, now_ms,
+        )
+        for c in contracts
+        if c.get("expiry") is not None and c.get("strike") is not None
+        and c.get("side") in ("C", "P")
+    ]
+    conn.executemany(
+        "INSERT OR REPLACE INTO option_chain_snapshots "
+        "(snapshot_date, symbol, expiry, dte, strike, side, bid, ask, last, "
+        " iv, delta, gamma, theta, vega, open_interest, volume, "
+        " underlying_last, captured_at_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+
+
+def read_chain_snapshot(
+    conn: sqlite3.Connection, *, snapshot_date: str, symbol: str
+) -> list[sqlite3.Row]:
+    """Stored full chain for one focus symbol/day (GEX/skew/term research)."""
+    return conn.execute(
+        "SELECT * FROM option_chain_snapshots "
+        "WHERE snapshot_date = ? AND symbol = ? ORDER BY expiry, strike, side",
+        (snapshot_date, symbol),
+    ).fetchall()
+
+
 # --------------------------------------------------------------------------
 # events (earnings calendar)
 # --------------------------------------------------------------------------

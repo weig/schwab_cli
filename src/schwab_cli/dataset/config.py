@@ -45,6 +45,14 @@ DEFAULT_CONFIG: dict = {
             "frozen_demote_after_calendar_days": 90,
         },
     },
+    # Focus-tier symbols whose FULL option chain is persisted daily (both
+    # sides, all fetched expiries) — the underliers option strategies trade
+    # directly. Everything else keeps the lighter put-band capture.
+    "focus_chain": [
+        "SPY", "QQQ", "DIA", "IWM",
+        "$SPX", "$XSP", "$NDX", "$RUT",
+        "TSLA", "NVDA", "AAPL", "MSFT", "AMZN", "GOOG", "META",
+    ],
     "indices_provider": {
         "primary":  "stockanalysis",
         "fallback": "ssga",
