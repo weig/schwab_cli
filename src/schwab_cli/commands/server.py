@@ -367,7 +367,8 @@ def _run_with_mcp(
             typer.secho(f"server: {msg}", fg=typer.colors.YELLOW, err=True)
 
         asgi_wrap, _webauth_loaded = build_gate(
-            allow=cfg.web_allow, warn=_webauth_warn,
+            allow=cfg.web_allow, resource_url=cfg.web_resource_url,
+            warn=_webauth_warn,
         )
 
         asyncio.run(
@@ -521,7 +522,8 @@ def _run_with_rest(
                 typer.secho(f"server: {msg}", fg=typer.colors.YELLOW, err=True)
 
             asgi_wrap, _loaded = build_gate(
-                allow=cfg.web_allow, warn=_webauth_warn,
+                allow=cfg.web_allow, resource_url=cfg.web_resource_url,
+                warn=_webauth_warn,
             )
             app = Starlette(
                 routes=list(rest_routes()) + list(api_routes())
