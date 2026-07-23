@@ -368,7 +368,7 @@ def _run_with_mcp(
 
         asgi_wrap, _webauth_loaded = build_gate(
             allow=cfg.web_allow, resource_url=cfg.web_resource_url,
-            warn=_webauth_warn,
+            warn=_webauth_warn, log=logbook.info,
         )
 
         asyncio.run(
@@ -523,7 +523,7 @@ def _run_with_rest(
 
             asgi_wrap, _loaded = build_gate(
                 allow=cfg.web_allow, resource_url=cfg.web_resource_url,
-                warn=_webauth_warn,
+                warn=_webauth_warn, log=logbook.info,
             )
             app = Starlette(
                 routes=list(rest_routes()) + list(api_routes())
