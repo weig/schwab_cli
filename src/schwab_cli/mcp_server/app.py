@@ -1024,8 +1024,7 @@ class SchwabMcpServer:
                 await close()
 
     async def run_http(
-        self, host: str, port: int, *, extra_routes=None, asgi_wrap=None,
-        trusted_proxies=None,
+        self, host: str, port: int, *, extra_routes=None, asgi_wrap=None
     ) -> None:
         """Drive the server over Streamable HTTP + HTTP admin endpoints
         on ``host:port`` until a shutdown is signalled.
@@ -1146,19 +1145,21 @@ class SchwabMcpServer:
         # never expose the internal control plane.
         served_app = asgi_wrap(app) if asgi_wrap is not None else app
 
-        forwarded_from = tuple(trusted_proxies or ("127.0.0.1",))
         self._logbook.info(
             "server.start", transport="http", bind=f"{host}:{port}",
         )
+        # NOTE: uvicorn's proxy_headers stays OFF on purpose. Honouring
+        # X-Forwarded-For rewrites scope["client"] to the ORIGINAL caller,
+        # which silently redefines what `web.allow` means: the allowlist
+        # names the reverse proxy permitted to front us (and includes
+        # loopback), so keying it on a forwarded value both breaks the
+        # tunnel peer check and makes the loopback entries reachable from
+        # off-box. Nothing here builds request-derived absolute URLs — the
+        # PRM/WWW-Authenticate values come from config — so there is no
+        # benefit to trade against that risk.
         cfg = uvicorn.Config(
             served_app, host=host, port=port, log_level="warning",
             loop="asyncio",
-            # Behind a tunnel the origin speaks plain HTTP; without this any
-            # absolute URL the app builds (redirects, metadata) would come out
-            # as http://<internal-ip>. Only peers we already trust for the
-            # public surface may set the forwarded headers.
-            proxy_headers=True,
-            forwarded_allow_ips=",".join(forwarded_from),
         )
         uvi = uvicorn.Server(cfg)
 
