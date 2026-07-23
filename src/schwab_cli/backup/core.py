@@ -17,7 +17,7 @@ RETENTION_DAYS = 28
 # watermark. Everything else (rows updated in place: rv_fwd_21d backfill,
 # ledger settlement, tier state, subscriptions...) is exported complete.
 APPEND_TABLES = ["vol_snapshots", "put_chain_snapshots", "ohlcv_daily",
-                 "account_nav_daily"]
+                 "account_nav_daily", "option_chain_snapshots"]
 MUTABLE_TABLES = ["contract_snapshots", "events", "index_membership",
                   "daily_ranking", "paper_ledger", "subscriptions",
                   "index_subscriptions", "ticker_state"]

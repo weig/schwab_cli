@@ -358,6 +358,13 @@ def run_volatility_update(
     errors: list[dict[str, str]] = []
     total = len(symbols)
     archive_date = now_dt.astimezone(_NY).date().isoformat()
+    # Focus-tier symbols get their FULL chain persisted (zero extra fetches —
+    # reuses the chain pulled below). Config-driven; empty set disables.
+    try:
+        _focus = {str(x).upper() for x in
+                  (load_config_or_default().get("focus_chain") or [])}
+    except Exception:  # noqa: BLE001 — capture must never block sampling
+        _focus = set()
 
     # Pre-pass: which symbols already have a live ('observed') row for
     # today's NY day with a FULL daily snapshot already recorded. Lets us
@@ -537,6 +544,21 @@ def run_volatility_update(
                 )
             except Exception as e:  # noqa: BLE001
                 errors.append({"symbol": sym, "error": f"put-band capture: {e}"})
+
+        # Step 4c — focus tier: persist the FULL chain (both sides, every
+        # fetched expiry) for GEX / skew / term-structure research.
+        if sym.upper() in _focus and (
+            "putExpDateMap" in raw or "callExpDateMap" in raw
+        ):
+            try:
+                from schwab_cli.screener.capture import capture_full_chain
+
+                capture_full_chain(
+                    conn, snapshot_date=archive_date, symbol=sym,
+                    raw=raw, now_ms=now_ms,
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append({"symbol": sym, "error": f"full-chain capture: {e}"})
 
         # Step 5 — tier re-evaluation (volatility group only).
         sources = sources_for_symbol(

@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -249,6 +249,37 @@ CREATE TABLE IF NOT EXISTS put_chain_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_put_band_lookup
     ON put_chain_snapshots (snapshot_date, symbol);
+
+-- ===================== Focus-tier full chain (v9) =====================
+-- Full option chain (both sides, every fetched expiry/strike incl. greeks,
+-- OI, volume) for the ~15-25 focus symbols the option strategies actually
+-- trade (indexes/ETFs/large single names). Written by the dataset vol job
+-- from the chain it already fetches — zero extra API calls. Enables GEX /
+-- skew / term-structure research from real history; append-only.
+CREATE TABLE IF NOT EXISTS option_chain_snapshots (
+    snapshot_date   TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    expiry          TEXT    NOT NULL,
+    dte             INTEGER NOT NULL,
+    strike          REAL    NOT NULL,
+    side            TEXT    NOT NULL,
+    bid             REAL,
+    ask             REAL,
+    last            REAL,
+    iv              REAL,
+    delta           REAL,
+    gamma           REAL,
+    theta           REAL,
+    vega            REAL,
+    open_interest   INTEGER,
+    volume          INTEGER,
+    underlying_last REAL,
+    captured_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (snapshot_date, symbol, expiry, strike, side)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chain_snap_lookup
+    ON option_chain_snapshots (symbol, snapshot_date);
 """
 
 # Allowed values for the `source` column.

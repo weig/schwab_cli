@@ -42,7 +42,7 @@ def test_stock_ticker_to_schwab_symbol_is_identity():
     assert resolve("NVDA").to_schwab_symbol() == "NVDA"
 
 
-@pytest.mark.parametrize("sym", ["$SPX", "$XSP", "$NDX", "$RUT", "$VIX"])
+@pytest.mark.parametrize("sym", ["$SPX", "$XSP", "$NDX", "$RUT", "$VIX", "$VIX3M"])
 def test_resolve_index_preserves_dollar_prefix(sym):
     """Cash-settled index underlyings must pass through with the ``$``
     intact — Schwab's chain/quote/history endpoints require it (``SPX``

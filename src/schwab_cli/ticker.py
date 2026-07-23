@@ -127,7 +127,7 @@ _STOCK_RE = re.compile(r"^[A-Z]+(?:[./\-][A-Z]+)?$")
 # ``$VIX``). Empirically ``SPX`` without the ``$`` 400s. We accept and
 # PRESERVE the ``$`` (treated as a stock-type underlying so every
 # underlying-handling code path works unchanged).
-_INDEX_RE = re.compile(r"^\$[A-Z]+$")
+_INDEX_RE = re.compile(r"^\$[A-Z][A-Z0-9]*$")
 
 
 def resolve(raw: str) -> Ticker:
