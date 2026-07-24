@@ -186,3 +186,39 @@ def test_restore_refuses_unknown_day(env):
     with pytest.raises(SystemExit):
         run_restore(env["remote"], day="20260101",
                     dest=env["cdir"] / "x", passfile=env["passfile"])
+
+
+# ---- aws resolution (launchd minimal-PATH regression) ---------------------
+
+def test_resolve_aws_prefers_explicit_override():
+    from schwab_cli.backup.remote import _resolve_aws
+    assert _resolve_aws("/custom/aws") == "/custom/aws"
+
+
+def test_resolve_aws_falls_back_to_known_location(monkeypatch):
+    """Under launchd the PATH excludes Homebrew, so shutil.which returns None;
+    we must still find aws at a well-known absolute path rather than shelling
+    out a bare 'aws' (which raised FileNotFoundError in the failed job)."""
+    import schwab_cli.backup.remote as rem
+
+    monkeypatch.setattr(rem.shutil, "which", lambda _: None)
+    monkeypatch.setattr(rem.Path, "exists",
+                        lambda self: str(self) == "/opt/homebrew/bin/aws")
+    assert rem._resolve_aws() == "/opt/homebrew/bin/aws"
+
+
+def test_resolve_aws_uses_path_when_available(monkeypatch):
+    import schwab_cli.backup.remote as rem
+    monkeypatch.setattr(rem.shutil, "which", lambda _: "/usr/local/bin/aws")
+    assert rem._resolve_aws() == "/usr/local/bin/aws"
+
+
+def test_r2remote_resolves_absolute_aws(tmp_path, monkeypatch):
+    """R2Remote must hold an absolute aws path, never the bare name."""
+    import schwab_cli.backup.remote as rem
+
+    env = tmp_path / "r2.env"
+    env.write_text("R2_BUCKET=b\nR2_ENDPOINT=https://x\n")
+    monkeypatch.setattr(rem.shutil, "which", lambda _: "/usr/local/bin/aws")
+    r = rem.R2Remote(env)
+    assert r.aws == "/usr/local/bin/aws"

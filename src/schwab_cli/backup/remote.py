@@ -40,6 +40,26 @@ class LocalDirRemote:
             p.unlink()
 
 
+def _resolve_aws(override: str | None = None) -> str:
+    """Absolute path to the aws CLI.
+
+    The daemon runs under launchd with a minimal PATH that excludes Homebrew,
+    so a bare ``"aws"`` raises FileNotFoundError there even though it resolves
+    in an interactive shell. Resolve an absolute path up front: an explicit
+    R2_AWS_BIN wins, else PATH, else the common install locations.
+    """
+    if override:
+        return override
+    found = shutil.which("aws")
+    if found:
+        return found
+    for cand in ("/opt/homebrew/bin/aws", "/usr/local/bin/aws",
+                 "/usr/bin/aws"):
+        if Path(cand).exists():
+            return cand
+    return "aws"  # last resort — will raise a clear FileNotFoundError
+
+
 class R2Remote:
     """Cloudflare R2 through the aws CLI (S3-compatible endpoint).
 
@@ -57,9 +77,10 @@ class R2Remote:
                 self.env[k] = v
         self.bucket = self.env["R2_BUCKET"]
         self.endpoint = self.env["R2_ENDPOINT"]
+        self.aws = _resolve_aws(self.env.get("R2_AWS_BIN"))
 
     def _aws(self, *args: str) -> subprocess.CompletedProcess:
-        cmd = ["aws", *args, "--endpoint-url", self.endpoint]
+        cmd = [self.aws, *args, "--endpoint-url", self.endpoint]
         r = subprocess.run(cmd, env=self.env, capture_output=True, text=True,
                            timeout=300)
         if r.returncode != 0:
