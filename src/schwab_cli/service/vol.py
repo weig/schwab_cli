@@ -850,14 +850,17 @@ def compute_iv_rank_and_percentile(
             conn, symbol=symbol, lookback_days=lookback
         )
         if len(series) >= _IVR_MIN_DAYS:
-            return {
+            result = {
                 "ivr":        _ivr_from(series, today_iv_30d),
                 "ivp":        _ivp_from(series, today_iv_30d),
                 "n_days":     len(series),
                 "source":     "atm_iv_30d",
                 "backfilled": False,
                 "low_confidence": len(series) < _IVR_FULL_CONF_DAYS,
+                "low_sample": len(series) < lookback // 2,
             }
+            result.update(ivr_ivp_quality(series, today_iv_30d))
+            return result
 
     # TIER 2 / 3.
     legacy = read_recent_per_day_with_source(
@@ -867,14 +870,17 @@ def compute_iv_rank_and_percentile(
     legacy_ivs = [iv for iv, _ in legacy]
 
     if today_atm_iv is not None and len(legacy_ivs) >= 120:
-        return {
+        result = {
             "ivr":        _ivr_from(legacy_ivs, today_atm_iv),
             "ivp":        _ivp_from(legacy_ivs, today_atm_iv),
             "n_days":     len(legacy_ivs),
             "source":     "atm_iv (legacy + synthetic)" if backfilled
                           else "atm_iv (legacy)",
             "backfilled": backfilled,
+            "low_sample": len(legacy_ivs) < lookback // 2,
         }
+        result.update(ivr_ivp_quality(legacy_ivs, today_atm_iv))
+        return result
 
     if backfill_callable is not None:
         backfill_callable()
@@ -901,13 +907,76 @@ def compute_iv_rank_and_percentile(
     }
 
 
+# |raw_IVR - IVP| beyond this flags a data-quality problem. The GOOG incident
+# diverged by 20.6 (IVR 0.26 vs IVP 20.9); a clean equity IV series diverges
+# only a few points (distribution-shape difference between a linear-position
+# and a rank statistic). 15 sits above normal skew and below the incident, so
+# it catches contamination without false-positiving on skewed-but-clean data.
+# (The task's suggested 25 would NOT have caught the 20.6 incident.)
+_IVR_DIVERGENCE_THRESHOLD = 15.0
+
+
+def _quantile(sorted_vals: list[float], q: float) -> float:
+    """Linear-interpolated quantile ``q`` in [0,1] of an already-sorted list."""
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = q * (len(sorted_vals) - 1)
+    lo_i = int(pos)
+    frac = pos - lo_i
+    if lo_i + 1 >= len(sorted_vals):
+        return sorted_vals[-1]
+    return sorted_vals[lo_i] + frac * (sorted_vals[lo_i + 1] - sorted_vals[lo_i])
+
+
 def _ivr_from(series: list[float], today: float) -> float:
-    lo, hi = min(series), max(series)
+    """Winsorized IV Rank: bounds are the p1/p99 of the series, not the raw
+    min/max, so a single outlier can't collapse the denominator (the GOOG
+    incident drove a plain IVR from 14.7 to 0.26). Result is clamped to
+    [0, 100] since ``today`` may fall outside the winsorized band.
+    """
+    if not series:
+        return 50.0
+    s = sorted(series)
+    lo, hi = _quantile(s, 0.01), _quantile(s, 0.99)
     if hi <= lo:
         return 50.0
-    return 100.0 * (today - lo) / (hi - lo)
+    return max(0.0, min(100.0, 100.0 * (today - lo) / (hi - lo)))
 
 
 def _ivp_from(series: list[float], today: float) -> float:
     from schwab_cli.analytics.vol import percentile_rank
     return percentile_rank(series, today)
+
+
+def _ivr_raw(series: list[float], today: float) -> float:
+    """Non-winsorized IVR — deliberately outlier-sensitive. Only used by the
+    anomaly detector below; the reported IVR is the winsorized _ivr_from."""
+    lo, hi = min(series), max(series)
+    if hi <= lo:
+        return 50.0
+    return max(0.0, min(100.0, 100.0 * (today - lo) / (hi - lo)))
+
+
+def ivr_ivp_quality(series: list[float], today: float) -> dict:
+    """IVR/IVP divergence check as a data-quality signal.
+
+    Compares the RAW (outlier-sensitive) IVR against the rank-based IVP: a
+    single contaminated sample collapses the raw IVR while barely moving the
+    IVP, so a large gap flags contamination. (The reported IVR is winsorized
+    and would hide this — hence raw here.) On a trip, surface the samples
+    furthest from the median as the likely culprits.
+    """
+    if not series:
+        return {"data_quality_warning": False, "suspect_samples": []}
+    ivr_raw = _ivr_raw(series, today)
+    ivp = _ivp_from(series, today)
+    if abs(ivr_raw - ivp) <= _IVR_DIVERGENCE_THRESHOLD:
+        return {"data_quality_warning": False, "suspect_samples": []}
+    s = sorted(series)
+    median = _quantile(s, 0.5)
+    ranked = sorted(series, key=lambda v: abs(v - median), reverse=True)
+    suspects = [{"value": v} for v in ranked[:3]]
+    return {"data_quality_warning": True, "suspect_samples": suspects,
+            "ivr_raw": ivr_raw, "ivp": ivp}
