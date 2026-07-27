@@ -10,6 +10,7 @@ output and the next run can retry.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,24 @@ from schwab_cli.storage.vol_history import record_extended_snapshot
 
 
 _log = logging.getLogger(__name__)
+
+
+def _append_iv_drift(spot, expiries, symbol, now_ms) -> None:
+    """Append BUG-2 drift-telemetry records to a plain JSONL under the config
+    dir. Deliberately not a DB table — this is a temporary observation stream
+    to be analysed (and deleted) after the one-week decision gate."""
+    from schwab_cli.analytics.iv_drift import sample_iv_drift
+    from schwab_cli.analytics.vol import _RISK_FREE_RATE_FALLBACK
+    from schwab_cli.config import config_path
+
+    recs = sample_iv_drift(expiries, spot=spot, r=_RISK_FREE_RATE_FALLBACK,
+                           now_ms=now_ms, symbol=symbol)
+    if not recs:
+        return
+    path = config_path().parent / "iv_drift.jsonl"
+    with open(path, "a") as f:
+        for rec in recs:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
 
 
 # ---- indices weekly cron ----------------------------------------------
@@ -579,6 +598,16 @@ def run_volatility_update(
                 )
             except Exception as e:  # noqa: BLE001
                 errors.append({"symbol": sym, "error": f"full-chain capture: {e}"})
+
+        # Step 4d — broker-IV drift telemetry (BUG-2, signal-only). Reuses the
+        # already-flattened chain; appends layered records to a JSONL for a
+        # later data-driven decision. Never touches the stored pipeline; a
+        # failure must not fail the sample.
+        try:
+            _append_iv_drift(bundle["spot"], chain.get("expiries") or [],
+                             sym, now_ms)
+        except Exception as e:  # noqa: BLE001
+            errors.append({"symbol": sym, "error": f"iv-drift telemetry: {e}"})
 
         # Step 5 — tier re-evaluation (volatility group only).
         sources = sources_for_symbol(
