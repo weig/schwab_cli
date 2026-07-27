@@ -32,6 +32,7 @@ from schwab_cli.dataset.store import (
     sources_for_symbol,
     last_close_at_for_symbol,
 )
+from schwab_cli.analytics.trading_calendar import is_trading_day
 from schwab_cli.dataset.volatility import sample_volatility
 from schwab_cli.storage import ohlcv_history
 from schwab_cli.storage.groups import GROUP_OHLCV, GROUP_VOLATILITY
@@ -302,6 +303,7 @@ def run_volatility_update(
     now_ms: int,
     accounts: list[str],
     progress: Callable[[dict], None] | None = None,
+    require_trading_day: bool = True,
 ) -> dict[str, Any]:
     """Daily volatility cron.
 
@@ -319,6 +321,23 @@ def run_volatility_update(
     the CLI to print live progress; tests pass ``None``.
     """
     cfg = load_config_or_default()
+
+    # Step 0 — trading-day gate. A weekend/holiday run pulls a stale or empty
+    # chain (the GOOG 2026-05-17 Sunday incident); skip entirely rather than
+    # write null / sentinel-derived rows. Deliberate backfills pass
+    # require_trading_day=False.
+    ny_day = (
+        datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        .astimezone(_NY).date()
+    )
+    if require_trading_day and not is_trading_day(ny_day):
+        if progress is not None:
+            progress({"event": "skipped_non_trading_day",
+                      "archive_date": ny_day.isoformat()})
+        return {
+            "sampled": [], "skipped": [], "transitions": [], "errors": [],
+            "positions": {}, "skipped_non_trading_day": ny_day.isoformat(),
+        }
 
     # Step 1 — reconcile account positions.
     pos_summary: dict[str, dict] = {}
@@ -484,7 +503,8 @@ def run_volatility_update(
                 start=hist_start_ny, end=hist_end_ny,
             )
             closes = [r["close"] for r in rows if r["close"] is not None]
-            bundle = sample_volatility(chain=chain, underlying_closes=closes)
+            bundle = sample_volatility(chain=chain, underlying_closes=closes,
+                                       symbol=sym)
         except Exception as e:
             errors.append({"symbol": sym, "error": str(e)})
             _emit(event="errored", index=i, total=total, symbol=sym,

@@ -204,6 +204,36 @@ def pick_atm_contract(
     return None
 
 
+# ---- contract validity -----------------------------------------------
+
+
+def is_valid_contract(c: dict) -> bool:
+    """Reject Schwab's empty-quote sentinels before a contract feeds any
+    IV computation.
+
+    Schwab returns ``iv = -999.0`` (stored as ``-9.99``) and ``delta =
+    -999`` on strikes with no live market, and ``bid``/``ask`` of ``0``.
+    The IV sentinel is the dangerous one: :func:`interp_iv_in_variance`
+    squares IV, so ``-9.99`` becomes a huge POSITIVE variance that then
+    passes every downstream ``iv > 0`` check (this is the GOOG 2026-05-17
+    ``atm_iv_30d = 8.43`` incident). A usable ``iv`` is required (missing
+    or non-positive → invalid); ``delta`` and ``bid``/``ask`` are checked
+    only when present, since curve/skew inputs legitimately omit quotes.
+    """
+    iv = c.get("iv")
+    if iv is None or iv <= 0:
+        return False
+    delta = c.get("delta")
+    if delta is not None and delta <= -999:
+        return False
+    bid, ask = c.get("bid"), c.get("ask")
+    if bid is not None and bid <= 0:
+        return False
+    if ask is not None and ask <= 0:
+        return False
+    return True
+
+
 # ---- ATM curve builder ------------------------------------------------
 
 
@@ -236,7 +266,10 @@ def pick_atm_curve(
         if not by_strike:
             continue
         atm = min(by_strike.keys(), key=lambda s: abs(s - spot))
-        ivs = [c["iv"] for c in by_strike[atm] if c.get("iv") is not None]
+        # Only sane IVs: is_valid_contract rejects the -9.99 sentinel, which
+        # would otherwise be SQUARED into a huge variance downstream.
+        ivs = [c["iv"] for c in by_strike[atm]
+               if c.get("iv") is not None and is_valid_contract(c)]
         if not ivs:
             continue
         out.append((int(exp.get("dte") or 0), sum(ivs) / len(ivs)))

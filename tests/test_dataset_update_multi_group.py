@@ -142,3 +142,50 @@ def test_both_groups_writes_snapshot_and_caches_with_single_history_call(
     with vol_history.connect() as conn:
         assert _vol_snapshot_count(conn, "NVDA") == 1
         assert ohlcv_history.last_cached_day(conn, symbol="NVDA") is not None
+
+
+def test_non_trading_day_skips_all_writes(monkeypatch, tmp_path):
+    """INC-1 gate: a weekend/holiday run must sample nothing and write no
+    rows, rather than persist stale/sentinel-derived data."""
+    db = tmp_path / "market_data.db"
+    monkeypatch.setattr(vol_history, "db_path", lambda: db)
+    with vol_history.connect() as conn:
+        _subscribe(conn, "TSLA", GROUP_VOLATILITY)
+        conn.commit()
+
+    # 1779000000000 ms = 2026-05-17 (Sunday ET) — the incident day.
+    sunday_ms = 1_779_000_000_000
+    with patch("schwab_cli.dataset.update.get_chain",
+               side_effect=_fake_chain) as mock_chain, \
+         patch("schwab_cli.dataset.update.get_history",
+               side_effect=_fake_history) as mock_hist, \
+         vol_history.connect() as conn:
+        summary = run_volatility_update(
+            conn, client=MagicMock(), now_ms=sunday_ms, accounts=[],
+        )
+
+    mock_chain.assert_not_called()
+    mock_hist.assert_not_called()
+    assert summary["skipped_non_trading_day"] == "2026-05-17"
+    with vol_history.connect() as conn:
+        assert _vol_snapshot_count(conn, "TSLA") == 0
+
+
+def test_non_trading_day_override_still_runs(monkeypatch, tmp_path):
+    """A deliberate backfill can bypass the gate with require_trading_day."""
+    db = tmp_path / "market_data.db"
+    monkeypatch.setattr(vol_history, "db_path", lambda: db)
+    with vol_history.connect() as conn:
+        _subscribe(conn, "TSLA", GROUP_VOLATILITY)
+        conn.commit()
+
+    with patch("schwab_cli.dataset.update.get_chain",
+               side_effect=_fake_chain), \
+         patch("schwab_cli.dataset.update.get_history",
+               side_effect=_fake_history), \
+         vol_history.connect() as conn:
+        summary = run_volatility_update(
+            conn, client=MagicMock(), now_ms=1_779_000_000_000, accounts=[],
+            require_trading_day=False,
+        )
+    assert "skipped_non_trading_day" not in summary

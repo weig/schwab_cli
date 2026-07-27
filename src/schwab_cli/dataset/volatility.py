@@ -8,6 +8,7 @@ hand to :func:`storage.vol_history.record_extended_snapshot`.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from schwab_cli.analytics.vol import (
@@ -19,14 +20,36 @@ from schwab_cli.analytics.vol import (
     realized_vol,
 )
 
+logger = logging.getLogger(__name__)
 
 _TARGET_TENORS = (30, 60, 90)
+
+# Belt-and-suspenders bound on interpolated ATM IV. The upstream sentinel
+# filter (is_valid_contract) is the real fix; this rejects anything still
+# physically impossible for a listed equity/index (5%–300% annualised) so a
+# future interpolation bug can never persist another 843% row. Variance-space
+# squaring amplifies a leaked sentinel ~1000x, so any escapee lands far
+# outside this band and is caught here.
+_SANE_IV_LO, _SANE_IV_HI = 0.05, 3.0
+
+
+def _sane_iv(value: float | None, *, symbol: str, tenor: int) -> float | None:
+    if value is None:
+        return None
+    if not (_SANE_IV_LO <= value <= _SANE_IV_HI):
+        logger.warning(
+            "atm_iv_%dd out of range for %s: %.6f (rejected → null)",
+            tenor, symbol, value,
+        )
+        return None
+    return value
 
 
 def sample_volatility(
     *,
     chain: dict,
     underlying_closes: list[float],
+    symbol: str = "?",
 ) -> dict[str, Any]:
     """Compute the per-symbol per-day metric bundle.
 
@@ -61,9 +84,12 @@ def sample_volatility(
         "atm_strike":        atm["strike"] if atm else None,
         "atm_expiry":        atm["expiry"] if atm else None,
         "atm_dte":           atm["dte"] if atm else None,
-        "atm_iv_30d":        interp_iv_in_variance(curve, 30),
-        "atm_iv_60d":        interp_iv_in_variance(curve, 60),
-        "atm_iv_90d":        interp_iv_in_variance(curve, 90),
+        "atm_iv_30d":        _sane_iv(interp_iv_in_variance(curve, 30),
+                                      symbol=symbol, tenor=30),
+        "atm_iv_60d":        _sane_iv(interp_iv_in_variance(curve, 60),
+                                      symbol=symbol, tenor=60),
+        "atm_iv_90d":        _sane_iv(interp_iv_in_variance(curve, 90),
+                                      symbol=symbol, tenor=90),
     }
 
     # 25Δ wings — picked at the closest-DTE expiry per tenor.
