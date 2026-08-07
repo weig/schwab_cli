@@ -29,7 +29,7 @@ from schwab_cli.storage import storage_dir
 # Schema version bumps when the on-disk layout changes. _migrate() is
 # responsible for stepping v(N) databases up to the current version
 # via additive-only DDL (ALTER TABLE) so we never lose captured data.
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -280,6 +280,21 @@ CREATE TABLE IF NOT EXISTS option_chain_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_chain_snap_lookup
     ON option_chain_snapshots (symbol, snapshot_date);
+
+-- ===================== Ticker identity guard (v10) =====================
+-- One row per tracked symbol anchoring it to a CUSIP (stable per security).
+-- On each ingest we compare the current CUSIP: unchanged → append; changed
+-- but same issuer → corporate action (update + re-fetch); changed to a
+-- different issuer → ticker REUSE by another company → quarantine so we never
+-- silently merge two firms' history under one ticker.
+CREATE TABLE IF NOT EXISTS underlying_identity (
+    symbol        TEXT    NOT NULL PRIMARY KEY,
+    cusip         TEXT,
+    description   TEXT,
+    first_seen_ms INTEGER NOT NULL,
+    last_seen_ms  INTEGER NOT NULL,
+    quarantined   INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # Allowed values for the `source` column.
