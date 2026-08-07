@@ -189,3 +189,38 @@ def test_non_trading_day_override_still_runs(monkeypatch, tmp_path):
             require_trading_day=False,
         )
     assert "skipped_non_trading_day" not in summary
+
+
+def test_ticker_reuse_is_quarantined_and_skipped(monkeypatch, tmp_path):
+    """A symbol whose CUSIP flips to a different issuer must be quarantined and
+    skipped — no cross-company vol snapshot written."""
+    from schwab_cli.storage import identity
+    db = tmp_path / "market_data.db"
+    monkeypatch.setattr(vol_history, "db_path", lambda: db)
+    with vol_history.connect() as conn:
+        _subscribe(conn, "FIG", GROUP_VOLATILITY)
+        # Prior identity: the OLD delisted company.
+        identity.check_and_record_identity(
+            conn, symbol="FIG", cusip="11111A100",
+            description="OLD DELISTED CO", now_ms=1_600_000_000_000)
+        conn.commit()
+
+    # Today the ticker belongs to a DIFFERENT company (Figma).
+    def _quotes(client, syms, **kw):
+        return {"FIG": {"reference": {"cusip": "99999Z900",
+                                      "description": "FIGMA INC"}}}
+
+    with patch("schwab_cli.dataset.update.get_chain", side_effect=_fake_chain), \
+         patch("schwab_cli.dataset.update.get_history", side_effect=_fake_history), \
+         patch("schwab_cli.api.quotes.get_quotes", side_effect=_quotes), \
+         vol_history.connect() as conn:
+        summary = run_volatility_update(
+            conn, client=MagicMock(), now_ms=1_700_000_000_000, accounts=[])
+
+    with vol_history.connect() as conn:
+        assert identity.is_quarantined(conn, "FIG")
+        assert _vol_snapshot_count(conn, "FIG") == 0        # no cross-company row
+    assert "FIG" not in summary["sampled"]
+    # old company's CUSIP preserved, not overwritten
+    with vol_history.connect() as conn:
+        assert identity.read_identity(conn, "FIG")["cusip"] == "11111A100"

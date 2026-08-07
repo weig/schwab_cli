@@ -93,3 +93,54 @@ def test_second_run_skips_history_fetch_when_cache_fresh(monkeypatch, tmp_path):
         )
 
     mock_hist.assert_not_called()
+
+
+def test_split_triggers_full_refetch_and_heals_cache(monkeypatch, tmp_path):
+    """A cached pre-split series glued to a fresh adjusted fetch would leave a
+    spurious 1-day return (the CRWD 399% HV bug). The overlap check must detect
+    the adjustment and re-fetch the whole window so the series is continuous."""
+    from schwab_cli.dataset.update import _ensure_ohlcv_cached
+    db = tmp_path / "market_data.db"
+    monkeypatch.setattr(vol_history, "db_path", lambda: db)
+
+    now_ms = 1_700_000_000_000
+    today = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)\
+                    .astimezone(_NY).date()
+    # Seed cache: last 20 days at PRE-split price 400, missing the last 2 days.
+    with vol_history.connect() as conn:
+        cached = [
+            {"day": (today - timedelta(days=i)).isoformat(),
+             "open": 400.0, "high": 400.0, "low": 400.0, "close": 400.0,
+             "volume": 1000, "captured_at_ms": now_ms - i * 86_400_000}
+            for i in range(2, 22)
+        ]
+        ohlcv_history.upsert_candles(conn, symbol="ZZZ", candles=cached)
+        conn.commit()
+
+    # Fresh fetch returns split-ADJUSTED 100 (4:1) for EVERY day in range.
+    def _adjusted_history(client, symbol, *, start, end, **kw):
+        days = (end.date() - start.date()).days + 1
+        return {"candles": [
+            {"datetime": int(datetime(start.year, start.month, start.day,
+                                      tzinfo=timezone.utc).timestamp() * 1000)
+                         + d * 86_400_000,
+             "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0,
+             "volume": 1000}
+            for d in range(days)]}
+
+    with patch("schwab_cli.dataset.update.get_history",
+               side_effect=_adjusted_history) as mock_hist, \
+         vol_history.connect() as conn:
+        _ensure_ohlcv_cached(conn, client=MagicMock(), symbol="ZZZ",
+                             start=today - timedelta(days=110), end=today)
+        conn.commit()
+
+    # After healing, NO row should still carry the stale 400 price.
+    with vol_history.connect() as conn:
+        rows = ohlcv_history.read_range(
+            conn, symbol="ZZZ",
+            start=today - timedelta(days=25), end=today)
+        closes = {r["close"] for r in rows}
+    assert closes == {100.0}          # all adjusted, no 400 left
+    # Two fetches happened: the overlap probe + the full heal re-fetch.
+    assert mock_hist.call_count == 2

@@ -33,6 +33,7 @@ from schwab_cli.dataset.store import (
     sources_for_symbol,
     last_close_at_for_symbol,
 )
+from schwab_cli.analytics.corporate_actions import detect_adjustment_ratio
 from schwab_cli.analytics.trading_calendar import is_trading_day
 from schwab_cli.dataset.volatility import sample_volatility
 from schwab_cli.storage import ohlcv_history
@@ -254,6 +255,7 @@ _NY = ZoneInfo("America/New_York")
 
 # How far back to fetch price history for HV computation.
 _HISTORY_LOOKBACK_DAYS = 110  # ~90 trading days + buffer
+_SPLIT_OVERLAP_DAYS = 7      # days to overlap into cache for split detection
 
 # Commit every N successful samples so a mid-run crash doesn't lose
 # the rows we already wrote. 50 ≈ a few minutes of work at typical
@@ -283,15 +285,66 @@ def _ensure_ohlcv_cached(
     if g is None:
         return
     fetch_start, fetch_end = g
+    # Fetch a few days INTO already-cached territory so we can spot a split /
+    # adjustment: Schwab returns split-adjusted history, but our cache is
+    # incremental, so old rows keep pre-split values next to new adjusted ones
+    # (this made CRWD's HV30 read 399%). A consistent non-unit fresh/cached
+    # ratio over the overlap => re-fetch the whole HV window to heal it.
+    overlap_start = max(start, fetch_start - timedelta(days=_SPLIT_OVERLAP_DAYS))
+    cached_overlap = {
+        r["day"]: r["close"] for r in ohlcv_history.read_range(
+            conn, symbol=symbol, start=overlap_start, end=fetch_start)
+        if r["close"] is not None
+    }
+    fresh = _fetch_daily_candles(client, symbol, overlap_start, fetch_end)
+    if cached_overlap:
+        ratio = detect_adjustment_ratio(
+            cached_overlap, {d: c["close"] for d, c in fresh.items()})
+        if ratio is not None:
+            full = _fetch_daily_candles(client, symbol, start, end)
+            ohlcv_history.upsert_candles(
+                conn, symbol=symbol, candles=list(full.values()))
+            _log.warning(
+                "ohlcv adjustment for %s (fresh/cached=%.4f) — full re-fetch",
+                symbol, ratio)
+            return
+    ohlcv_history.upsert_candles(
+        conn, symbol=symbol, candles=list(fresh.values()))
+
+
+def _fetch_identity_map(client, symbols: list[str]) -> dict[str, tuple]:
+    """Batch-fetch ``symbol -> (cusip, description)`` for the reuse guard.
+
+    Best-effort: any error yields an empty map (the guard then never
+    quarantines). Chunked to stay under Schwab's per-request symbol cap.
+    Indices ($-prefixed) have no CUSIP and are skipped.
+    """
+    from schwab_cli.api.quotes import get_quotes
+
+    out: dict[str, tuple] = {}
+    eligible = [s for s in symbols if not s.startswith("$")]
+    for i in range(0, len(eligible), 250):
+        chunk = eligible[i:i + 250]
+        try:
+            resp = get_quotes(client, chunk)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("identity map fetch failed for a chunk: %s", e)
+            continue
+        for sym, blob in (resp or {}).items():
+            ref = (blob or {}).get("reference") or {}
+            out[sym] = (ref.get("cusip"), ref.get("description"))
+    return out
+
+
+def _fetch_daily_candles(client, symbol, start, end) -> dict[str, dict]:
+    """Fetch daily candles over ``[start, end]`` as a ``day -> candle`` map."""
     hist = get_history(
-        client, symbol,
-        frequency_type="daily", frequency=1,
-        start=datetime(fetch_start.year, fetch_start.month, fetch_start.day,
-                       tzinfo=timezone.utc),
-        end=datetime(fetch_end.year, fetch_end.month, fetch_end.day,
+        client, symbol, frequency_type="daily", frequency=1,
+        start=datetime(start.year, start.month, start.day, tzinfo=timezone.utc),
+        end=datetime(end.year, end.month, end.day,
                      tzinfo=timezone.utc) + timedelta(days=1),
     )
-    candles = []
+    out: dict[str, dict] = {}
     for c in (hist.get("candles") or []):
         dt_ms = c.get("datetime")
         if dt_ms is None:
@@ -299,7 +352,7 @@ def _ensure_ohlcv_cached(
         day = (datetime.fromtimestamp(int(dt_ms) / 1000, tz=timezone.utc)
                        .astimezone(_NY).date().isoformat())
         try:
-            candles.append({
+            out[day] = {
                 "day": day,
                 "open":  float(c["open"]),
                 "high":  float(c["high"]),
@@ -307,11 +360,10 @@ def _ensure_ohlcv_cached(
                 "close": float(c["close"]),
                 "volume": int(c.get("volume") or 0),
                 "captured_at_ms": int(dt_ms),
-            })
+            }
         except (KeyError, TypeError, ValueError):
-            # Skip malformed rows rather than failing the whole symbol.
             continue
-    ohlcv_history.upsert_candles(conn, symbol=symbol, candles=candles)
+    return out
 
 
 def run_volatility_update(
@@ -429,8 +481,32 @@ def run_volatility_update(
         now_dt - timedelta(days=_HISTORY_LOOKBACK_DAYS)
     ).astimezone(_NY).date()
 
+    # CUSIP identity map for the reuse guard (best-effort; a fetch failure
+    # leaves it empty → guard treats identity as unknown and never quarantines).
+    identity_map = _fetch_identity_map(client, symbols)
+
     for i, sym in enumerate(symbols, start=1):
         groups = sym_to_groups[sym]
+
+        # -------- Ticker-identity guard ---------------------------
+        # Catch a delisted ticker reused by a DIFFERENT company before we
+        # merge two firms' history under one symbol. On reuse: quarantine and
+        # skip the symbol entirely this run.
+        cusip, desc = identity_map.get(sym, (None, None))
+        try:
+            from schwab_cli.storage import identity as _identity
+            verdict = _identity.check_and_record_identity(
+                conn, symbol=sym, cusip=cusip, description=desc, now_ms=now_ms)
+            if verdict == "reuse":
+                errors.append({"symbol": sym,
+                               "error": "ticker reuse (different CUSIP/issuer) "
+                                        "— quarantined, skipped"})
+                _emit(event="skipped", index=i, total=total, symbol=sym,
+                      reason="ticker-reuse quarantine", archive_date=archive_date)
+                _log.warning("ticker reuse quarantine: %s (cusip=%s)", sym, cusip)
+                continue
+        except Exception as e:  # noqa: BLE001 — guard must never fail the run
+            errors.append({"symbol": sym, "error": f"identity guard: {e}"})
 
         # -------- OHLCV branch ------------------------------------
         # Independent of vol tier — even FROZEN / WATCH-non-Monday vol
