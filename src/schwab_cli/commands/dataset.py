@@ -542,11 +542,22 @@ def _print_volatility_progress(evt: dict) -> None:
     "updating" line is the natural progress signal); failures emit
     a follow-up red line.
     """
+    e = evt.get("event", "")
+    # Whole-run events (the trading-day gate's holiday/weekend skip) carry no
+    # index/total/symbol — handle them before touching those keys so a missing
+    # field can never KeyError the whole job (Labor Day 2026-09-07 crash).
+    if e == "skipped_non_trading_day":
+        typer.secho(
+            f"skipped: {evt.get('archive_date', '')} is not a trading day",
+            fg=typer.colors.YELLOW,
+        )
+        return
+    if "total" not in evt or "index" not in evt or "symbol" not in evt:
+        return  # unknown/partial event — never fatal
     width = len(str(evt["total"]))
     head = f"[{evt['index']:>{width}}/{evt['total']}]"
     sym = evt["symbol"]
     date = evt.get("archive_date", "")
-    e = evt["event"]
     if e == "start":
         typer.echo(f"updating {head} {sym} volatility for {date}")
     elif e == "skipped":
