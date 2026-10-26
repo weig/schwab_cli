@@ -295,7 +295,9 @@ class AutoLoginSupervisor:
         # verbose per-step trace into the always-on ``--log`` file (the
         # daemon itself has no DEBUG, so its own logs stay quiet). This is
         # what lets us see *where* an unattended login stalls.
-        env = {**os.environ, "DEBUG": "1"}
+        # WEBAUTO_BROWSER pins SeleniumBase: webauto defaults to Playwright,
+        # but Schwab's login needs the UC driver to get past its bot checks.
+        env = {**os.environ, "DEBUG": "1", "WEBAUTO_BROWSER": "seleniumbase"}
         # Give webauto a writable CWD — it (SeleniumBase UC driver) creates
         # ``downloaded_files`` relative to the working directory, which the
         # daemon's inherited launchd CWD ``/`` cannot satisfy.
