@@ -437,6 +437,33 @@ def test_supervisor_forces_debug_in_child_env(tmp_path, monkeypatch):
     assert sidecar.read_text() == "1"
 
 
+def test_supervisor_forces_seleniumbase_backend_in_child_env(tmp_path, monkeypatch):
+    # webauto defaults to Playwright; Schwab's login needs SeleniumBase's UC
+    # mode, so the supervisor pins the backend even if the parent says otherwise.
+    monkeypatch.setenv("WEBAUTO_BROWSER", "playwright")
+    sidecar = tmp_path / "browser.txt"
+    fixture = _write_fixture_script(
+        tmp_path,
+        f'import os, time; '
+        f'open({str(sidecar)!r}, "w").write(os.environ.get("WEBAUTO_BROWSER", "")); '
+        f'time.sleep(0.2)\n',
+    )
+    sup = AutoLoginSupervisor(
+        [sys.executable, str(fixture)],
+        auth_url="https://schwab/auth",
+        state="S",
+        stderr_log_dir=tmp_path / "logs",
+        timeout_seconds=10.0,
+    )
+    sup.start()
+    for _ in range(30):
+        if sidecar.exists():
+            break
+        time.sleep(0.05)
+    sup.terminate()
+    assert sidecar.read_text() == "seleniumbase"
+
+
 def test_supervisor_terminate_is_idempotent(tmp_path):
     fixture = _write_fixture_script(tmp_path, 'import time; time.sleep(0.1)\n')
     sup = AutoLoginSupervisor(
